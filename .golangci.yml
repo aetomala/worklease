@@ -1,0 +1,20 @@
+version: "2"
+linters:
+  default: none
+  enable:
+    - revive
+    - godot
+  settings:
+    revive:
+      enable-all-rules: false
+      rules:
+        - name: exported
+          severity: warning
+    godot:
+      scope: declarations
+      period: true
+      capital: true
+  exclusions:
+    rules:
+      - linters: [revive]
+        text: "dot-imports|package-comments|unused-parameter|redefines-builtin-id"
