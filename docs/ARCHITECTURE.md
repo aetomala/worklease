@@ -8,6 +8,7 @@ library does and why it is built the way it is.
 
 - [Overview](#overview)
 - [The Problem in Depth](#the-problem-in-depth)
+- [What worklease Does Not Solve](#what-worklease-does-not-solve)
 - [Core Concepts](#core-concepts)
 - [Design Principles](#design-principles)
 - [Project Structure](#project-structure)
@@ -36,8 +37,8 @@ that comes immediately after ownership changes: *what does the new owner need to
 work the previous owner started?*
 
 `worklease` fills that gap. It provides checkpointed lease handoff with fencing — the pattern
-that makes it possible for a new worker to resume where the previous worker left off, safely,
-without duplicate writes and without starting from scratch.
+that makes it possible for a new worker to resume where the previous worker left off, with the
+last known checkpoint intact and zombie writes rejected.
 
 ### Prior Art
 
@@ -63,7 +64,8 @@ checkpoints progress at each step. Now it crashes.
 Without `worklease`:
 
 - Worker B acquires the lease. It has no idea what Worker A completed. It starts from
-  the beginning. If the operation is not idempotent, you now have duplicate writes.
+  the beginning. If the operation is not idempotent, you now have duplicate writes to the
+  checkpoint store.
 - If Worker A was slow (not dead) and its lease simply expired, it may still be writing.
   Worker B's writes and Worker A's writes interleave. State is corrupted.
 
@@ -71,13 +73,106 @@ With `worklease`:
 
 - Worker A writes progress state atomically with every lease renewal. The last checkpoint
   is guaranteed to be written before any renewal succeeds.
-- Worker B acquires the lease, reads the checkpoint, and resumes from exactly where Worker A
-  left off. It also knows whether Worker A called `Release` explicitly (clean handoff) or
+- Worker B acquires the lease, reads the checkpoint, and resumes from the last known safe
+  state. It also knows whether Worker A called `Release` explicitly (clean handoff) or
   whether the lease simply expired (crash recovery). These are different situations requiring
   different handling.
-- If Worker A is a zombie (slow, not dead), its next write attempt will be rejected — Worker B
-  was issued a higher fencing token, and Worker A's writes with a stale token are silently
-  rejected by the backend.
+- If Worker A is a zombie (slow, not dead), its next write to the lease store will be
+  rejected — Worker B was issued a higher fencing token, and Worker A's writes with a stale
+  token fail with `ErrFenced`.
+
+### When worklease is the right fit
+
+`worklease` is designed for a specific shape of work: stateful, multi-step operations where
+restarting from scratch is expensive or incorrect, and where the team is not willing to adopt
+a full workflow engine.
+
+- Go workers with PostgreSQL already in the stack
+- Multi-step jobs with meaningful intermediate state (provider onboarding, async lifecycle
+  management, batch processing with partial results)
+- Teams who have outgrown "just use a lock" but do not want to rewrite their workers as
+  Temporal Workflows or adopt a managed platform
+
+If your jobs are small enough to restart cheaply, idempotency and a job queue are the right
+tools. If your work is complex enough to need replay semantics and activity scheduling,
+Temporal is the right tool. `worklease` is the primitive for the space in between.
+
+### worklease vs job queues
+
+A natural comparison is to job queues — River, Asynq, `FOR UPDATE SKIP LOCKED` on a Postgres
+jobs table. These are excellent tools and the right choice for most work assignment problems.
+The distinction is what happens when a worker dies mid-job:
+
+- A job queue re-enqueues the job. The next worker starts from the beginning. This is correct
+  when jobs are idempotent and restart is cheap.
+- `worklease` hands the checkpoint to the next worker. The next worker resumes from the last
+  known state. This is necessary when restart is expensive or when intermediate state must
+  survive the handoff.
+
+If your workers can restart from scratch without correctness or cost concerns, use a job queue.
+`worklease` exists for the cases where they cannot.
+
+---
+
+## What worklease Does Not Solve
+
+These are not gaps or omissions. They are intentional scope boundaries. Understanding them
+before adopting the library avoids incorrect assumptions about what the library guarantees.
+
+### External side effects are not fenced
+
+`worklease` fences writes to the lease store. It does not fence writes to external systems.
+
+If Worker A calls Stripe, sends an email, or writes to S3 during a step, and then crashes
+before checkpointing, Worker B will re-execute that step from the last checkpoint. The external
+mutation may fire twice. `ErrFenced` stops stale checkpoint writes to PostgreSQL — it does not
+stop a zombie worker from making an external API call between lease expiry and its next
+`Checkpoint` or `Renew` call.
+
+This is an inherent property of any coordination primitive — Temporal, KCL, and Chubby all
+share it. The solution is at the application layer: make every external mutation idempotent,
+use an outbox pattern, or enforce idempotency keys at each downstream system.
+
+`worklease` provides the coordination plumbing. Callers own external idempotency.
+
+### Checkpoint granularity is a caller decision
+
+The library does not prescribe how often to checkpoint. Checkpointing after every atomic unit
+of work provides the finest recovery granularity but may be expensive. Checkpointing less
+frequently reduces overhead but increases the work a successor must repeat.
+
+The right checkpoint interval depends on the cost of the work unit and the cost of the
+checkpoint write. `worklease` provides the mechanism; callers decide the frequency.
+
+### The window between checkpoints is at-least-once
+
+Between two checkpoints, work is at-least-once. If Worker A executes a step, crashes before
+checkpointing, and Worker B resumes from the previous checkpoint, that step will be re-executed.
+`worklease` does not provide exactly-once semantics. It provides a resumable progress marker —
+the guarantee is that the successor starts from the last checkpointed state, not from scratch.
+
+Exactly-once execution of individual steps requires idempotent steps or external coordination
+beyond what this library provides.
+
+### Release marks intent, not immediate transfer
+
+`Release` sets `clean_handoff = TRUE` in the lease store and returns. It does not expire the
+lease or immediately transfer ownership. A successor worker still cannot acquire the lease
+until `expires_at < NOW()` — unless it uses `WithWaitForLease` with a short poll interval.
+
+"Clean handoff" is a semantic flag that tells the successor the previous owner finished
+intentionally. It is not a mechanism for instant ownership transfer. If the TTL is 30 seconds
+and Worker A calls `Release` at second 5, Worker B cannot acquire until second 30 unless the
+poll loop catches the expiry. Choose TTLs and poll intervals that match the handoff latency
+your application can tolerate.
+
+### Recovery logic lives in caller code
+
+`worklease` delivers the checkpoint bytes and the `cleanHandoff` flag. What those bytes mean,
+whether the partial state is valid, how to roll back a half-finished step, and how to reconcile
+external effects that happened before the crash — these are application concerns.
+
+The library provides the coordination layer. Callers own the recovery semantics.
 
 ---
 
@@ -99,7 +194,7 @@ release) is conditional on the token still being the current one.
 
 If Worker A holds fencing token 4 and its lease expires, Worker B acquires the lease and
 receives fencing token 5. Any write Worker A attempts with token 4 is now rejected — the
-backend holds token 5. This prevents the zombie write problem.
+backend holds token 5. This prevents zombie writes to the checkpoint store.
 
 The library owns fencing logic entirely. Callers cannot read or construct fencing tokens
 directly — they receive a `Token` value and pass it back to operations. The library validates
@@ -111,10 +206,11 @@ Progress state written atomically with lease renewal in a single backend operati
 checkpoint is a raw `[]byte` blob — the library stores it and hands it to the next owner;
 it has no opinion on encoding. See [ADR-0003](adr/0003-checkpoint-serialization-raw-bytes.md).
 
-The atomicity guarantee is critical: either the checkpoint and the renewal both succeed, or
-neither does. This means the lease cannot be extended without writing a checkpoint, and a
-checkpoint cannot be written without extending the lease. Liveness and state-save are a
-single operation.
+`Checkpoint` and `Renew` are distinct operations. `Checkpoint` writes state and extends the
+lease TTL atomically — either both succeed or neither does. `Renew` extends the TTL without
+writing new state, preserving the last checkpoint as-is. The lease can be extended without
+updating the checkpoint (via `Renew`), but a checkpoint cannot be written without extending
+the lease (via `Checkpoint`).
 
 ### Handoff vs Crash Recovery
 
@@ -143,9 +239,10 @@ requirements, and no platform dependencies.
 differently from clean handoff. `nil` state on fresh acquisition is explicit, not an error.
 `ErrFenced` is returned, not silently swallowed.
 
-**3. Library owns fencing, callers own state.** Callers cannot bypass fencing — it is
-unconditionally enforced on every write. Callers own checkpoint serialization, claim
-structure, and recovery logic.
+**3. Library owns fencing, callers own state.** The library unconditionally enforces fencing
+on every write to the lease store. Callers own checkpoint serialization, claim structure,
+recovery logic, and external idempotency. This boundary is intentional — the library cannot
+fence what it does not own.
 
 **4. Backend is single-attempt; core owns retry.** Backend methods map to single storage
 operations. Retry policy lives in the library core and is consistent across all backends. See
@@ -277,7 +374,10 @@ var (
 
 `ErrFenced` is the critical sentinel. When `Checkpoint` or `Renew` returns `ErrFenced`, it
 means a successor has already acquired the lease and this worker is a zombie. The correct
-response is to stop immediately — any further writes will be rejected.
+response is to stop immediately — any further writes to the lease store will be rejected.
+Note that `ErrFenced` does not and cannot stop in-flight external calls (Stripe, S3, domain
+tables) that the worker may have already initiated. See
+[What worklease Does Not Solve](#what-worklease-does-not-solve).
 
 ### Config and Constructor
 
@@ -412,6 +512,8 @@ WHERE work_id       = $2
 ```
 
 Same fencing gate. No `checkpoint` column update — the existing checkpoint is preserved.
+`Renew` extends the lease TTL without updating progress state. The checkpoint reflects the
+last explicit `Checkpoint` call, not the last `Renew`.
 
 ### Release — Set clean_handoff
 
@@ -426,6 +528,10 @@ WHERE work_id       = $1
 
 The checkpoint column is not touched. The final checkpoint written by the last `Checkpoint`
 call survives. The successor will read it alongside `cleanHandoff = true`.
+
+`Release` does not expire the lease or shorten the TTL. The successor cannot acquire until
+`expires_at < NOW()`. See [What worklease Does Not Solve — Release marks intent, not immediate
+transfer](#what-worklease-does-not-solve).
 
 ---
 
@@ -480,6 +586,11 @@ The `renewCtx` is cancelled when any of the following occur:
 The distinction between `stopRenewal()` (clean) and context cancellation (fencing or error)
 is intentional. Downstream code can distinguish "work is done" from "we were fenced" by
 checking whether `stopRenewal()` was called before context cancellation occurred.
+
+Note that `renewCtx` cancellation propagates fencing into downstream work — it does not fence
+external systems. An in-flight HTTP call or database write to an external system initiated
+before `renewCtx` is cancelled will still complete. See
+[What worklease Does Not Solve](#what-worklease-does-not-solve).
 
 ### Default Renewal Interval
 
@@ -598,6 +709,29 @@ by another holder (fencing). Callers should `defer stopRenewal()` immediately af
 expiry checks. Tests that exercise lease expiry must either use real sleep or inject a clock.
 Clock injection is a v0.2 concern for the in-memory backend.
 
+**R4 — External side effects are not fenced.** `worklease` fences writes to the lease store.
+It does not fence external mutations — Stripe charges, email sends, S3 writes, or domain table
+updates outside the lease schema. A zombie worker can initiate external mutations between lease
+expiry and its next `Checkpoint` or `Renew` call. `renewCtx` cancellation propagates fencing
+into Go context-aware code, but does not cancel in-flight network calls already dispatched.
+Callers must make every external mutation idempotent, use an outbox pattern, or enforce
+idempotency keys at each downstream system. This is not a limitation unique to `worklease` —
+it is an inherent property of any coordination primitive operating below the application layer.
+
+**R5 — Checkpoint ordering and external effect sequencing.** Two failure modes exist at the
+boundary between checkpointing and external effects:
+
+- Effect before checkpoint: Worker A calls an external API, then crashes before checkpointing.
+  Worker B resumes from the previous checkpoint and re-executes the step. The external effect
+  fires twice.
+- Checkpoint before effect: Worker A checkpoints a step as complete, then crashes before the
+  external effect. Worker B resumes after that checkpoint and skips the effect. The external
+  effect never fires.
+
+Neither case is a library defect — they are inherent to at-least-once execution between
+checkpoint boundaries. The correct mitigation is idempotent external effects with
+checkpoint-aligned boundaries: checkpoint after the effect completes successfully, not before.
+
 ---
 
 ## Roadmap
@@ -623,7 +757,6 @@ Clock injection is a v0.2 concern for the in-memory backend.
 ### Future
 
 - etcd backend
-- Distributed progress aggregation across workers
 
 ---
 

@@ -22,11 +22,19 @@ The correct fix is **checkpointed lease handoff**: the outgoing owner writes pro
 
 Every Go distributed locking library (`distlock`, `pglock`, `dynamodb-lock-go`, etcd leases, `client-go/leaderelection`) solves **presence** — mutual exclusion, TTL expiry, heartbeat renewal. None solve **continuity**. `worklease` fills that gap.
 
+### Is worklease the right fit?
+
+`worklease` is designed for a specific shape of work: stateful, multi-step operations where restarting from scratch is expensive or incorrect, and where adopting a full workflow engine is not the right trade-off.
+
+It is a good fit if you are running Go workers with PostgreSQL already in the stack, doing long-running jobs with meaningful intermediate state, and need correct handoff semantics without restructuring your application.
+
+It is not the right fit if your jobs are small enough to restart cheaply — a job queue (River, Asynq, `FOR UPDATE SKIP LOCKED`) is simpler and sufficient. If your work is complex enough to need replay semantics and activity scheduling, Temporal is the right tool.
+
 ---
 
 ## Prior Art
 
-This pattern is not new. AWS's Kinesis Client Library has implemented it since 2013 via its `LeaseRefresher`. KCL maintains a DynamoDB table where each lease entry holds an explicit `checkpoint` column and a `leaseCounter` for fencing. A worker atomically renews its lease while writing its progress checkpoint. When a worker's lease expires, the successor reads the checkpoint and resumes from exactly that point. Fencing is enforced via conditional writes on `leaseCounter` — structurally identical to `worklease`'s `fencing_token`.
+This pattern is not new. AWS's Kinesis Client Library has implemented it since 2013 via its `LeaseRefresher`. KCL maintains a DynamoDB table where each lease entry holds an explicit `checkpoint` column and a `leaseCounter` for fencing. A worker atomically renews its lease while writing its progress checkpoint. When a worker's lease expires, the successor reads the checkpoint column and resumes from exactly that point. Fencing is enforced via conditional writes on `leaseCounter` — structurally identical to `worklease`'s `fencing_token`.
 
 The pattern is proven and has been running production Kinesis workloads at AWS scale for over a decade.
 
@@ -40,13 +48,27 @@ What KCL doesn't provide:
 
 ---
 
+## What worklease does not solve
+
+These are intentional scope boundaries, not gaps.
+
+**External side effects are not fenced.** `ErrFenced` stops stale checkpoint writes to the lease store. It does not stop a zombie worker from calling Stripe, sending an email, or writing to S3 before it discovers it has been superseded. Callers must make every external mutation idempotent, use an outbox pattern, or enforce idempotency keys at downstream systems. This is an inherent property of any coordination primitive — the library fences what it owns.
+
+**The window between checkpoints is at-least-once.** If Worker A executes a step and crashes before checkpointing, Worker B will re-execute that step from the previous checkpoint. `worklease` provides a resumable progress marker, not exactly-once step execution.
+
+**Recovery logic is yours.** The library delivers checkpoint bytes and the `cleanHandoff` flag. What those bytes mean, how to validate partial state, and how to reconcile external effects that happened before the crash are application concerns.
+
+**Release marks intent, not immediate transfer.** Calling `Release` sets a flag and returns — it does not expire the lease. A successor cannot acquire until the TTL elapses. Choose TTLs and poll intervals that match the handoff latency your application can tolerate.
+
+---
+
 ## Concepts
 
 **Lease** — A time-limited claim on a named unit of work. Expires if not renewed. When it expires, another worker can acquire it.
 
-**Fencing token** — A monotonically incrementing integer issued on every acquisition. A worker's writes are rejected if a higher token has been issued — preventing zombie workers (slow, not dead) from corrupting state after their lease expires.
+**Fencing token** — A monotonically incrementing integer issued on every acquisition. A worker's writes to the lease store are rejected if a higher token has been issued — preventing zombie workers from corrupting the checkpoint after their lease expires.
 
-**Checkpoint** — Progress state written atomically with lease renewal. If the worker is making progress, it proves liveness and saves state in one operation. The last checkpoint survives to the next owner.
+**Checkpoint** — Progress state written atomically with lease renewal. If the worker is making progress, it proves liveness and saves state in one operation. The last checkpoint survives to the next owner. `Checkpoint` and `Renew` are distinct: `Checkpoint` writes state and extends the TTL atomically; `Renew` extends the TTL without updating state.
 
 **Handoff vs crash recovery** — Two distinct acquisition paths. If the previous owner called `Release` explicitly, the checkpoint contains final state and the successor knows the work was cleanly surrendered. If the lease expired without a release, the checkpoint contains the last known progress and the successor resumes from partial state. These are different situations and callers handle them differently. The library makes the distinction explicit.
 
@@ -88,12 +110,14 @@ if state != nil {
         return err
     }
     if !cleanHandoff {
-        // Previous owner crashed — validate partial state before resuming
+        // Previous owner crashed — validate partial state before resuming.
+        // External effects from incomplete steps may have already fired.
         progress = recoverFromPartial(progress)
     }
 }
 
-// Do work, checkpointing at each step
+// Do work, checkpointing at each step boundary.
+// Checkpoint after the external effect completes — not before.
 for _, step := range remainingSteps(progress) {
     if err := executeStep(ctx, step); err != nil {
         return err
@@ -116,7 +140,7 @@ If the worker is healthy but not at a checkpointable boundary yet:
 
 ```go
 if err := lease.Renew(ctx, token); err != nil {
-    // ErrFenced: a higher token has been issued — stop working
+    // ErrFenced: a higher token has been issued — stop working.
     return err
 }
 ```
@@ -133,7 +157,7 @@ if err != nil {
     return err
 }
 if state == nil {
-    // First acquisition — start from the beginning
+    // First acquisition — start from the beginning.
     progress = OnboardingProgress{}
 }
 ```
@@ -144,11 +168,11 @@ if state == nil {
 
 | Error | Meaning |
 |---|---|
-| `ErrFenced` | A higher fencing token has been issued. This worker has been superseded. Stop writing. |
+| `ErrFenced` | A higher fencing token has been issued. This worker has been superseded. Stop writing to the lease store. |
 | `ErrLeaseHeld` | The lease is currently held by another worker. |
 | `ErrLeaseExpired` | The lease expired before this operation completed. |
 
-`ErrFenced` is the critical one. When `Checkpoint` or `Renew` returns `ErrFenced`, it means a successor has already acquired the lease and this worker is now a zombie. The correct response is to stop immediately — any further writes will be rejected.
+`ErrFenced` is the critical one. When `Checkpoint` or `Renew` returns `ErrFenced`, a successor has already acquired the lease and this worker is a zombie. Stop immediately — any further writes to the lease store will be rejected. Note that `ErrFenced` does not cancel in-flight external calls the worker may have already initiated; those must be made idempotent at the application layer.
 
 ---
 
@@ -197,7 +221,7 @@ lease, _ := worklease.New(backend, worklease.Config{
 })
 ```
 
-Suitable for unit tests. Not safe for concurrent use across processes.
+Suitable for unit tests within a single process. Implements the same fencing token semantics as the PostgreSQL backend. Not safe for concurrent use across processes.
 
 ---
 
@@ -214,13 +238,14 @@ Suitable for unit tests. Not safe for concurrent use across processes.
 | Inngest | Platform | Managed durable step execution | Requires platform adoption — not a drop-in library |
 | DBOS | Framework | DB-backed durable execution | Requires full application restructure; limited Go support |
 | Watermill | Library | Go message routing | Checkpointing is broker offset tracking, not general work state |
-| **`worklease`** | Library | Work handoff with continuity, idiomatic Go, pluggable backends | Not a general-purpose lock |
+| River / Asynq / job queues | Library | Work assignment with retry | No stateful handoff — successor restarts from scratch |
+| **`worklease`** | Library | Work handoff with continuity, idiomatic Go, pluggable backends | Not a general-purpose lock; does not fence external side effects |
 
 ### Why not Temporal, Inngest, or DBOS?
 
 These tools sit at the high-guarantee, high-adoption-cost end of the spectrum. They solve the failure mode — but the adoption unit is your entire application architecture.
 
-Temporal requires rewriting business logic as Workflows and Activities, running a Temporal server, and accepting deterministic replay constraints (no random numbers, no direct time calls, no arbitrary I/O outside Activity boundaries). Inngest is a fully managed platform with its own execution model. DBOS restructures your entire application around a framework; Go support is limited.
+Temporal requires rewriting business logic as Workflows and Activities, running a Temporal server, and accepting deterministic replay constraints. Inngest is a fully managed platform with its own execution model. DBOS restructures your entire application around a framework.
 
 Teams already running Go workers with PostgreSQL don't need to restructure their application to get correct lease handoff semantics. They need a library primitive they can drop into the system they already have.
 
