@@ -602,7 +602,7 @@ Clock injection is a v0.2 concern for the in-memory backend.
 
 ## Roadmap
 
-### v0.1 — Complete
+### v0.1 — In progress
 
 - `Lease` interface: `Acquire`, `Checkpoint`, `Renew`, `Release`, `ReadCheckpoint`, `StartRenewal`
 - `Token` value type — unexported fields, accessor methods, `fmt.Stringer`
@@ -611,7 +611,7 @@ Clock injection is a v0.2 concern for the in-memory backend.
 - PostgreSQL backend — fencing via conditional `UPDATE WHERE fencing_token = $n`
 - In-memory backend — for unit testing
 - Error sentinels: `ErrFenced`, `ErrLeaseHeld`, `ErrLeaseExpired`
-- ADR-0001 through ADR-0006
+- ADR-0001 through ADR-0006 ✅
 
 ### v0.2 — Planned
 
