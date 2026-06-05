@@ -11,15 +11,11 @@ This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 
 ### Added
 
-- `Lease` interface: `Acquire`, `Checkpoint`, `Renew`, `Release`, `ReadCheckpoint`, `StartRenewal`
-- `Token` value type with unexported fields and accessor methods (`WorkID`, `HolderID`,
-  `FencingToken`, `ExpiresAt`) — implements `fmt.Stringer`
-- `AcquireOption`: `WithWaitForLease`, `WithPollInterval`
-- `RenewalOption`: `WithRenewalInterval`
-- Error sentinels: `ErrFenced`, `ErrLeaseHeld`, `ErrLeaseExpired`
-- `Config` struct with `TTL` and `HolderID` fields
-- `New(backend Backend, cfg Config) (Lease, error)` constructor
-- PostgreSQL backend (`backend/postgres`) — fencing via conditional `UPDATE ... WHERE fencing_token = $n`
-- In-memory backend (`backend/memory`) — for unit testing within a single process
-- `backend/postgres/schema.sql` — `worklease_leases` table definition
+- `go.mod` — module `github.com/aetomala/worklease`, Go 1.24, zero external dependencies
+- `doc.go` — package-level documentation
+- `docs/ARCHITECTURE.md` — human-readable architecture document
 - Architecture Decision Records ADR-0001 through ADR-0006 in `docs/adr/`
+- `CONTRIBUTING.md` — contributing guide, ADR requirement, PR and code style guidelines
+- `Makefile` — `build`, `test`, `lint`, `ci` targets
+- `.golangci.yml` — `revive` and `godot` linters
+- `.gitignore` — standard Go ignores
