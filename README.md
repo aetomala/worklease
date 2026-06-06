@@ -261,15 +261,28 @@ The gap between these two ends is where `worklease` lives. The only prior art in
 go get github.com/aetomala/worklease
 ```
 
-Requires Go 1.21+. PostgreSQL backend requires PostgreSQL 12+.
+Requires Go 1.26+. PostgreSQL backend requires PostgreSQL 12+.
 
 ---
 
 ## Status
 
-v0.1 is under active development. The interfaces above reflect current design and may change before the first release.
+v0.1.0 is the first stable release. The public API (`Lease`, `Token`, options, sentinels) is stable.
 
-Planned backends: Redis, etcd.
+---
+
+## Roadmap
+
+### v0.2 — Planned
+
+- Redis backend
+- Clock injection in the in-memory backend — eliminates real-sleep in expiry tests
+- Observability interface injection (logger, metrics, tracer)
+- `Token` test constructor — unblocks table-driven tests that need to construct tokens directly
+
+### Future
+
+- etcd backend
 
 ---
 

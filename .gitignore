@@ -22,3 +22,6 @@ vendor/
 .vscode/
 *.swp
 *.swo
+
+# Local Claude context (symlinked from dotfiles)
+CLAUDE.local.md
