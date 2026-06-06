@@ -138,8 +138,8 @@ func (mb *memoryBackend) Release(ctx context.Context, record backend.LeaseRecord
 		return worklease.ErrFenced
 	}
 
-	// ===== STEP 4: Delete Record =====
-	delete(mb.records, record.WorkID)
+	// ===== STEP 4: Set Clean Handoff Flag =====
+	r.cleanHandoff = true
 
 	return nil
 }
