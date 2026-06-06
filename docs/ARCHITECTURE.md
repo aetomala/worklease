@@ -736,7 +736,7 @@ checkpoint-aligned boundaries: checkpoint after the effect completes successfull
 
 ## Roadmap
 
-### v0.1 — In progress
+### v0.1 — Released (v0.1.0, 2026-06-06)
 
 - `Lease` interface: `Acquire`, `Checkpoint`, `Renew`, `Release`, `ReadCheckpoint`, `StartRenewal`
 - `Token` value type — unexported fields, accessor methods, `fmt.Stringer`
@@ -776,4 +776,4 @@ the decision made, and the consequences — including the alternatives that were
 
 ---
 
-*Last updated: June 2026 — v0.1*
+*Last updated: June 2026 — v0.1.0*
