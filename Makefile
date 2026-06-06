@@ -1,4 +1,4 @@
-.PHONY: build test lint ci clean
+.PHONY: build test lint vuln ci clean
 
 PKG := ./...
 
@@ -12,7 +12,10 @@ lint:
 	go vet $(PKG)
 	golangci-lint run $(PKG)
 
-ci: lint build test
+vuln:
+	govulncheck $(PKG)
+
+ci: lint build test vuln
 
 clean:
 	go clean $(PKG)
