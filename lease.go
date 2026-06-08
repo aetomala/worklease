@@ -137,3 +137,35 @@ func WithRenewalInterval(d time.Duration) RenewalOption {
 		}
 	}
 }
+
+// LeaseObserver is called synchronously after each Lease operation.
+// All methods are safe for concurrent use — the caller guarantees the
+// implementation is goroutine-safe.
+type LeaseObserver interface {
+	// OnAcquire is called after Acquire returns, whether successful or not.
+	// token is the zero Token when err is non-nil.
+	OnAcquire(ctx context.Context, workID string, token Token, err error)
+
+	// OnCheckpoint is called after Checkpoint returns.
+	// size is the length in bytes of the state argument.
+	OnCheckpoint(ctx context.Context, token Token, size int, err error)
+
+	// OnRenew is called after Renew returns.
+	OnRenew(ctx context.Context, token Token, err error)
+
+	// OnRelease is called after Release returns.
+	OnRelease(ctx context.Context, token Token, err error)
+
+	// OnFenced is called after OnCheckpoint or OnRenew when the returned
+	// error wraps ErrFenced — the lease has been superseded.
+	OnFenced(ctx context.Context, token Token)
+}
+
+// noopObserver is a LeaseObserver that discards all events.
+type noopObserver struct{}
+
+func (noopObserver) OnAcquire(_ context.Context, _ string, _ Token, _ error)    {}
+func (noopObserver) OnCheckpoint(_ context.Context, _ Token, _ int, _ error)    {}
+func (noopObserver) OnRenew(_ context.Context, _ Token, _ error)                {}
+func (noopObserver) OnRelease(_ context.Context, _ Token, _ error)              {}
+func (noopObserver) OnFenced(_ context.Context, _ Token)                        {}
