@@ -16,6 +16,9 @@ type Config struct {
 
 	// HolderID is the identifier of the entity that will hold leases. Required; empty returns an error.
 	HolderID string
+
+	// Observer is the LeaseObserver that will be notified of lease events. Optional; nil defaults to noopObserver.
+	Observer LeaseObserver
 }
 
 // leaseClient implements the Lease interface. It wraps a Backend and delegates
@@ -24,6 +27,7 @@ type Config struct {
 type leaseClient struct {
 	b   backend.Backend
 	cfg Config
+	obs LeaseObserver // never nil after New()
 }
 
 // New returns a new Lease instance backed by the provided Backend. Returns an error
@@ -43,7 +47,10 @@ func New(b backend.Backend, cfg Config) (Lease, error) {
 	}
 
 	// ===== STEP 2: Initialize and Return =====
-	return &leaseClient{b: b, cfg: cfg}, nil
+	if cfg.Observer == nil {
+		cfg.Observer = noopObserver{}
+	}
+	return &leaseClient{b: b, cfg: cfg, obs: cfg.Observer}, nil
 }
 
 // newToken converts a backend LeaseRecord to an exported Token.
@@ -73,6 +80,10 @@ func (c *leaseClient) Checkpoint(ctx context.Context, token Token, state []byte)
 	// ===== Validate and Delegate =====
 	record := toRecord(token)
 	err := c.b.Checkpoint(ctx, record, state, c.cfg.TTL)
+	c.obs.OnCheckpoint(ctx, token, len(state), err)
+	if errors.Is(err, ErrFenced) {
+		c.obs.OnFenced(ctx, token)
+	}
 
 	if errors.Is(err, ErrFenced) {
 		return fmt.Errorf("worklease: Checkpoint: workID=%q holderID=%q: %w", token.WorkID(), token.HolderID(), ErrFenced)
@@ -92,6 +103,10 @@ func (c *leaseClient) Renew(ctx context.Context, token Token) error {
 	// ===== Validate and Delegate =====
 	record := toRecord(token)
 	err := c.b.Renew(ctx, record, c.cfg.TTL)
+	c.obs.OnRenew(ctx, token, err)
+	if errors.Is(err, ErrFenced) {
+		c.obs.OnFenced(ctx, token)
+	}
 
 	if errors.Is(err, ErrFenced) {
 		return fmt.Errorf("worklease: Renew: workID=%q holderID=%q: %w", token.WorkID(), token.HolderID(), ErrFenced)
@@ -110,6 +125,7 @@ func (c *leaseClient) Release(ctx context.Context, token Token) error {
 	// ===== Validate and Delegate =====
 	record := toRecord(token)
 	err := c.b.Release(ctx, record)
+	c.obs.OnRelease(ctx, token, err)
 
 	if errors.Is(err, ErrFenced) {
 		return fmt.Errorf("worklease: Release: workID=%q holderID=%q: %w", token.WorkID(), token.HolderID(), ErrFenced)

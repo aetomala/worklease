@@ -3,6 +3,7 @@ package worklease_test
 import (
 	"context"
 	"errors"
+	"sync"
 	"time"
 
 	. "github.com/onsi/ginkgo/v2"
@@ -13,6 +14,67 @@ import (
 	"github.com/aetomala/worklease/backend"
 	"github.com/aetomala/worklease/testutil"
 )
+
+type spyAcquireCall struct {
+	workID string
+	token  worklease.Token
+	err    error
+}
+
+type spyCheckpointCall struct {
+	token worklease.Token
+	size  int
+	err   error
+}
+
+type spyRenewCall struct {
+	token worklease.Token
+	err   error
+}
+
+type spyReleaseCall struct {
+	token worklease.Token
+	err   error
+}
+
+type spyObserver struct {
+	acquireCalls    []spyAcquireCall
+	checkpointCalls []spyCheckpointCall
+	renewCalls      []spyRenewCall
+	releaseCalls    []spyReleaseCall
+	fencedCalls     []worklease.Token
+	mu              sync.Mutex
+}
+
+func (s *spyObserver) OnAcquire(_ context.Context, workID string, token worklease.Token, err error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.acquireCalls = append(s.acquireCalls, spyAcquireCall{workID: workID, token: token, err: err})
+}
+
+func (s *spyObserver) OnCheckpoint(_ context.Context, token worklease.Token, size int, err error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.checkpointCalls = append(s.checkpointCalls, spyCheckpointCall{token: token, size: size, err: err})
+}
+
+func (s *spyObserver) OnRenew(_ context.Context, token worklease.Token, err error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.renewCalls = append(s.renewCalls, spyRenewCall{token: token, err: err})
+}
+
+func (s *spyObserver) OnRelease(_ context.Context, token worklease.Token, err error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.releaseCalls = append(s.releaseCalls, spyReleaseCall{token: token, err: err})
+}
+
+func (s *spyObserver) OnFenced(_ context.Context, token worklease.Token) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.fencedCalls = append(s.fencedCalls, token)
+}
 
 var _ = Describe("worklease", func() {
 	var (
@@ -502,6 +564,226 @@ var _ = Describe("worklease", func() {
 			token, _ := lease.Acquire(ctx, "w1")
 
 			Expect(token.ExpiresAt()).To(Equal(expiresAt))
+		})
+	})
+
+	// ===== PHASE 7: Observer =====
+	Describe("Observer", func() {
+		var spy *spyObserver
+
+		BeforeEach(func() {
+			spy = &spyObserver{}
+			cfg.Observer = spy
+		})
+
+		Context("when Config.Observer is nil", func() {
+			It("does not panic on any operation", func() {
+				nilCfg := worklease.Config{TTL: 30 * time.Second, HolderID: "test-worker"}
+				lease, err := worklease.New(mockB, nilCfg)
+				Expect(err).NotTo(HaveOccurred())
+
+				record := backend.LeaseRecord{WorkID: "w1", HolderID: "test-worker", FencingToken: 1, ExpiresAt: time.Now().Add(30 * time.Second)}
+				mockB.EXPECT().Acquire(gomock.Any(), "w1", "test-worker", 30*time.Second).Return(record, nil)
+				mockB.EXPECT().Checkpoint(gomock.Any(), record, []byte("s"), 30*time.Second).Return(nil)
+				mockB.EXPECT().Renew(gomock.Any(), record, 30*time.Second).Return(nil)
+				mockB.EXPECT().Release(gomock.Any(), record).Return(nil)
+
+				Expect(func() {
+					token, _ := lease.Acquire(ctx, "w1")
+					_ = lease.Checkpoint(ctx, token, []byte("s"))
+					_ = lease.Renew(ctx, token)
+					_ = lease.Release(ctx, token)
+				}).NotTo(Panic())
+			})
+		})
+
+		Context("when Config.Observer is set", func() {
+			It("calls OnAcquire with the token and nil error on successful Acquire", func() {
+				lease, _ := worklease.New(mockB, cfg)
+				record := backend.LeaseRecord{WorkID: "w1", HolderID: "test-worker", FencingToken: 1, ExpiresAt: time.Now().Add(30 * time.Second)}
+				mockB.EXPECT().Acquire(gomock.Any(), "w1", "test-worker", 30*time.Second).Return(record, nil)
+
+				token, err := lease.Acquire(ctx, "w1")
+				Expect(err).NotTo(HaveOccurred())
+
+				spy.mu.Lock()
+				calls := spy.acquireCalls
+				spy.mu.Unlock()
+
+				Expect(calls).To(HaveLen(1))
+				Expect(calls[0].workID).To(Equal("w1"))
+				Expect(calls[0].err).To(BeNil())
+				Expect(calls[0].token.WorkID()).To(Equal(token.WorkID()))
+			})
+
+			It("calls OnAcquire with zero Token and non-nil error on failed Acquire", func() {
+				lease, _ := worklease.New(mockB, cfg)
+				mockB.EXPECT().Acquire(gomock.Any(), "w1", "test-worker", 30*time.Second).Return(backend.LeaseRecord{}, worklease.ErrLeaseHeld)
+
+				_, err := lease.Acquire(ctx, "w1")
+				Expect(err).To(HaveOccurred())
+
+				spy.mu.Lock()
+				calls := spy.acquireCalls
+				spy.mu.Unlock()
+
+				Expect(calls).To(HaveLen(1))
+				Expect(calls[0].err).To(MatchError(worklease.ErrLeaseHeld))
+				Expect(calls[0].token).To(Equal(worklease.Token{}))
+			})
+
+			It("calls OnCheckpoint with the token, state size, and nil error on successful Checkpoint", func() {
+				lease, _ := worklease.New(mockB, cfg)
+				record := backend.LeaseRecord{WorkID: "w1", HolderID: "test-worker", FencingToken: 1, ExpiresAt: time.Now().Add(30 * time.Second)}
+				mockB.EXPECT().Acquire(gomock.Any(), "w1", "test-worker", 30*time.Second).Return(record, nil)
+				mockB.EXPECT().Checkpoint(gomock.Any(), record, []byte("payload"), 30*time.Second).Return(nil)
+
+				token, _ := lease.Acquire(ctx, "w1")
+				err := lease.Checkpoint(ctx, token, []byte("payload"))
+				Expect(err).NotTo(HaveOccurred())
+
+				spy.mu.Lock()
+				calls := spy.checkpointCalls
+				spy.mu.Unlock()
+
+				Expect(calls).To(HaveLen(1))
+				Expect(calls[0].size).To(Equal(7))
+				Expect(calls[0].err).To(BeNil())
+			})
+
+			It("calls OnCheckpoint then OnFenced when Checkpoint returns ErrFenced", func() {
+				lease, _ := worklease.New(mockB, cfg)
+				record := backend.LeaseRecord{WorkID: "w1", HolderID: "test-worker", FencingToken: 1, ExpiresAt: time.Now().Add(30 * time.Second)}
+				mockB.EXPECT().Acquire(gomock.Any(), "w1", "test-worker", 30*time.Second).Return(record, nil)
+				mockB.EXPECT().Checkpoint(gomock.Any(), record, gomock.Any(), 30*time.Second).Return(worklease.ErrFenced)
+
+				token, _ := lease.Acquire(ctx, "w1")
+				_ = lease.Checkpoint(ctx, token, []byte("s"))
+
+				spy.mu.Lock()
+				cCalls := spy.checkpointCalls
+				fCalls := spy.fencedCalls
+				spy.mu.Unlock()
+
+				Expect(cCalls).To(HaveLen(1))
+				Expect(errors.Is(cCalls[0].err, worklease.ErrFenced)).To(BeTrue())
+				Expect(fCalls).To(HaveLen(1))
+			})
+
+			It("calls OnRenew with the token and nil error on successful Renew", func() {
+				lease, _ := worklease.New(mockB, cfg)
+				record := backend.LeaseRecord{WorkID: "w1", HolderID: "test-worker", FencingToken: 1, ExpiresAt: time.Now().Add(30 * time.Second)}
+				mockB.EXPECT().Acquire(gomock.Any(), "w1", "test-worker", 30*time.Second).Return(record, nil)
+				mockB.EXPECT().Renew(gomock.Any(), record, 30*time.Second).Return(nil)
+
+				token, _ := lease.Acquire(ctx, "w1")
+				err := lease.Renew(ctx, token)
+				Expect(err).NotTo(HaveOccurred())
+
+				spy.mu.Lock()
+				calls := spy.renewCalls
+				spy.mu.Unlock()
+
+				Expect(calls).To(HaveLen(1))
+				Expect(calls[0].err).To(BeNil())
+			})
+
+			It("calls OnRenew then OnFenced when Renew returns ErrFenced", func() {
+				lease, _ := worklease.New(mockB, cfg)
+				record := backend.LeaseRecord{WorkID: "w1", HolderID: "test-worker", FencingToken: 1, ExpiresAt: time.Now().Add(30 * time.Second)}
+				mockB.EXPECT().Acquire(gomock.Any(), "w1", "test-worker", 30*time.Second).Return(record, nil)
+				mockB.EXPECT().Renew(gomock.Any(), record, 30*time.Second).Return(worklease.ErrFenced)
+
+				token, _ := lease.Acquire(ctx, "w1")
+				_ = lease.Renew(ctx, token)
+
+				spy.mu.Lock()
+				rCalls := spy.renewCalls
+				fCalls := spy.fencedCalls
+				spy.mu.Unlock()
+
+				Expect(rCalls).To(HaveLen(1))
+				Expect(errors.Is(rCalls[0].err, worklease.ErrFenced)).To(BeTrue())
+				Expect(fCalls).To(HaveLen(1))
+			})
+
+			It("calls OnRelease with the token and nil error on successful Release", func() {
+				lease, _ := worklease.New(mockB, cfg)
+				record := backend.LeaseRecord{WorkID: "w1", HolderID: "test-worker", FencingToken: 1, ExpiresAt: time.Now().Add(30 * time.Second)}
+				mockB.EXPECT().Acquire(gomock.Any(), "w1", "test-worker", 30*time.Second).Return(record, nil)
+				mockB.EXPECT().Release(gomock.Any(), record).Return(nil)
+
+				token, _ := lease.Acquire(ctx, "w1")
+				err := lease.Release(ctx, token)
+				Expect(err).NotTo(HaveOccurred())
+
+				spy.mu.Lock()
+				calls := spy.releaseCalls
+				spy.mu.Unlock()
+
+				Expect(calls).To(HaveLen(1))
+				Expect(calls[0].err).To(BeNil())
+			})
+
+			It("calls OnAcquire with ErrLeaseHeld when lease is held and WithWaitForLease is not passed", func() {
+				lease, _ := worklease.New(mockB, cfg)
+				mockB.EXPECT().Acquire(gomock.Any(), "w1", "test-worker", 30*time.Second).Return(backend.LeaseRecord{}, worklease.ErrLeaseHeld)
+
+				_, _ = lease.Acquire(ctx, "w1")
+
+				spy.mu.Lock()
+				calls := spy.acquireCalls
+				spy.mu.Unlock()
+
+				Expect(calls).To(HaveLen(1))
+				Expect(errors.Is(calls[0].err, worklease.ErrLeaseHeld)).To(BeTrue())
+			})
+		})
+
+		Context("StartRenewal goroutine", func() {
+			It("calls OnRenew after each successful renewal tick", func() {
+				lease, _ := worklease.New(mockB, cfg)
+				record := backend.LeaseRecord{WorkID: "w1", HolderID: "test-worker", FencingToken: 1, ExpiresAt: time.Now().Add(30 * time.Second)}
+				mockB.EXPECT().Acquire(gomock.Any(), "w1", "test-worker", 30*time.Second).Return(record, nil)
+				mockB.EXPECT().Renew(gomock.Any(), record, 30*time.Second).Return(nil).AnyTimes()
+
+				token, _ := lease.Acquire(ctx, "w1")
+				_, stopRenewal := lease.StartRenewal(ctx, token, worklease.WithRenewalInterval(30*time.Millisecond))
+				defer stopRenewal()
+
+				Eventually(func() int {
+					spy.mu.Lock()
+					defer spy.mu.Unlock()
+					return len(spy.renewCalls)
+				}).Should(BeNumerically(">=", 1))
+
+				spy.mu.Lock()
+				firstCall := spy.renewCalls[0]
+				spy.mu.Unlock()
+				Expect(firstCall.err).To(BeNil())
+			})
+
+			It("calls OnRenew then OnFenced when renewal returns ErrFenced", func() {
+				lease, _ := worklease.New(mockB, cfg)
+				record := backend.LeaseRecord{WorkID: "w1", HolderID: "test-worker", FencingToken: 1, ExpiresAt: time.Now().Add(30 * time.Second)}
+				mockB.EXPECT().Acquire(gomock.Any(), "w1", "test-worker", 30*time.Second).Return(record, nil)
+				mockB.EXPECT().Renew(gomock.Any(), record, 30*time.Second).Return(worklease.ErrFenced)
+
+				token, _ := lease.Acquire(ctx, "w1")
+				renewCtx, stopRenewal := lease.StartRenewal(ctx, token, worklease.WithRenewalInterval(30*time.Millisecond))
+				defer stopRenewal()
+
+				Eventually(renewCtx.Done()).Should(BeClosed())
+
+				spy.mu.Lock()
+				rCalls := spy.renewCalls
+				fCalls := spy.fencedCalls
+				spy.mu.Unlock()
+
+				Expect(rCalls).To(HaveLen(1))
+				Expect(errors.Is(rCalls[0].err, worklease.ErrFenced)).To(BeTrue())
+				Expect(fCalls).To(HaveLen(1))
+			})
 		})
 	})
 })
