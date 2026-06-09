@@ -115,6 +115,28 @@ var _ = Describe("Backend (memory)", func() {
 			err = b.Checkpoint(ctx, record1, []byte("state"), 30*time.Second)
 			Expect(errors.Is(err, worklease.ErrFenced)).To(BeTrue())
 		})
+
+		It("resets cleanHandoff to false even when the previous holder released cleanly", func() {
+			// holder-a acquires, releases cleanly → cleanHandoff=true on the record.
+			rec1, err := b.Acquire(ctx, "w1", "holder-a", -1*time.Second)
+			Expect(err).NotTo(HaveOccurred())
+			Expect(b.Release(ctx, rec1)).To(Succeed())
+
+			// holder-b re-acquires (expired via -1s TTL); inherits cleanHandoff=true.
+			rec2, err := b.Acquire(ctx, "w1", "holder-b", 30*time.Second)
+			Expect(err).NotTo(HaveOccurred())
+
+			_, cleanHandoff, err := b.ReadCheckpoint(ctx, rec2)
+			Expect(err).NotTo(HaveOccurred())
+			Expect(cleanHandoff).To(BeTrue())
+
+			// holder-b checkpoints — must reset cleanHandoff to false.
+			Expect(b.Checkpoint(ctx, rec2, []byte("partial"), 30*time.Second)).To(Succeed())
+
+			_, cleanHandoff, err = b.ReadCheckpoint(ctx, rec2)
+			Expect(err).NotTo(HaveOccurred())
+			Expect(cleanHandoff).To(BeFalse())
+		})
 	})
 
 	// ===== PHASE 3: Renew =====
