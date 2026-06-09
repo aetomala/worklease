@@ -84,10 +84,18 @@ func (mb *memoryBackend) Acquire(ctx context.Context, workID, holderID string, t
 		return backend.LeaseRecord{}, worklease.ErrLeaseHeld
 	}
 
-	// ===== STEP 4: Determine New Fencing Token =====
+	// ===== STEP 4: Determine New Fencing Token and Preserve Checkpoint =====
+	// Mirrors the PostgreSQL backend's ON CONFLICT DO UPDATE: checkpoint and
+	// cleanHandoff are carried over from the expired record so that a successor
+	// can read what the previous owner left behind — the same semantics as the
+	// postgres backend's `checkpoint = worklease_leases.checkpoint` clause.
 	var newToken uint64 = 1
+	var prevCheckpoint []byte
+	var prevCleanHandoff bool
 	if exists {
 		newToken = r.fencingToken + 1
+		prevCheckpoint = r.checkpoint
+		prevCleanHandoff = r.cleanHandoff
 	}
 
 	// ===== STEP 5: Create New Record =====
@@ -95,8 +103,8 @@ func (mb *memoryBackend) Acquire(ctx context.Context, workID, holderID string, t
 		holderID:     holderID,
 		fencingToken: newToken,
 		expiresAt:    mb.clock.Now().Add(ttl),
-		checkpoint:   nil,
-		cleanHandoff: false,
+		checkpoint:   prevCheckpoint,
+		cleanHandoff: prevCleanHandoff,
 	}
 
 	// ===== STEP 6: Store and Return =====

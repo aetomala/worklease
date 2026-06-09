@@ -290,6 +290,50 @@ var _ = Describe("Backend (memory)", func() {
 					Expect(rec.FencingToken).To(Equal(uint64(1)))
 				})
 			})
+
+			Context("when the expired lease had a checkpoint but no Release (crash)", func() {
+				It("re-acquires; successor reads previous checkpoint bytes and cleanHandoff=false", func() {
+					rec1, err := b.Acquire(ctx, "w1", "h1", 5*time.Second)
+					Expect(err).NotTo(HaveOccurred())
+
+					err = b.Checkpoint(ctx, rec1, []byte("crash-state"), 5*time.Second)
+					Expect(err).NotTo(HaveOccurred())
+
+					fc.Advance(6 * time.Second)
+
+					rec2, err := b.Acquire(ctx, "w1", "h2", 5*time.Second)
+					Expect(err).NotTo(HaveOccurred())
+					Expect(rec2.FencingToken).To(Equal(uint64(2)))
+
+					state, cleanHandoff, err := b.ReadCheckpoint(ctx, rec2)
+					Expect(err).NotTo(HaveOccurred())
+					Expect(state).To(Equal([]byte("crash-state")))
+					Expect(cleanHandoff).To(BeFalse())
+				})
+			})
+
+			Context("when the expired lease had a checkpoint and a clean Release", func() {
+				It("re-acquires; successor reads previous checkpoint bytes and cleanHandoff=true", func() {
+					rec1, err := b.Acquire(ctx, "w1", "h1", 5*time.Second)
+					Expect(err).NotTo(HaveOccurred())
+
+					err = b.Checkpoint(ctx, rec1, []byte("clean-state"), 5*time.Second)
+					Expect(err).NotTo(HaveOccurred())
+
+					err = b.Release(ctx, rec1)
+					Expect(err).NotTo(HaveOccurred())
+
+					fc.Advance(6 * time.Second)
+
+					rec2, err := b.Acquire(ctx, "w1", "h2", 5*time.Second)
+					Expect(err).NotTo(HaveOccurred())
+
+					state, cleanHandoff, err := b.ReadCheckpoint(ctx, rec2)
+					Expect(err).NotTo(HaveOccurred())
+					Expect(state).To(Equal([]byte("clean-state")))
+					Expect(cleanHandoff).To(BeTrue())
+				})
+			})
 		})
 
 		Describe("Backend.Renew", func() {
