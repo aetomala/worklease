@@ -24,3 +24,22 @@ A multi-step SaaS cancellation flow that crashes mid-execution. Best for:
 cd subscription-cancellation
 go run .
 ```
+
+---
+
+### [Cross-Tenant Migration](cross-tenant-migration/)
+
+A coordinator that migrates tenants one at a time across a shared database. Best for:
+- Understanding checkpoint-as-cursor (progress through a collection, not steps in a flow)
+- Seeing how crash recovery skips already-processed items rather than re-running from scratch
+
+**Features**:
+- For-loop coordination pattern with `StartRenewal` keeping the lease alive across many iterations
+- Checkpoint after each tenant — fine-grained recovery cursor
+- Zombie fencing mid-batch with fencing token values in output
+
+**Run**:
+```bash
+cd cross-tenant-migration
+go run .
+```
