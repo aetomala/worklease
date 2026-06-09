@@ -16,6 +16,7 @@ This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 
 ### Added
 
+- `worker.Runner` — lifecycle manager that wraps acquire/ReadCheckpoint/StartRenewal/Release; callers implement only `WorkFn`
 - `examples/cross-tenant-migration` — runnable example demonstrating checkpoint-as-cursor, crash recovery mid-batch, and zombie fencing
 - `examples/subscription-cancellation` — runnable example demonstrating crash recovery, zombie fencing, and clean handoff semantics
 - `examples/README.md` — examples landing page
