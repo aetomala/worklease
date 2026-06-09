@@ -2,7 +2,6 @@ package main
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"log"
@@ -11,6 +10,8 @@ import (
 	"github.com/aetomala/worklease"
 	"github.com/aetomala/worklease/backend"
 	"github.com/aetomala/worklease/backend/memory"
+	"github.com/aetomala/worklease/checkpoint"
+	"github.com/aetomala/worklease/worker"
 )
 
 // MigrationProgress is the cursor checkpoint: an append-only list of migrated tenant IDs.
@@ -28,7 +29,7 @@ func migrateTenant(ctx context.Context, tenantID string) error {
 }
 
 // migrateTenants iterates tenants, skipping already-migrated ones, and checkpoints after each new migration.
-// renewCtx is passed to migrateTenant so fencing propagates into the migration call.
+// The renewCtx parameter is passed to migrateTenant so fencing propagates into the migration call.
 // Checkpoint uses context.Background() so it completes even if renewCtx is about to cancel.
 func migrateTenants(renewCtx context.Context, lease worklease.Lease, token worklease.Token, tenants []string, progress *MigrationProgress) error {
 	migratedSet := make(map[string]bool, len(progress.MigratedTenants))
@@ -47,7 +48,10 @@ func migrateTenants(renewCtx context.Context, lease worklease.Lease, token workl
 		}
 
 		progress.MigratedTenants = append(progress.MigratedTenants, tenantID)
-		data, _ := json.Marshal(progress)
+		data, err := checkpoint.Encode(checkpoint.JSON(), progress)
+		if err != nil {
+			return fmt.Errorf("encode checkpoint: %w", err)
+		}
 		if err := lease.Checkpoint(context.Background(), token, data); err != nil {
 			return fmt.Errorf("checkpoint after %s: %w", tenantID, err)
 		}
@@ -61,19 +65,18 @@ func scenario1HappyPath(ctx context.Context, b backend.Backend, tenants []string
 	log.Println("=== Scenario 1: Happy Path ===")
 
 	lease, _ := worklease.New(b, worklease.Config{TTL: 30 * time.Second, HolderID: "coordinator-A"})
-	token, _ := lease.Acquire(ctx, "migration:schema-v2")
+	r, _ := worker.NewRunner(worker.RunnerConfig{
+		Lease: lease,
+		WorkFn: func(renewCtx context.Context, token worklease.Token, _ []byte, _ bool) ([]byte, error) {
+			if err := migrateTenants(renewCtx, lease, token, tenants, &MigrationProgress{}); err != nil {
+				return nil, err
+			}
+			return nil, nil
+		},
+	})
 
-	renewCtx, stopRenewal := lease.StartRenewal(ctx, token)
-	defer stopRenewal()
-
-	if err := migrateTenants(renewCtx, lease, token, tenants, &MigrationProgress{}); err != nil {
+	if err := r.Run(ctx, "migration:schema-v2"); err != nil {
 		log.Printf("  coordinator-A: migration failed: %v", err)
-		return
-	}
-
-	stopRenewal()
-	if err := lease.Release(ctx, token); err != nil {
-		log.Printf("  coordinator-A: release failed: %v", err)
 		return
 	}
 	log.Printf("  coordinator-A: all %d tenants migrated, lease released cleanly", len(tenants))
@@ -83,10 +86,10 @@ func scenario1HappyPath(ctx context.Context, b backend.Backend, tenants []string
 func scenario2CrashRecovery(ctx context.Context, b backend.Backend, tenants []string) {
 	log.Println("=== Scenario 2: Crash Recovery ===")
 
-	// Worker B: acquires, migrates first 3 tenants, then crashes (no Release).
+	// Coordinator B: acquires, migrates first 3 tenants, then crashes (no Release).
 	{
-		lease, _ := worklease.New(b, worklease.Config{TTL: 3 * time.Second, HolderID: "coordinator-B"})
-		token, _ := lease.Acquire(ctx, "migration:schema-v2")
+		leaseB, _ := worklease.New(b, worklease.Config{TTL: 3 * time.Second, HolderID: "coordinator-B"})
+		tokenB, _ := leaseB.Acquire(ctx, "migration:schema-v2")
 
 		var progress MigrationProgress
 		for _, tenantID := range tenants[:3] {
@@ -95,8 +98,8 @@ func scenario2CrashRecovery(ctx context.Context, b backend.Backend, tenants []st
 				return
 			}
 			progress.MigratedTenants = append(progress.MigratedTenants, tenantID)
-			data, _ := json.Marshal(progress)
-			if err := lease.Checkpoint(ctx, token, data); err != nil {
+			data, _ := checkpoint.Encode(checkpoint.JSON(), &progress)
+			if err := leaseB.Checkpoint(ctx, tokenB, data); err != nil {
 				log.Printf("  coordinator-B: checkpoint failed: %v", err)
 				return
 			}
@@ -108,32 +111,29 @@ func scenario2CrashRecovery(ctx context.Context, b backend.Backend, tenants []st
 	log.Println("  [waiting 4s for lease to expire...]")
 	time.Sleep(4 * time.Second)
 
-	// Worker C: acquires after expiry, reads checkpoint, resumes from tenant 4.
-	lease, _ := worklease.New(b, worklease.Config{TTL: 30 * time.Second, HolderID: "coordinator-C"})
-	token, _ := lease.Acquire(ctx, "migration:schema-v2")
-	log.Printf("  coordinator-C: acquired lease (fencing token %d)", token.FencingToken())
+	// Coordinator C: acquires after expiry, reads checkpoint, resumes from tenant 4.
+	leaseC, _ := worklease.New(b, worklease.Config{TTL: 30 * time.Second, HolderID: "coordinator-C"})
+	r, _ := worker.NewRunner(worker.RunnerConfig{
+		Lease: leaseC,
+		WorkFn: func(renewCtx context.Context, token worklease.Token, prior []byte, cleanHandoff bool) ([]byte, error) {
+			progress, err := checkpoint.Decode[MigrationProgress](checkpoint.JSON(), prior)
+			if err != nil {
+				return nil, err
+			}
+			log.Printf("  coordinator-C: acquired lease (fencing token %d)", token.FencingToken())
+			if !cleanHandoff {
+				log.Printf("  coordinator-C: cleanHandoff=false — %d tenants already migrated, resuming",
+					len(progress.MigratedTenants))
+			}
+			if err := migrateTenants(renewCtx, leaseC, token, tenants, &progress); err != nil {
+				return nil, err
+			}
+			return nil, nil
+		},
+	})
 
-	state, cleanHandoff, _ := lease.ReadCheckpoint(ctx, token)
-	var progress MigrationProgress
-	if state != nil {
-		_ = json.Unmarshal(state, &progress)
-		if !cleanHandoff {
-			log.Printf("  coordinator-C: cleanHandoff=false — %d tenants already migrated, resuming",
-				len(progress.MigratedTenants))
-		}
-	}
-
-	renewCtx, stopRenewal := lease.StartRenewal(ctx, token)
-	defer stopRenewal()
-
-	if err := migrateTenants(renewCtx, lease, token, tenants, &progress); err != nil {
+	if err := r.Run(ctx, "migration:schema-v2"); err != nil {
 		log.Printf("  coordinator-C: migration failed: %v", err)
-		return
-	}
-
-	stopRenewal()
-	if err := lease.Release(ctx, token); err != nil {
-		log.Printf("  coordinator-C: release failed: %v", err)
 		return
 	}
 	log.Printf("  coordinator-C: all %d tenants migrated, lease released cleanly", len(tenants))
@@ -147,11 +147,11 @@ func scenario3ZombieFencing(ctx context.Context, b backend.Backend, tenants []st
 	var zombieToken worklease.Token
 	var zombieProgress MigrationProgress
 
-	// Worker D: acquires with a short TTL, migrates 2 tenants, then gets stuck.
+	// Coordinator D: acquires with a short TTL, migrates 2 tenants, then gets stuck.
 	{
-		lease, _ := worklease.New(b, worklease.Config{TTL: 3 * time.Second, HolderID: "coordinator-D"})
-		token, _ := lease.Acquire(ctx, "migration:schema-v2")
-		zombieLease, zombieToken = lease, token
+		leaseD, _ := worklease.New(b, worklease.Config{TTL: 3 * time.Second, HolderID: "coordinator-D"})
+		tokenD, _ := leaseD.Acquire(ctx, "migration:schema-v2")
+		zombieLease, zombieToken = leaseD, tokenD
 
 		for _, tenantID := range tenants[:2] {
 			if err := migrateTenant(ctx, tenantID); err != nil {
@@ -159,54 +159,51 @@ func scenario3ZombieFencing(ctx context.Context, b backend.Backend, tenants []st
 				return
 			}
 			zombieProgress.MigratedTenants = append(zombieProgress.MigratedTenants, tenantID)
-			data, _ := json.Marshal(zombieProgress)
-			if err := lease.Checkpoint(ctx, token, data); err != nil {
+			data, _ := checkpoint.Encode(checkpoint.JSON(), &zombieProgress)
+			if err := leaseD.Checkpoint(ctx, tokenD, data); err != nil {
 				log.Printf("  coordinator-D: checkpoint failed: %v", err)
 				return
 			}
 		}
-		log.Printf("  coordinator-D: acquired (token %d), migrated 2 tenants, now stuck...", token.FencingToken())
+		log.Printf("  coordinator-D: acquired (token %d), migrated 2 tenants, now stuck...", tokenD.FencingToken())
 	}
 
 	log.Println("  [waiting 4s for lease to expire...]")
 	time.Sleep(4 * time.Second)
 	log.Println("  [lease expired]")
 
-	// Worker E: acquires after expiry — higher fencing token.
+	// Coordinator E: acquires after expiry — higher fencing token.
 	leaseE, _ := worklease.New(b, worklease.Config{TTL: 30 * time.Second, HolderID: "coordinator-E"})
-	tokenE, _ := leaseE.Acquire(ctx, "migration:schema-v2")
-	log.Printf("  coordinator-E: acquired (token %d)", tokenE.FencingToken())
+	rE, _ := worker.NewRunner(worker.RunnerConfig{
+		Lease: leaseE,
+		WorkFn: func(renewCtx context.Context, token worklease.Token, prior []byte, cleanHandoff bool) ([]byte, error) {
+			log.Printf("  coordinator-E: acquired (token %d)", token.FencingToken())
 
-	// Worker D wakes up and tries to checkpoint tenant 3 — rejected.
-	zombieProgress.MigratedTenants = append(zombieProgress.MigratedTenants, tenants[2])
-	data, _ := json.Marshal(zombieProgress)
-	err := zombieLease.Checkpoint(ctx, zombieToken, data)
-	if errors.Is(err, worklease.ErrFenced) {
-		log.Printf("  coordinator-D: ErrFenced — token %d rejected; coordinator-E holds token %d — zombie stopped",
-			zombieToken.FencingToken(), tokenE.FencingToken())
-	}
+			// Coordinator D wakes up and tries to checkpoint tenant 3 — rejected.
+			zombieProgress.MigratedTenants = append(zombieProgress.MigratedTenants, tenants[2])
+			dData, _ := checkpoint.Encode(checkpoint.JSON(), &zombieProgress)
+			if err := zombieLease.Checkpoint(ctx, zombieToken, dData); errors.Is(err, worklease.ErrFenced) {
+				log.Printf("  coordinator-D: ErrFenced — token %d rejected; coordinator-E holds token %d — zombie stopped",
+					zombieToken.FencingToken(), token.FencingToken())
+			}
 
-	// Worker E reads checkpoint (2 tenants done) and completes the batch.
-	eState, cleanHandoff, _ := leaseE.ReadCheckpoint(ctx, tokenE)
-	var progress MigrationProgress
-	if eState != nil {
-		_ = json.Unmarshal(eState, &progress)
-		if !cleanHandoff {
-			log.Printf("  coordinator-E: resuming from checkpoint (%d tenants already migrated)", len(progress.MigratedTenants))
-		}
-	}
+			// Coordinator E reads checkpoint (2 tenants done) and completes the batch.
+			progress, err := checkpoint.Decode[MigrationProgress](checkpoint.JSON(), prior)
+			if err != nil {
+				return nil, err
+			}
+			if !cleanHandoff {
+				log.Printf("  coordinator-E: resuming from checkpoint (%d tenants already migrated)", len(progress.MigratedTenants))
+			}
+			if err := migrateTenants(renewCtx, leaseE, token, tenants, &progress); err != nil {
+				return nil, err
+			}
+			return nil, nil
+		},
+	})
 
-	renewCtx, stopRenewal := leaseE.StartRenewal(ctx, tokenE)
-	defer stopRenewal()
-
-	if err := migrateTenants(renewCtx, leaseE, tokenE, tenants, &progress); err != nil {
+	if err := rE.Run(ctx, "migration:schema-v2"); err != nil {
 		log.Printf("  coordinator-E: migration failed: %v", err)
-		return
-	}
-
-	stopRenewal()
-	if err := leaseE.Release(ctx, tokenE); err != nil {
-		log.Printf("  coordinator-E: release failed: %v", err)
 		return
 	}
 	log.Printf("  coordinator-E: all %d tenants migrated, lease released cleanly", len(tenants))
