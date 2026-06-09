@@ -31,6 +31,8 @@ This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 - `memory.Option` type — functional option type for the in-memory backend constructor
 - ADR-0007: observer injection via `Config` field
 - ADR-0008: `Clock` interface for in-memory backend testability
+- `checkpoint` subpackage — `Codec` interface, `JSONCodec` implementation, and generic `Encode[T]`/`Decode[T]` helpers; `Decode[T]` returns the zero value on nil input (no prior checkpoint)
+- ADR-0009: `checkpoint` subpackage — codec interface design, generics constraint, nil-bytes contract
 
 ---
 
