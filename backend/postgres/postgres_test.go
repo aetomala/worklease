@@ -171,6 +171,19 @@ var _ = Describe("Backend (postgres)", func() {
 			Expect(cleanHandoff).To(BeFalse())
 		})
 
+		It("fencing token stale → returns ErrFenced", func() {
+			record, err := b.Acquire(ctx, "w12", "holder", 30*time.Second)
+			Expect(err).NotTo(HaveOccurred())
+
+			// Simulate a successor acquiring the lease (higher fencing token).
+			_, err = db.ExecContext(ctx,
+				"UPDATE worklease_leases SET fencing_token = fencing_token + 1 WHERE work_id = $1", "w12")
+			Expect(err).NotTo(HaveOccurred())
+
+			_, _, err = b.ReadCheckpoint(ctx, record)
+			Expect(errors.Is(err, worklease.ErrFenced)).To(BeTrue())
+		})
+
 		It("checkpoint exists → returns correct bytes and cleanHandoff value", func() {
 			// Acquire a lease and checkpoint it
 			record, err := b.Acquire(ctx, "w11", "holder", 30*time.Second)

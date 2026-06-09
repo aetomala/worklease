@@ -9,6 +9,10 @@ This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 
 ## [Unreleased]
 
+### Fixed
+
+- `postgres.Backend.ReadCheckpoint`: now returns `ErrFenced` when called with a stale fencing token, matching the Backend interface contract and the memory backend's behavior
+
 ### Added
 
 - `examples/cross-tenant-migration` — runnable example demonstrating checkpoint-as-cursor, crash recovery mid-batch, and zombie fencing
