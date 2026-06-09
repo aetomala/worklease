@@ -14,13 +14,13 @@ var (
 	ErrWorkFnRequired = errors.New("work function is required")
 )
 
-// WorkFn is the work function signature accepted by Runner.Run. ctx is the
-// renewal context — it is cancelled when the lease is fenced or lost, so
-// fencing propagates into the work automatically. prior contains the last
-// checkpointed state from the previous holder (nil on first run). cleanHandoff
-// is true when the previous holder released intentionally. Return the final
-// state to checkpoint after the work completes (nil skips the final checkpoint)
-// and any error.
+// WorkFn is the work function signature accepted by Runner.Run.
+// The ctx parameter is the renewal context — it is cancelled when the lease is
+// fenced or lost, so fencing propagates into the work automatically. The prior
+// parameter contains the last checkpointed state from the previous holder (nil
+// on first run). The cleanHandoff flag is true when the previous holder released
+// intentionally. Return the final state to checkpoint after the work completes
+// (nil skips the final checkpoint) and any error.
 type WorkFn func(ctx context.Context, token worklease.Token, prior []byte, cleanHandoff bool) ([]byte, error)
 
 // RunnerConfig holds configuration for a Runner instance.
