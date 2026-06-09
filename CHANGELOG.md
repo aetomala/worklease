@@ -11,6 +11,7 @@ This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 
 ### Fixed
 
+- `postgres.Backend.Renew`: now returns `ErrLeaseExpired` when the lease has expired (fencing token matches but `expires_at ≤ NOW()`), matching the Backend interface contract and the memory backend's behaviour
 - `postgres.Backend.ReadCheckpoint`: now returns `ErrFenced` when called with a stale fencing token, matching the Backend interface contract and the memory backend's behavior
 
 ### Added
