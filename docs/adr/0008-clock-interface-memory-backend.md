@@ -17,7 +17,7 @@ normal Acquire path. This works but is intrusive (tests reach into backend inter
 ## Decision
 
 The `memory` package exports a `Clock` interface with a single `Now() time.Time` method.
-`memory.New` accepts variadic `MemoryOption`; `memory.WithClock(c Clock)` is the option
+`memory.New` accepts variadic `Option`; `memory.WithClock(c Clock)` is the option
 constructor. The default clock is an unexported `realClock` that delegates to `time.Now()`.
 Existing callers of `memory.New()` with no arguments are unaffected.
 
@@ -30,7 +30,7 @@ those packages to define their own; an exported one provides a single contract.
 **`realClock` unexported.** Callers have no reason to reference the default implementation
 directly. They either use the default (no option) or supply their own implementation.
 
-**Variadic `MemoryOption` on `New()`.** Consistent with the existing `AcquireOption` and
+**Variadic `Option` on `New()`.** Consistent with the existing `AcquireOption` and
 `RenewalOption` patterns in the library. Zero options is a valid call — backward-compatible.
 
 **No clock injection on the PostgreSQL backend.** The Postgres backend delegates time to the
@@ -51,5 +51,5 @@ integration suite with real time.
 
 ## References
 
-- `backend/memory/memory.go` — `Clock` interface, `realClock`, `MemoryOption`, `WithClock`
+- `backend/memory/memory.go` — `Clock` interface, `realClock`, `Option`, `WithClock`
 - `backend/memory/memory_test.go` — `fakeClock` helper; clock injection test section

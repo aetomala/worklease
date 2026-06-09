@@ -29,8 +29,8 @@ type realClock struct{}
 
 func (realClock) Now() time.Time { return time.Now() }
 
-// MemoryOption configures the in-memory backend.
-type MemoryOption func(*memoryConfig)
+// Option configures the in-memory backend.
+type Option func(*memoryConfig)
 
 // memoryConfig holds resolved configuration for the in-memory backend.
 type memoryConfig struct {
@@ -40,7 +40,7 @@ type memoryConfig struct {
 // WithClock overrides the clock used for all time.Now() calls inside the
 // memory backend. The default clock uses time.Now().
 // Use WithClock to inject a fake clock in tests.
-func WithClock(c Clock) MemoryOption {
+func WithClock(c Clock) Option {
 	return func(cfg *memoryConfig) {
 		cfg.clock = c
 	}
@@ -55,8 +55,8 @@ type memoryBackend struct {
 
 // New returns an in-memory Backend. Safe for concurrent use within a single process.
 // Not safe for use across processes. No Close method — no cleanup required.
-// opts may include WithClock to inject a fake clock for deterministic expiry tests.
-func New(opts ...MemoryOption) backend.Backend {
+// Pass WithClock to inject a fake clock for deterministic expiry tests.
+func New(opts ...Option) backend.Backend {
 	cfg := memoryConfig{clock: realClock{}}
 	for _, opt := range opts {
 		opt(&cfg)

@@ -18,7 +18,7 @@ This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 - `memory.Clock` interface — injectable clock for the in-memory backend
 - `memory.WithClock` option — `memory.New(memory.WithClock(fc))` for deterministic expiry
   tests without sleeping
-- `memory.MemoryOption` type — functional option type for the in-memory backend constructor
+- `memory.Option` type — functional option type for the in-memory backend constructor
 - ADR-0007: observer injection via `Config` field
 - ADR-0008: `Clock` interface for in-memory backend testability
 
