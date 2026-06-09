@@ -11,6 +11,9 @@ This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 
 ### Added
 
+- `examples/subscription-cancellation` — runnable example demonstrating crash recovery, zombie fencing, and clean handoff semantics
+- `examples/README.md` — examples landing page
+- Fixed `memory.Backend.Acquire`: checkpoint and `cleanHandoff` from an expired record are now preserved for the successor, matching the PostgreSQL backend's `ON CONFLICT DO UPDATE` semantics
 - `LeaseObserver` interface — five hook methods (`OnAcquire`, `OnCheckpoint`, `OnRenew`,
   `OnRelease`, `OnFenced`) called synchronously after each `Lease` operation
 - `Config.Observer` field — wire a `LeaseObserver` into a `Lease` instance at construction
