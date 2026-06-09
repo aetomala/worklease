@@ -136,6 +136,7 @@ func (mb *memoryBackend) Checkpoint(ctx context.Context, record backend.LeaseRec
 	// ===== STEP 4: Update Checkpoint =====
 	r.checkpoint = state
 	r.expiresAt = mb.clock.Now().Add(ttl)
+	r.cleanHandoff = false
 
 	return nil
 }
