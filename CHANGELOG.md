@@ -9,6 +9,19 @@ This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 
 ## [Unreleased]
 
+### Added
+
+- `LeaseObserver` interface — five hook methods (`OnAcquire`, `OnCheckpoint`, `OnRenew`,
+  `OnRelease`, `OnFenced`) called synchronously after each `Lease` operation
+- `Config.Observer` field — wire a `LeaseObserver` into a `Lease` instance at construction
+  time; zero value (nil) installs a silent no-op observer
+- `memory.Clock` interface — injectable clock for the in-memory backend
+- `memory.WithClock` option — `memory.New(memory.WithClock(fc))` for deterministic expiry
+  tests without sleeping
+- `memory.Option` type — functional option type for the in-memory backend constructor
+- ADR-0007: observer injection via `Config` field
+- ADR-0008: `Clock` interface for in-memory backend testability
+
 ---
 
 ## [v0.1.0] — 2026-06-06

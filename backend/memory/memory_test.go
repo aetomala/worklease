@@ -13,6 +13,14 @@ import (
 	"github.com/aetomala/worklease/backend/memory"
 )
 
+type fakeClock struct {
+	now time.Time
+}
+
+func (f *fakeClock) Now() time.Time { return f.now }
+
+func (f *fakeClock) Advance(d time.Duration) { f.now = f.now.Add(d) }
+
 var _ = Describe("Backend (memory)", func() {
 	var (
 		ctx    context.Context
@@ -206,6 +214,153 @@ var _ = Describe("Backend (memory)", func() {
 			Expect(err).NotTo(HaveOccurred())
 			Expect(state).To(Equal([]byte("state")))
 			Expect(cleanHandoff).To(BeTrue())
+		})
+	})
+
+	// ===== PHASE 6: Clock Injection =====
+	Describe("Clock injection", func() {
+		var fc *fakeClock
+
+		BeforeEach(func() {
+			fc = &fakeClock{now: time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)}
+			b = memory.New(memory.WithClock(fc))
+		})
+
+		Describe("New", func() {
+			Context("with no options", func() {
+				It("returns a backend that uses the real clock", func() {
+					realB := memory.New()
+					_, err := realB.Acquire(ctx, "w1", "h1", 10*time.Second)
+					Expect(err).NotTo(HaveOccurred())
+
+					// Immediately try to acquire again — must get ErrLeaseHeld
+					// because real clock has not advanced 10 seconds
+					_, err = realB.Acquire(ctx, "w1", "h2", 10*time.Second)
+					Expect(errors.Is(err, worklease.ErrLeaseHeld)).To(BeTrue())
+				})
+			})
+
+			Context("with WithClock", func() {
+				It("returns a backend that uses the injected clock for expiry checks", func() {
+					// Acquire with fake clock at T=0; TTL=5s → expires at T=5
+					_, err := b.Acquire(ctx, "w1", "h1", 5*time.Second)
+					Expect(err).NotTo(HaveOccurred())
+
+					// Advance fake clock to T=6 — lease is now expired
+					fc.Advance(6 * time.Second)
+
+					// A new acquire must succeed because the injected clock shows expiry
+					_, err = b.Acquire(ctx, "w1", "h2", 5*time.Second)
+					Expect(err).NotTo(HaveOccurred())
+				})
+			})
+		})
+
+		Describe("Backend.Acquire", func() {
+			Context("when the lease exists and has not expired per the injected clock", func() {
+				It("returns ErrLeaseHeld", func() {
+					_, err := b.Acquire(ctx, "w1", "h1", 10*time.Second)
+					Expect(err).NotTo(HaveOccurred())
+
+					// Clock not advanced — lease still valid
+					_, err = b.Acquire(ctx, "w1", "h2", 10*time.Second)
+					Expect(errors.Is(err, worklease.ErrLeaseHeld)).To(BeTrue())
+				})
+			})
+
+			Context("when the lease exists and has expired per the injected clock", func() {
+				It("acquires the lease and increments the fencing token", func() {
+					rec, err := b.Acquire(ctx, "w1", "h1", 5*time.Second)
+					Expect(err).NotTo(HaveOccurred())
+					Expect(rec.FencingToken).To(Equal(uint64(1)))
+
+					// Advance past TTL
+					fc.Advance(6 * time.Second)
+
+					rec2, err := b.Acquire(ctx, "w1", "h2", 5*time.Second)
+					Expect(err).NotTo(HaveOccurred())
+					Expect(rec2.FencingToken).To(Equal(uint64(2)))
+				})
+			})
+
+			Context("when no lease exists", func() {
+				It("creates the lease with fencing token 1", func() {
+					rec, err := b.Acquire(ctx, "w1", "h1", 5*time.Second)
+					Expect(err).NotTo(HaveOccurred())
+					Expect(rec.FencingToken).To(Equal(uint64(1)))
+				})
+			})
+		})
+
+		Describe("Backend.Renew", func() {
+			Context("when the holder's fencing token matches", func() {
+				It("extends the expiry using the injected clock's current time", func() {
+					rec, _ := b.Acquire(ctx, "w1", "h1", 5*time.Second)
+
+					// Advance clock — new expiry should be based on new clock position
+					fc.Advance(2 * time.Second)
+					err := b.Renew(ctx, backend.LeaseRecord{
+						WorkID: rec.WorkID, HolderID: rec.HolderID, FencingToken: rec.FencingToken, ExpiresAt: rec.ExpiresAt,
+					}, 5*time.Second)
+					Expect(err).NotTo(HaveOccurred())
+
+					// Advance to T=8 (2+5=7 from clock, lease expires at clock T=7)
+					// Clock is at T=2 after Renew; we advance 5 more seconds → T=7
+					// Renew set expiresAt = clock(T=2) + 5s = T=7
+					// Advance one more second → T=8, past expiry
+					fc.Advance(6 * time.Second)
+					_, err = b.Acquire(ctx, "w1", "h2", 5*time.Second)
+					Expect(err).NotTo(HaveOccurred())
+				})
+			})
+
+			Context("when the fencing token is stale", func() {
+				It("returns ErrFenced", func() {
+					rec, _ := b.Acquire(ctx, "w1", "h1", 5*time.Second)
+					staleRecord := backend.LeaseRecord{
+						WorkID: rec.WorkID, HolderID: rec.HolderID, FencingToken: 999, ExpiresAt: rec.ExpiresAt,
+					}
+					err := b.Renew(ctx, staleRecord, 5*time.Second)
+					Expect(errors.Is(err, worklease.ErrFenced)).To(BeTrue())
+				})
+			})
+		})
+
+		Describe("Backend.Release", func() {
+			Context("when the holder's fencing token matches", func() {
+				It("sets cleanHandoff to true on the existing record", func() {
+					rec, _ := b.Acquire(ctx, "w1", "h1", 5*time.Second)
+					err := b.Release(ctx, backend.LeaseRecord{
+						WorkID: rec.WorkID, HolderID: rec.HolderID, FencingToken: rec.FencingToken, ExpiresAt: rec.ExpiresAt,
+					})
+					Expect(err).NotTo(HaveOccurred())
+
+					_, cleanHandoff, err := b.ReadCheckpoint(ctx, backend.LeaseRecord{
+						WorkID: rec.WorkID, HolderID: rec.HolderID, FencingToken: rec.FencingToken, ExpiresAt: rec.ExpiresAt,
+					})
+					Expect(err).NotTo(HaveOccurred())
+					Expect(cleanHandoff).To(BeTrue())
+				})
+			})
+
+			Context("after Release", func() {
+				It("ReadCheckpoint returns the checkpoint and cleanHandoff true", func() {
+					rec, _ := b.Acquire(ctx, "w1", "h1", 5*time.Second)
+					_ = b.Checkpoint(ctx, backend.LeaseRecord{
+						WorkID: rec.WorkID, HolderID: rec.HolderID, FencingToken: rec.FencingToken, ExpiresAt: rec.ExpiresAt,
+					}, []byte("saved-state"), 5*time.Second)
+					_ = b.Release(ctx, backend.LeaseRecord{
+						WorkID: rec.WorkID, HolderID: rec.HolderID, FencingToken: rec.FencingToken, ExpiresAt: rec.ExpiresAt,
+					})
+
+					state, cleanHandoff, err := b.ReadCheckpoint(ctx, backend.LeaseRecord{
+						WorkID: rec.WorkID, HolderID: rec.HolderID, FencingToken: rec.FencingToken, ExpiresAt: rec.ExpiresAt,
+					})
+					Expect(err).NotTo(HaveOccurred())
+					Expect(state).To(Equal([]byte("saved-state")))
+					Expect(cleanHandoff).To(BeTrue())
+				})
+			})
 		})
 	})
 })
