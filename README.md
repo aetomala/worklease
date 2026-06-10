@@ -267,21 +267,16 @@ Requires Go 1.26+. PostgreSQL backend requires PostgreSQL 12+.
 
 ## Status
 
-v0.1.0 is the first stable release. The public API (`Lease`, `Token`, options, sentinels) is stable.
+v0.2.0 is the current stable release. The public API (`Lease`, `Token`, options, sentinels) is stable.
 
 ---
 
 ## Roadmap
 
-### v0.2 — Planned
-
-- Redis backend
-- Clock injection in the in-memory backend — eliminates real-sleep in expiry tests
-- Observability interface injection (logger, metrics, tracer)
-- `Token` test constructor — unblocks table-driven tests that need to construct tokens directly
-
 ### Future
 
+- Redis backend
+- `Token` test constructor — unblocks table-driven tests that need to construct tokens directly
 - etcd backend
 
 ---
