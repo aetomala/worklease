@@ -9,6 +9,10 @@ This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 
 ## [Unreleased]
 
+---
+
+## [v0.2.0] — 2026-06-09
+
 ### Fixed
 
 - `postgres.Backend.Renew`: now returns `ErrLeaseExpired` when the lease has expired (fencing token matches but `expires_at ≤ NOW()`), matching the Backend interface contract and the memory backend's behaviour
