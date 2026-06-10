@@ -18,17 +18,52 @@ type record struct {
 	cleanHandoff bool
 }
 
+// Clock provides the current time. Exported — allows test packages outside
+// backend/memory to implement fake clocks.
+type Clock interface {
+	Now() time.Time
+}
+
+// realClock is the default Clock implementation. Unexported.
+type realClock struct{}
+
+func (realClock) Now() time.Time { return time.Now() }
+
+// Option configures the in-memory backend.
+type Option func(*memoryConfig)
+
+// memoryConfig holds resolved configuration for the in-memory backend.
+type memoryConfig struct {
+	clock Clock
+}
+
+// WithClock overrides the clock used for all time.Now() calls inside the
+// memory backend. The default clock uses time.Now().
+// Use WithClock to inject a fake clock in tests.
+func WithClock(c Clock) Option {
+	return func(cfg *memoryConfig) {
+		cfg.clock = c
+	}
+}
+
 // memoryBackend is an in-memory implementation of the Backend interface.
 type memoryBackend struct {
-	mu      sync.Mutex
+	mu    sync.Mutex
+	clock Clock // never nil after New()
 	records map[string]*record
 }
 
-// New returns an in-memory Backend safe for concurrent use within a single process.
-// No Close method is required — in-memory storage has no resources to release.
-func New() backend.Backend {
+// New returns an in-memory Backend. Safe for concurrent use within a single process.
+// Not safe for use across processes. No Close method — no cleanup required.
+// Pass WithClock to inject a fake clock for deterministic expiry tests.
+func New(opts ...Option) backend.Backend {
+	cfg := memoryConfig{clock: realClock{}}
+	for _, opt := range opts {
+		opt(&cfg)
+	}
 	return &memoryBackend{
 		records: make(map[string]*record),
+		clock:   cfg.clock,
 	}
 }
 
@@ -44,24 +79,32 @@ func (mb *memoryBackend) Acquire(ctx context.Context, workID, holderID string, t
 	r, exists := mb.records[workID]
 
 	// ===== STEP 3: Evaluate Expiry =====
-	if exists && !time.Now().After(r.expiresAt) {
+	if exists && !mb.clock.Now().After(r.expiresAt) {
 		// Lease is held and not expired
 		return backend.LeaseRecord{}, worklease.ErrLeaseHeld
 	}
 
-	// ===== STEP 4: Determine New Fencing Token =====
+	// ===== STEP 4: Determine New Fencing Token and Preserve Checkpoint =====
+	// Mirrors the PostgreSQL backend's ON CONFLICT DO UPDATE: checkpoint and
+	// cleanHandoff are carried over from the expired record so that a successor
+	// can read what the previous owner left behind — the same semantics as the
+	// postgres backend's `checkpoint = worklease_leases.checkpoint` clause.
 	var newToken uint64 = 1
+	var prevCheckpoint []byte
+	var prevCleanHandoff bool
 	if exists {
 		newToken = r.fencingToken + 1
+		prevCheckpoint = r.checkpoint
+		prevCleanHandoff = r.cleanHandoff
 	}
 
 	// ===== STEP 5: Create New Record =====
 	newRecord := &record{
 		holderID:     holderID,
 		fencingToken: newToken,
-		expiresAt:    time.Now().Add(ttl),
-		checkpoint:   nil,
-		cleanHandoff: false,
+		expiresAt:    mb.clock.Now().Add(ttl),
+		checkpoint:   prevCheckpoint,
+		cleanHandoff: prevCleanHandoff,
 	}
 
 	// ===== STEP 6: Store and Return =====
@@ -92,7 +135,8 @@ func (mb *memoryBackend) Checkpoint(ctx context.Context, record backend.LeaseRec
 
 	// ===== STEP 4: Update Checkpoint =====
 	r.checkpoint = state
-	r.expiresAt = time.Now().Add(ttl)
+	r.expiresAt = mb.clock.Now().Add(ttl)
+	r.cleanHandoff = false
 
 	return nil
 }
@@ -113,12 +157,12 @@ func (mb *memoryBackend) Renew(ctx context.Context, record backend.LeaseRecord, 
 	}
 
 	// ===== STEP 4: Check Expiry =====
-	if time.Now().After(r.expiresAt) {
+	if mb.clock.Now().After(r.expiresAt) {
 		return worklease.ErrLeaseExpired
 	}
 
 	// ===== STEP 5: Extend Expiration =====
-	r.expiresAt = time.Now().Add(ttl)
+	r.expiresAt = mb.clock.Now().Add(ttl)
 
 	return nil
 }

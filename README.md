@@ -267,22 +267,38 @@ Requires Go 1.26+. PostgreSQL backend requires PostgreSQL 12+.
 
 ## Status
 
-v0.1.0 is the first stable release. The public API (`Lease`, `Token`, options, sentinels) is stable.
+v0.2.0 is the current stable release. The public API (`Lease`, `Token`, options, sentinels) is stable.
 
 ---
 
 ## Roadmap
 
-### v0.2 — Planned
-
-- Redis backend
-- Clock injection in the in-memory backend — eliminates real-sleep in expiry tests
-- Observability interface injection (logger, metrics, tracer)
-- `Token` test constructor — unblocks table-driven tests that need to construct tokens directly
-
 ### Future
 
+- Redis backend
+- `Token` test constructor — unblocks table-driven tests that need to construct tokens directly
 - etcd backend
+
+---
+
+## Examples
+
+### Subscription cancellation with crash recovery and fencing
+
+Demonstrates the core worklease failure mode: a worker crashes mid-cancellation
+after billing has fired but before resources are deprovisioned. A successor worker
+reads the checkpoint and resumes without double-billing. A zombie fencing scenario
+shows `ErrFenced` rejecting a stale write with both fencing token values visible in
+the output.
+
+No infrastructure required — runs against the in-memory backend.
+
+```bash
+cd examples/subscription-cancellation
+go run .
+```
+
+Source: [`examples/`](examples/)
 
 ---
 

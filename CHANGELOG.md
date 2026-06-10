@@ -11,6 +11,35 @@ This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 
 ---
 
+## [v0.2.0] — 2026-06-09
+
+### Fixed
+
+- `postgres.Backend.Renew`: now returns `ErrLeaseExpired` when the lease has expired (fencing token matches but `expires_at ≤ NOW()`), matching the Backend interface contract and the memory backend's behaviour
+- `postgres.Backend.ReadCheckpoint`: now returns `ErrFenced` when called with a stale fencing token, matching the Backend interface contract and the memory backend's behavior
+
+### Added
+
+- `worker.Runner` — lifecycle manager that wraps acquire/ReadCheckpoint/StartRenewal/Release; callers implement only `WorkFn`
+- `examples/cross-tenant-migration` — runnable example demonstrating checkpoint-as-cursor, crash recovery mid-batch, and zombie fencing
+- `examples/subscription-cancellation` — runnable example demonstrating crash recovery, zombie fencing, and clean handoff semantics
+- `examples/README.md` — examples landing page
+- Fixed `memory.Backend.Acquire`: checkpoint and `cleanHandoff` from an expired record are now preserved for the successor, matching the PostgreSQL backend's `ON CONFLICT DO UPDATE` semantics
+- `LeaseObserver` interface — five hook methods (`OnAcquire`, `OnCheckpoint`, `OnRenew`,
+  `OnRelease`, `OnFenced`) called synchronously after each `Lease` operation
+- `Config.Observer` field — wire a `LeaseObserver` into a `Lease` instance at construction
+  time; zero value (nil) installs a silent no-op observer
+- `memory.Clock` interface — injectable clock for the in-memory backend
+- `memory.WithClock` option — `memory.New(memory.WithClock(fc))` for deterministic expiry
+  tests without sleeping
+- `memory.Option` type — functional option type for the in-memory backend constructor
+- ADR-0007: observer injection via `Config` field
+- ADR-0008: `Clock` interface for in-memory backend testability
+- `checkpoint` subpackage — `Codec` interface, `JSONCodec` implementation, and generic `Encode[T]`/`Decode[T]` helpers; `Decode[T]` returns the zero value on nil input (no prior checkpoint)
+- ADR-0009: `checkpoint` subpackage — codec interface design, generics constraint, nil-bytes contract
+
+---
+
 ## [v0.1.0] — 2026-06-06
 
 ### Added

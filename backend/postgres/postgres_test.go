@@ -128,6 +128,19 @@ var _ = Describe("Backend (postgres)", func() {
 			err = b.Renew(ctx, record, 60*time.Second)
 			Expect(errors.Is(err, worklease.ErrFenced)).To(BeTrue())
 		})
+
+		It("lease expired → returns ErrLeaseExpired", func() {
+			record, err := b.Acquire(ctx, "w13", "holder", 30*time.Second)
+			Expect(err).NotTo(HaveOccurred())
+
+			// Simulate the lease expiring without a competitor re-acquiring.
+			_, err = db.ExecContext(ctx,
+				"UPDATE worklease_leases SET expires_at = NOW() - INTERVAL '1 second' WHERE work_id = $1", "w13")
+			Expect(err).NotTo(HaveOccurred())
+
+			err = b.Renew(ctx, record, 60*time.Second)
+			Expect(errors.Is(err, worklease.ErrLeaseExpired)).To(BeTrue())
+		})
 	})
 
 	Describe("Release", func() {
@@ -169,6 +182,19 @@ var _ = Describe("Backend (postgres)", func() {
 			Expect(err).NotTo(HaveOccurred())
 			Expect(checkpoint).To(BeNil())
 			Expect(cleanHandoff).To(BeFalse())
+		})
+
+		It("fencing token stale → returns ErrFenced", func() {
+			record, err := b.Acquire(ctx, "w12", "holder", 30*time.Second)
+			Expect(err).NotTo(HaveOccurred())
+
+			// Simulate a successor acquiring the lease (higher fencing token).
+			_, err = db.ExecContext(ctx,
+				"UPDATE worklease_leases SET fencing_token = fencing_token + 1 WHERE work_id = $1", "w12")
+			Expect(err).NotTo(HaveOccurred())
+
+			_, _, err = b.ReadCheckpoint(ctx, record)
+			Expect(errors.Is(err, worklease.ErrFenced)).To(BeTrue())
 		})
 
 		It("checkpoint exists → returns correct bytes and cleanHandoff value", func() {

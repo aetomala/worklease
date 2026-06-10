@@ -2,6 +2,7 @@ package worklease
 
 import (
 	"context"
+	"errors"
 	"sync"
 	"time"
 )
@@ -47,8 +48,15 @@ func (c *leaseClient) StartRenewal(ctx context.Context, token Token, opts ...Ren
 			case <-ctx.Done():
 				return // Path 4: parent cancelled — renewCtx auto-cancels
 			case <-ticker.C:
-				if err := c.b.Renew(ctx, toRecord(token), c.cfg.TTL); err != nil {
-					cancel() // Paths 2 and 3: fencing or non-fencing error
+				err := c.b.Renew(ctx, toRecord(token), c.cfg.TTL)
+				c.obs.OnRenew(ctx, token, err)
+				if errors.Is(err, ErrFenced) {
+					c.obs.OnFenced(ctx, token)
+					cancel()
+					return
+				}
+				if err != nil {
+					cancel()
 					return
 				}
 			}

@@ -47,7 +47,14 @@ SET expires_at  = NOW() + $1,
     updated_at  = NOW()
 WHERE work_id       = $2
   AND holder_id     = $3
-  AND fencing_token = $4`
+  AND fencing_token = $4
+  AND expires_at    > NOW()`
+
+	queryRenewCheck = `
+SELECT expires_at
+FROM worklease_leases
+WHERE work_id       = $1
+  AND fencing_token = $2`
 
 	queryRelease = `
 UPDATE worklease_leases
@@ -58,11 +65,9 @@ WHERE work_id       = $1
   AND fencing_token = $3`
 
 	queryReadCheckpoint = `
-SELECT checkpoint, clean_handoff
+SELECT fencing_token, checkpoint, clean_handoff
 FROM worklease_leases
-WHERE work_id       = $1
-  AND holder_id     = $2
-  AND fencing_token = $3`
+WHERE work_id = $1`
 )
 
 // postgresBackend implements the Backend interface using PostgreSQL.
@@ -143,7 +148,8 @@ func (p *postgresBackend) Checkpoint(ctx context.Context, record backend.LeaseRe
 }
 
 // Renew extends the lease expiration time. Returns ErrFenced if the record's
-// fencing token no longer matches the stored lease.
+// fencing token no longer matches the stored lease. Returns ErrLeaseExpired if
+// the lease has already expired.
 func (p *postgresBackend) Renew(ctx context.Context, record backend.LeaseRecord, ttl time.Duration) error {
 	// ===== STEP 1: Execute UPDATE =====
 	ttlStr := fmt.Sprintf("%.6f seconds", ttl.Seconds())
@@ -158,7 +164,16 @@ func (p *postgresBackend) Renew(ctx context.Context, record backend.LeaseRecord,
 		return fmt.Errorf("postgres: Renew: %w", err)
 	}
 	if n == 0 {
-		return worklease.ErrFenced
+		// ===== STEP 3: Distinguish Fenced vs Expired =====
+		var expiresAt time.Time
+		err := p.db.QueryRowContext(ctx, queryRenewCheck, record.WorkID, record.FencingToken).Scan(&expiresAt)
+		if err != nil {
+			if errors.Is(err, sql.ErrNoRows) {
+				return worklease.ErrFenced
+			}
+			return fmt.Errorf("postgres: Renew: %w", err)
+		}
+		return worklease.ErrLeaseExpired
 	}
 
 	return nil
@@ -186,19 +201,24 @@ func (p *postgresBackend) Release(ctx context.Context, record backend.LeaseRecor
 }
 
 // ReadCheckpoint retrieves persisted state and the clean handoff flag for the
-// given lease. Returns nil, false, nil if no lease exists (not an error).
+// given lease. Returns nil, false, nil if no record exists for the workID.
 // Returns ErrFenced if the record's fencing token no longer matches the stored lease.
 func (p *postgresBackend) ReadCheckpoint(ctx context.Context, record backend.LeaseRecord) ([]byte, bool, error) {
-	// ===== STEP 1: Query the Checkpoint =====
+	// ===== STEP 1: Query by work_id =====
+	var storedToken uint64
 	var state []byte
 	var cleanHandoff bool
-	err := p.db.QueryRowContext(ctx, queryReadCheckpoint, record.WorkID, record.HolderID, record.FencingToken).Scan(&state, &cleanHandoff)
+	err := p.db.QueryRowContext(ctx, queryReadCheckpoint, record.WorkID).Scan(&storedToken, &state, &cleanHandoff)
 	if err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
-			// No matching lease — not an error, just return nil, false, nil
 			return nil, false, nil
 		}
 		return nil, false, fmt.Errorf("postgres: ReadCheckpoint: %w", err)
+	}
+
+	// ===== STEP 2: Check Fencing Token =====
+	if storedToken != record.FencingToken {
+		return nil, false, worklease.ErrFenced
 	}
 
 	return state, cleanHandoff, nil
