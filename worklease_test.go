@@ -786,4 +786,37 @@ var _ = Describe("worklease", func() {
 			})
 		})
 	})
+
+	Describe("HasWaitForLease", func() {
+		Context("with no options", func() {
+			It("returns false", func() {
+				Expect(worklease.HasWaitForLease(nil)).To(BeFalse())
+			})
+		})
+		Context("with WithWaitForLease option", func() {
+			It("returns true", func() {
+				Expect(worklease.HasWaitForLease([]worklease.AcquireOption{worklease.WithWaitForLease()})).To(BeTrue())
+			})
+		})
+		Context("with WithPollInterval only", func() {
+			It("returns false", func() {
+				Expect(worklease.HasWaitForLease([]worklease.AcquireOption{worklease.WithPollInterval(time.Second)})).To(BeFalse())
+			})
+		})
+		Context("with nil options slice", func() {
+			It("returns false without panicking", func() {
+				Expect(func() { worklease.HasWaitForLease(nil) }).NotTo(Panic())
+				Expect(worklease.HasWaitForLease(nil)).To(BeFalse())
+			})
+		})
+		Context("with WithWaitForLease and WithPollInterval together", func() {
+			It("returns true", func() {
+				opts := []worklease.AcquireOption{
+					worklease.WithWaitForLease(),
+					worklease.WithPollInterval(500 * time.Millisecond),
+				}
+				Expect(worklease.HasWaitForLease(opts)).To(BeTrue())
+			})
+		})
+	})
 })

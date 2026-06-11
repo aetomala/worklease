@@ -120,6 +120,17 @@ func WithPollInterval(d time.Duration) AcquireOption {
 	}
 }
 
+// HasWaitForLease reports whether opts includes WithWaitForLease.
+// Pool.New uses this to enforce that WithWaitForLease is not passed in
+// Config.AcquireOptions at construction time.
+func HasWaitForLease(opts []AcquireOption) bool {
+	cfg := acquireConfig{}
+	for _, opt := range opts {
+		opt(&cfg)
+	}
+	return cfg.waitForLease
+}
+
 // RenewalOption is a functional option for StartRenewal.
 type RenewalOption func(*renewalConfig)
 
