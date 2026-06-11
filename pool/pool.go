@@ -28,11 +28,11 @@ type PermanentError interface {
 }
 
 // WorkFn is the work function executed per slot.
-// ctx is the renewal context — cancelled on fencing or renewal failure.
-// workID identifies which slot is executing.
-// token is the current lease token — use it for mid-work Checkpoint calls.
-// prior contains the last checkpointed state from the previous holder, or nil.
-// cleanHandoff is true if the previous holder released explicitly.
+// The ctx argument is the renewal context — cancelled on fencing or renewal failure.
+// The workID argument identifies which slot is executing.
+// The token argument is the current lease token — use it for mid-work Checkpoint calls.
+// The prior argument contains the last checkpointed state from the previous holder, or nil.
+// The cleanHandoff argument is true if the previous holder released explicitly.
 // Return (checkpoint []byte, error): checkpoint is written as final state if
 // non-nil and error is not ErrFenced. Return a PermanentError to drop the slot
 // without reacquisition.

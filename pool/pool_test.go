@@ -106,7 +106,8 @@ var _ = Describe("pool", func() {
 
 				callCount := 0
 				fnCh := make(chan struct{}, 2)
-				renewCtx, _ := context.WithCancel(context.Background())
+				renewCtx, renewCancel := context.WithCancel(context.Background())
+				defer renewCancel()
 				stopFn := func() {}
 
 				mockLease.EXPECT().Acquire(gomock.Any(), "w1").Return(worklease.Token{}, nil).Times(2)
@@ -143,7 +144,8 @@ var _ = Describe("pool", func() {
 				lctx, lcancel := context.WithCancel(context.Background())
 				defer lcancel()
 
-				renewCtx, _ := context.WithCancel(context.Background())
+				renewCtx, renewCancel := context.WithCancel(context.Background())
+				defer renewCancel()
 				stopFn := func() {}
 				iteration := 0
 				itCh := make(chan int, 2)
@@ -183,7 +185,8 @@ var _ = Describe("pool", func() {
 
 		Context("when WorkFn returns a PermanentError", func() {
 			It("drops the slot goroutine without reacquiring", func() {
-				renewCtx, _ := context.WithCancel(context.Background())
+				renewCtx, renewCancel := context.WithCancel(context.Background())
+				defer renewCancel()
 				stopFn := func() {}
 
 				gomock.InOrder(
@@ -211,7 +214,8 @@ var _ = Describe("pool", func() {
 				lctx, lcancel := context.WithCancel(context.Background())
 				defer lcancel()
 
-				renewCtx, _ := context.WithCancel(context.Background())
+				renewCtx, renewCancel := context.WithCancel(context.Background())
+				defer renewCancel()
 				stopFn := func() {}
 				iteration := 0
 				times := make([]time.Time, 0, 2)
@@ -259,7 +263,8 @@ var _ = Describe("pool", func() {
 			It("slot appears during fn and disappears after", func() {
 				blocked := make(chan struct{})
 				release := make(chan struct{})
-				renewCtx, _ := context.WithCancel(context.Background())
+				renewCtx, renewCancel := context.WithCancel(context.Background())
+				defer renewCancel()
 				stopFn := func() {}
 
 				mockLease.EXPECT().Acquire(gomock.Any(), "w1").Return(worklease.Token{}, nil).AnyTimes()
@@ -289,7 +294,8 @@ var _ = Describe("pool", func() {
 				blocked := make(chan struct{})
 				entered := make(chan struct{})
 				const backoff = 200 * time.Millisecond
-				renewCtx, _ := context.WithCancel(context.Background())
+				renewCtx, renewCancel := context.WithCancel(context.Background())
+				defer renewCancel()
 				stopFn := func() {}
 
 				iteration := 0
@@ -326,7 +332,8 @@ var _ = Describe("pool", func() {
 		Context("is safe for concurrent use", func() {
 			It("does not trigger the race detector", func() {
 				lctx, lcancel := context.WithCancel(context.Background())
-				renewCtx, _ := context.WithCancel(context.Background())
+				renewCtx, renewCancel := context.WithCancel(context.Background())
+				defer renewCancel()
 				stopFn := func() {}
 
 				mockLease.EXPECT().Acquire(gomock.Any(), "w1").Return(worklease.Token{}, nil).AnyTimes()

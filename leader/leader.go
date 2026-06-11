@@ -28,8 +28,8 @@ type Config struct {
 }
 
 // Elect acquires workID and calls fn under a managed renewal context.
-// fn receives a context that is cancelled if the lease is fenced or renewal fails.
-// fn must respect context cancellation — fencing propagates via context.
+// The fn argument receives a context cancelled if the lease is fenced or renewal fails.
+// Callers must respect context cancellation — fencing propagates via context.
 // Elect calls Release before returning in all non-fencing paths.
 // Elect surfaces worklease.ErrLeaseHeld, worklease.ErrFenced, and context errors
 // from the underlying Lease unchanged.
