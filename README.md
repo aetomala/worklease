@@ -373,6 +373,20 @@ cd examples/subscription-cancellation
 go run .
 ```
 
+### Cluster singleton scheduler with standby failover and fencing
+
+Demonstrates the `leader` package: one node acquires leadership and runs a periodic
+scheduler; a standby blocks with `WithWaitForLease` until the leader crashes and its
+lease expires; a third scenario shows how fencing propagates to the work function via
+context cancellation when a stalled leader is superseded.
+
+No infrastructure required — runs against the in-memory backend.
+
+```bash
+cd examples/cluster-singleton-scheduler
+go run .
+```
+
 Source: [`examples/`](examples/)
 
 ---

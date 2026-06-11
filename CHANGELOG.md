@@ -9,6 +9,11 @@ This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 
 ## [Unreleased]
 
+### Added
+
+- `examples/cluster-singleton-scheduler` — demonstrates `leader.Elect` with `WithWaitForLease`
+  standby failover and fencing propagation via context cancellation
+
 ---
 
 ## [v0.3.0] — 2026-06-11
