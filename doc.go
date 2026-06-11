@@ -26,14 +26,15 @@
 //
 // # What worklease is not
 //
-// worklease is not a distributed lock library, a workflow engine, a leader election
-// library, or a general-purpose job queue. For mutual exclusion alone, use distlock
-// or pglock. For durable workflow execution, use Temporal. For leader election, use
-// client-go/leaderelection.
+// worklease is not a distributed lock library, a workflow engine, or a general-purpose
+// job queue. For mutual exclusion alone, use distlock or pglock. For durable workflow
+// execution, use Temporal. For Kubernetes-native leader election, use
+// client-go/leaderelection. The leader subpackage provides simplified single-work-item
+// leadership built on worklease's own Lease primitives.
 //
 // # Backends
 //
-// v0.1 ships two backends:
+// Two backends are included:
 //
 //   - [github.com/aetomala/worklease/backend/postgres] — PostgreSQL-backed, suitable
 //     for production use. Requires a running PostgreSQL instance and the worklease

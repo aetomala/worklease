@@ -47,11 +47,11 @@ go build ./...
 go test -race ./...
 ```
 
-The PostgreSQL integration tests require a running PostgreSQL instance. Set `WORKLEASE_TEST_DSN`
+The PostgreSQL integration tests require a running PostgreSQL instance. Set `WORKLEASE_TEST_POSTGRES_DSN`
 to a valid DSN before running them:
 
 ```bash
-WORKLEASE_TEST_DSN="postgres://user:pass@localhost/worklease_test?sslmode=disable" \
+WORKLEASE_TEST_POSTGRES_DSN="postgres://user:pass@localhost/worklease_test?sslmode=disable" \
     go test -race -tags integration ./backend/postgres/...
 ```
 

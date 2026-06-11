@@ -176,6 +176,75 @@ if state == nil {
 
 ---
 
+## Upgrading
+
+`v0.3.0` includes a breaking change in the `checkpoint` package: `Codec.Encode` and `Codec.Decode` are renamed to `Marshal` and `Unmarshal`. Callers using `checkpoint.JSON()` are unaffected. See [`UPGRADING.md`](UPGRADING.md) for full migration instructions.
+
+---
+
+## Higher-level packages
+
+### worker — Lifecycle management
+
+`worker.Runner` handles the acquire / ReadCheckpoint / StartRenewal / WorkFn / Release lifecycle so callers implement only the work function:
+
+```go
+import "github.com/aetomala/worklease/worker"
+
+r, err := worker.NewRunner(worker.RunnerConfig{
+    Lease:  lease,
+    WorkFn: func(ctx context.Context, token worklease.Token, prior []byte, cleanHandoff bool) ([]byte, error) {
+        // prior is the last checkpoint from the previous holder; nil on first acquisition.
+        // Return updated checkpoint bytes, or nil to leave the checkpoint unchanged.
+        return processWork(ctx, prior, cleanHandoff)
+    },
+})
+if err != nil { ... }
+if err := r.Run(ctx, "onboarding:tenant-abc"); err != nil { ... }
+```
+
+### leader — Simplified leadership
+
+`leader.Elect` acquires a work ID, starts managed lease renewal, calls `fn` under the renewal context, stops renewal, and releases. Suitable for single-leader patterns where one process should be active at a time:
+
+```go
+import "github.com/aetomala/worklease/leader"
+
+err := leader.Elect(ctx, lease, "scheduler:primary", leader.Config{}, func(ctx context.Context) error {
+    // ctx is cancelled if the lease is fenced or renewal fails.
+    // Return when the work is done; leader.Elect will release.
+    return runScheduler(ctx)
+})
+```
+
+Pass `worklease.WithWaitForLease()` in `leader.Config.AcquireOptions` to block until leadership is available rather than returning `ErrLeaseHeld` immediately.
+
+### pool — Distributed work distribution
+
+`pool.Pool` distributes a fixed set of work IDs across competing processes. Multiple Pool instances — one per process — collectively cover the full work ID set. Rebalancing is emergent from lease acquisition races:
+
+```go
+import "github.com/aetomala/worklease/pool"
+
+p, err := pool.New(lease, pool.Config{
+    WorkIDs: []string{"shard-0", "shard-1", "shard-2", "shard-3"},
+}, func(ctx context.Context, workID string, token worklease.Token, prior []byte, cleanHandoff bool) ([]byte, error) {
+    return processShard(ctx, workID, prior)
+})
+if err != nil { ... }
+
+// Blocks until ctx is cancelled; all active slots complete before Run returns.
+if err := p.Run(ctx); err != nil { ... }
+```
+
+Return a `PermanentError` from the work function to drop a slot without reacquisition.
+
+### checkpoint — Typed serialization helpers
+
+`checkpoint.Codec` and the generic `Encode[T]` / `Decode[T]` helpers add typed serialization on top of the raw `[]byte` checkpoint layer. `checkpoint.JSON()` returns a `JSONCodec` backed by `encoding/json`.
+
+---
+
 ## Backends
 
 ### PostgreSQL (v0.1)
@@ -267,17 +336,23 @@ Requires Go 1.26+. PostgreSQL backend requires PostgreSQL 12+.
 
 ## Status
 
-v0.2.0 is the current stable release. The public API (`Lease`, `Token`, options, sentinels) is stable.
+v0.3.0 is the current stable release. The public API (`Lease`, `Token`, options, sentinels) is stable.
 
 ---
 
 ## Roadmap
 
+### Released
+
+- **v0.1.0** — Core lease primitives: `Lease`, `Backend`, PostgreSQL + in-memory backends, fencing, checkpoint
+- **v0.2.0** — `worker.Runner`, `checkpoint.Codec`, `LeaseObserver`, `memory.Clock`, examples
+- **v0.3.0** — `leader.Elect`, `pool.Pool`, `HasWaitForLease`, `checkpoint.Codec` method rename (breaking — see `UPGRADING.md`)
+
 ### Future
 
 - Redis backend
-- `Token` test constructor — unblocks table-driven tests that need to construct tokens directly
 - etcd backend
+- `Token` test constructor — unblocks table-driven tests that construct tokens directly
 
 ---
 
