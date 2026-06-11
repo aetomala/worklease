@@ -387,6 +387,21 @@ cd examples/cluster-singleton-scheduler
 go run .
 ```
 
+### Partition processor with checkpoint resume and slot eviction
+
+Demonstrates the `pool` package: a pool acquires a fixed set of named partitions and
+processes them concurrently; `ActiveSlots` provides live observability of partition
+ownership; a second pool resumes from checkpointed offsets on clean handoff; a
+decommissioned partition exits via `PermanentError` while the rest of the pool
+continues running.
+
+No infrastructure required — runs against the in-memory backend.
+
+```bash
+cd examples/partition-processor
+go run .
+```
+
 Source: [`examples/`](examples/)
 
 ---
