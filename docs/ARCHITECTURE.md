@@ -17,6 +17,11 @@ library does and why it is built the way it is.
 - [In-Memory Backend](#in-memory-backend)
 - [Renewal Loop](#renewal-loop)
 - [Acquire Flow](#acquire-flow)
+- [Observability — LeaseObserver](#observability--leaseobserver)
+- [worker.Runner — Lifecycle Management](#workerrunner--lifecycle-management)
+- [checkpoint — Typed Encoding](#checkpoint--typed-encoding)
+- [leader — Simplified Leader Election (v0.3)](#leader--simplified-leader-election-v03)
+- [pool — Work Distribution (v0.3)](#pool--work-distribution-v03)
 - [Testing Approach](#testing-approach)
 - [Residual Risks](#residual-risks)
 - [Roadmap](#roadmap)
@@ -251,37 +256,46 @@ operations. Retry policy lives in the library core and is consistent across all 
 **5. No resource ownership surprise.** `postgres.New(db)` does not close `db`. The caller
 constructs; the caller closes. See [ADR-0001](adr/0001-backend-interface-no-close.md).
 
-**6. Observability without framework.** `Token` implements `fmt.Stringer`. Accessor methods
-on `Token` expose all fields needed for logs, traces, and metrics. No observability interfaces
-to inject in v0.1 — hooks are left clean for v0.2.
+**6. Observability via LeaseObserver.** `Token` implements `fmt.Stringer`. `LeaseObserver`
+is the injection seam for metrics, structured logs, and traces — injected via `Config.Observer`,
+defaulting to a no-op. No observability framework is required or assumed.
+See [ADR-0007](adr/0007-observer-config-field.md).
 
 **7. The code is the documentation.** Exported identifiers are documented, packages have doc
 comments, comments explain why not what, errors carry context, interfaces specify contracts.
 
 **8. Test at the interface boundary.** The `Backend` interface makes both the PostgreSQL and
 in-memory backends fully testable in isolation. Integration tests for PostgreSQL require a real
-database. Unit tests for the library core use the in-memory backend.
+database. Unit tests for the library core use the in-memory backend or mockgen-generated mocks.
+
+**9. Higher-level packages are additive, not modifying.** `worker.Runner`, `leader`, and `pool`
+build on `worklease.Lease` without modifying the core API surface. Each package addresses a
+specific use-case shape; callers use only what they need.
 
 ---
 
 ## Project Structure
 
-| Package | Purpose | Status |
-|---------|---------|--------|
-| `github.com/aetomala/worklease` | `Lease` interface, `Token` type, options, errors, `New` constructor | v0.1 |
+| Package | Purpose | Since |
+|---------|---------|-------|
+| `github.com/aetomala/worklease` | `Lease` interface, `Token`, options, errors, `New` constructor | v0.1 |
 | `github.com/aetomala/worklease/backend` | Internal `Backend` interface and `LeaseRecord` type | v0.1 |
 | `github.com/aetomala/worklease/backend/postgres` | PostgreSQL-backed production backend | v0.1 |
-| `github.com/aetomala/worklease/backend/memory` | In-memory backend for unit testing | v0.1 |
+| `github.com/aetomala/worklease/backend/memory` | In-memory backend for testing; supports clock injection | v0.1 |
+| `github.com/aetomala/worklease/worker` | `Runner` — manages acquire/checkpoint/release lifecycle | v0.2 |
+| `github.com/aetomala/worklease/checkpoint` | `Codec` interface and typed `Encode[T]`/`Decode[T]` helpers | v0.2 |
+| `github.com/aetomala/worklease/leader` | `Elect` — simplified leader election without checkpoint state | v0.3 |
+| `github.com/aetomala/worklease/pool` | `Pool` — distributes work IDs across competing processes | v0.3 |
 
 ### File layout
 
 ```
 worklease/
-├── doc.go          # Package-level documentation
-├── lease.go        # Lease interface, Token, AcquireOption, RenewalOption, error sentinels
-├── worklease.go    # New() constructor, Config struct
-├── acquire.go      # Acquire — wait+retry loop for WithWaitForLease
-├── renewal.go      # StartRenewal — managed renewal goroutine
+├── doc.go              # Package-level documentation
+├── lease.go            # Lease interface, Token, LeaseObserver, AcquireOption, RenewalOption, errors
+├── worklease.go        # New() constructor, Config struct, noopObserver
+├── acquire.go          # Acquire — wait+retry loop for WithWaitForLease
+├── renewal.go          # StartRenewal — managed renewal goroutine
 ├── backend/
 │   ├── backend.go          # Backend interface, LeaseRecord — internal to library
 │   ├── postgres/
@@ -289,8 +303,21 @@ worklease/
 │   │   ├── schema.sql      # CREATE TABLE statement
 │   │   └── postgres_test.go
 │   └── memory/
-│       ├── memory.go       # In-memory backend implementation
+│       ├── memory.go       # In-memory backend; Clock interface, Option, WithClock
 │       └── memory_test.go
+├── worker/
+│   └── runner.go       # Runner, WorkFn, RunnerConfig, NewRunner
+├── checkpoint/
+│   └── codec.go        # Codec, JSONCodec, Encode[T], Decode[T]
+├── leader/             # v0.3
+│   └── leader.go       # Elect, Config
+├── pool/               # v0.3
+│   └── pool.go         # Pool, WorkFn, PermanentError, Config, New
+├── testutil/
+│   └── mock_backend.go # Generated Backend mock (mockgen)
+├── examples/
+│   ├── subscription-cancellation/
+│   └── cross-tenant-migration/
 └── docs/
     ├── ARCHITECTURE.md     # This document
     └── adr/                # Architecture Decision Records
@@ -383,17 +410,21 @@ tables) that the worker may have already initiated. See
 
 ```go
 type Config struct {
-    TTL      time.Duration // Lease TTL; required.
-    HolderID string        // Unique identity for this worker; required.
+    TTL      time.Duration  // Lease TTL; required.
+    HolderID string         // Unique identity for this worker; required.
+    Observer LeaseObserver  // Optional; nil installs a no-op observer. Never panics on nil.
 }
 
-func New(backend Backend, cfg Config) (Lease, error)
+func New(b backend.Backend, cfg Config) (Lease, error)
 ```
 
 `HolderID` should uniquely identify the worker process. A hostname, a Kubernetes Pod name,
 or a UUID generated at startup are all good choices. It appears in `Token.HolderID()` and
 in the `holder_id` column in the backend, making it possible to track which worker holds a
 lease at any point in time.
+
+`Observer` is the injection point for metrics, logs, and traces. See
+[Observability — LeaseObserver](#observability--leaseobserver).
 
 ### AcquireOption and RenewalOption
 
@@ -509,11 +540,13 @@ SET expires_at = NOW() + $1,
 WHERE work_id       = $2
   AND holder_id     = $3
   AND fencing_token = $4
+  AND expires_at    > NOW()
 ```
 
-Same fencing gate. No `checkpoint` column update — the existing checkpoint is preserved.
-`Renew` extends the lease TTL without updating progress state. The checkpoint reflects the
-last explicit `Checkpoint` call, not the last `Renew`.
+Same fencing gate, plus an expiry guard. If the lease has already expired, zero rows are
+updated and `ErrLeaseExpired` is returned — the renewal goroutine cancels `renewCtx` and
+signals to downstream work that the lease is lost. No bare `time.Now()` — the database's
+`NOW()` is authoritative.
 
 ### Release — Set clean_handoff
 
@@ -544,12 +577,30 @@ processes.
 ```go
 import "github.com/aetomala/worklease/backend/memory"
 
-backend := memory.New()
+b := memory.New()
 ```
 
-No `Close` method — no cleanup required. Time-based expiry uses `time.Now()` from the local
-clock. Tests that exercise lease expiry must use real sleep or a clock injection (v0.2 concern;
-see [Residual Risks — R3](#residual-risks)).
+No `Close` method — no cleanup required.
+
+### Clock Injection
+
+Time-based expiry uses an injectable `Clock` interface. The default `realClock` delegates to
+`time.Now()`. Tests that exercise lease expiry inject a `fakeClock` instead of using real
+sleep.
+
+```go
+type Clock interface {
+    Now() time.Time
+}
+
+// WithClock overrides the clock used for all time operations inside the memory backend.
+func WithClock(c Clock) Option
+
+b := memory.New(memory.WithClock(fakeClock))
+```
+
+The `Clock` interface is exported so test packages outside `backend/memory` can implement fake
+clocks without importing an internal type. See [ADR-0008](adr/0008-clock-interface-memory-backend.md).
 
 ---
 
@@ -561,13 +612,14 @@ operation.
 
 ```go
 renewCtx, stopRenewal := lease.StartRenewal(ctx, token)
-defer stopRenewal()
+defer stopRenewal()  // panic-safety net
 
 // All downstream work uses renewCtx so that fencing propagates automatically.
 if err := doWork(renewCtx, ...); err != nil {
     return err
 }
 
+stopRenewal()  // explicit call — stops renewal before Release
 // Use the original ctx for Release — renewCtx may be cancelled by the time work finishes.
 return lease.Release(ctx, token)
 ```
@@ -579,6 +631,7 @@ The `renewCtx` is cancelled when any of the following occur:
 | Event | Signal |
 |-------|--------|
 | Renewal receives `ErrFenced` | `renewCtx` cancelled — this worker is a zombie, stop all work |
+| Renewal receives `ErrLeaseExpired` | `renewCtx` cancelled — lease expired without a competitor |
 | Renewal fails (non-fencing error) | `renewCtx` cancelled — lease state is uncertain |
 | Parent `ctx` is cancelled | `renewCtx` cancelled — propagated from parent |
 | `stopRenewal()` is called | `renewCtx` is **not** cancelled — clean shutdown |
@@ -591,6 +644,13 @@ Note that `renewCtx` cancellation propagates fencing into downstream work — it
 external systems. An in-flight HTTP call or database write to an external system initiated
 before `renewCtx` is cancelled will still complete. See
 [What worklease Does Not Solve](#what-worklease-does-not-solve).
+
+### stopRenewal — Explicit Call vs Defer
+
+`defer stopRenewal()` is a panic-safety net registered immediately after `StartRenewal`
+returns. It is not the primary stop mechanism. Before calling `Release`, always call
+`stopRenewal()` explicitly — this ensures the renewal goroutine has exited cleanly before
+ownership is surrendered. The `defer` then becomes a no-op.
 
 ### Default Renewal Interval
 
@@ -646,46 +706,257 @@ behind the current holder.
 
 ---
 
-## Testing Approach
+## Observability — LeaseObserver
 
-### Unit Tests — In-Memory Backend
-
-Library core tests (`acquire.go`, `renewal.go`, `worklease.go`) use the in-memory backend.
-No database required. All tests use table-driven format with named cases.
+`LeaseObserver` is a five-method hook interface injected via `Config.Observer`. The library
+calls it synchronously after every lease operation. Implementations must not block or panic.
+When `Config.Observer` is nil, the library installs a no-op observer — no nil check is ever
+required at call sites.
 
 ```go
-tests := []struct {
-    name    string
-    workID  string
-    wantErr error
-}{
-    {"returns ErrLeaseHeld when lease is held", "job-1", worklease.ErrLeaseHeld},
-    {"returns ErrFenced when token is stale",   "job-2", worklease.ErrFenced},
+type LeaseObserver interface {
+    OnAcquire(ctx context.Context, workID string, token Token, err error)
+    OnCheckpoint(ctx context.Context, token Token, size int, err error)
+    OnRenew(ctx context.Context, token Token, err error)
+    OnRelease(ctx context.Context, token Token, err error)
+    OnFenced(ctx context.Context, token Token)
 }
 ```
 
-Test names are sentences describing the scenario.
+When a fencing event occurs, `OnCheckpoint` (or `OnRenew`) fires first, then `OnFenced`. This
+order is mandatory — observers can rely on it to distinguish a fencing event from a generic
+error in `OnCheckpoint`/`OnRenew`.
+
+`OnFenced` is not called for `Release` — a fenced release is surfaced via `OnRelease` only.
+
+A typical use is a Prometheus implementation: each callback increments a labeled counter or
+records a histogram. The `Token` parameter gives access to `WorkID()`, `HolderID()`, and
+`FencingToken()` for structured labelling.
+
+See [ADR-0007](adr/0007-observer-config-field.md).
+
+---
+
+## worker.Runner — Lifecycle Management
+
+`worker.Runner` manages the full acquire → checkpoint → release lifecycle so callers write
+only the work function. Without `Runner`, every caller must write the same 30-plus-line
+scaffold; `Runner` reduces that to a single `Run` call.
+
+```go
+import "github.com/aetomala/worklease/worker"
+
+// WorkFn is the work function signature accepted by Runner.Run.
+// ctx is the renewal context — cancelled on fencing or renewal failure.
+// prior contains the last checkpointed state from the previous holder (nil on first run).
+// cleanHandoff is true when the previous holder released intentionally.
+// Return final state to checkpoint after work completes; return nil to skip final checkpoint.
+type WorkFn func(ctx context.Context, token worklease.Token, prior []byte, cleanHandoff bool) ([]byte, error)
+
+runner, err := worker.NewRunner(worker.RunnerConfig{
+    Lease:  lease,
+    WorkFn: myWorkFn,
+})
+
+err = runner.Run(ctx, "onboarding:tenant-abc")
+```
+
+`Runner.Run` performs these steps in order:
+
+1. `lease.Acquire` — obtains the lease
+2. `lease.ReadCheckpoint` — reads prior state and `cleanHandoff` flag
+3. `lease.StartRenewal` — starts the managed renewal goroutine
+4. Calls `WorkFn` with `renewCtx`, the token, prior state, and `cleanHandoff`
+5. `stopRenewal()` — explicit stop before release
+6. If `WorkFn` returned non-nil state: `lease.Checkpoint` — writes final state
+7. `lease.Release` — surrenders the lease (skipped on `ErrFenced`)
+
+`Token` is passed to `WorkFn` so callers can make mid-work `Checkpoint` calls for fine-grained
+progress recording without stepping outside the `Runner` API.
+
+**Error contract:**
+
+- `ErrFenced` from any step — `Runner` returns `ErrFenced`; `Release` is not called.
+- `WorkFn` returning `ErrFenced` — same as above.
+- Any other error — `Runner` calls `Release` before returning.
+
+---
+
+## checkpoint — Typed Encoding
+
+The core `Lease` interface uses `[]byte` for checkpoint state (ADR-0003). The `checkpoint`
+subpackage provides opt-in typed helpers that eliminate the repeated `json.Marshal` /
+`json.Unmarshal` + nil-guard boilerplate present at every call site.
+
+```go
+import "github.com/aetomala/worklease/checkpoint"
+
+// Codec is the serialization interface for checkpoint state.
+type Codec interface {
+    Marshal(v any) ([]byte, error)
+    Unmarshal(data []byte, v any) error
+}
+
+// JSON returns a Codec backed by encoding/json.
+func JSON() Codec
+
+// Encode marshals v using the given Codec.
+func Encode[T any](c Codec, v T) ([]byte, error)
+
+// Decode unmarshals data into a new T using the given Codec.
+// Returns the zero value of T when data is nil — the "no prior checkpoint" invariant.
+func Decode[T any](c Codec, data []byte) (T, error)
+```
+
+The `Codec` interface is the extension point. The library ships `JSON()` as the default. Callers
+who use protobuf, msgpack, or any other format implement the two-method `Codec` interface once
+and receive the generic helpers for free — no changes to call sites.
+
+**The nil-bytes contract:** `Decode[T]` returns the zero value of `T` without error when `data`
+is nil. This is the "no prior checkpoint" invariant: a first-time acquirer receives a usable
+zero struct regardless of which codec is in use. This check happens in `Decode[T]` before
+delegating to the codec, so it holds even for codecs that would panic or error on nil input.
+
+**Why `Marshal`/`Unmarshal` on the interface, `Encode`/`Decode` on the helpers?** The interface
+methods match Go's convention for value-to-bytes operations (`encoding.BinaryMarshaler`,
+`encoding.TextMarshaler`). The package-level generics use `Encode`/`Decode` to signal a
+different semantic: type-safe, nil-safe wrappers around the codec — not raw byte operations.
+
+See [ADR-0009](adr/0009-checkpoint-subpackage-codec-interface.md).
+
+---
+
+## leader — Simplified Leader Election (v0.3)
+
+`leader.Elect` is a simplified API for use cases where mutual exclusion is all that is needed —
+one active goroutine at a time for a named work ID, with fencing propagated via context
+cancellation. No checkpoint state is carried or handed off.
+
+```go
+import "github.com/aetomala/worklease/leader"
+
+err := leader.Elect(ctx, lease, "scheduler:primary", leader.Config{
+    AcquireOptions: []worklease.AcquireOption{worklease.WithWaitForLease()},
+}, func(ctx context.Context) error {
+    // ctx is cancelled if the lease is fenced or renewal fails.
+    return runScheduler(ctx)
+})
+```
+
+`Elect` manages the full lifecycle: acquire, start renewal, call `fn` with `renewCtx`, stop
+renewal explicitly, and release. `fn` receives no `Token` — leader election is presence-only.
+Callers who need to make fencing-aware writes during work should use `worker.Runner` instead.
+
+Blocking vs fail-fast acquire behavior is caller-controlled via `cfg.AcquireOptions` —
+`Elect` does not force `WithWaitForLease`. Pass it explicitly to block until leadership is
+available.
+
+See [ADR-0010](adr/0010-leader-fn-signature-and-acquire-semantics.md).
+
+---
+
+## pool — Work Distribution (v0.3)
+
+`pool.Pool` distributes a fixed set of work IDs across competing processes. Multiple `Pool`
+instances — one per process — share a backend and collectively cover the work ID set.
+Rebalancing is emergent from lease acquisition races. Each active slot is backed by a
+`worker.Runner` internally.
+
+```go
+import "github.com/aetomala/worklease/pool"
+
+p, err := pool.New(lease, pool.Config{
+    WorkIDs:         []string{"shard:0", "shard:1", "shard:2", "shard:3"},
+    BackoffInterval: 5 * time.Second,
+}, func(ctx context.Context, workID string, token worklease.Token, prior []byte, cleanHandoff bool) ([]byte, error) {
+    return processShard(ctx, workID, prior, cleanHandoff)
+})
+
+err = p.Run(ctx)  // blocks until ctx is cancelled
+```
+
+`Pool.Run` starts one goroutine per work ID. Each goroutine loops: acquire → work → release,
+with `BackoffInterval` delay on non-fencing errors. When `ctx` is cancelled, all goroutines
+exit and `Run` returns after all active slots have completed or released.
+
+`WorkFn` receives the `Token` because pool targets stateful work — mid-work `Checkpoint` calls
+are expected. The `workID` parameter identifies which slot is executing; callers dispatch
+internally based on it.
+
+**Permanent slot failure:** Return an error implementing `PermanentError` to drop the slot
+permanently without reacquisition:
+
+```go
+type PermanentError interface {
+    error
+    Permanent() bool
+}
+```
+
+`pool` provides no concrete implementation — callers define their own error type. `errors.As`
+unwrapping is used to detect it, so the error composes correctly with `fmt.Errorf` wrapping
+chains.
+
+**`WithWaitForLease` is prohibited** in `pool.Config.AcquireOptions`. The pool manages its
+own acquisition loop — if a slot goroutine blocks inside `Runner.Run` waiting for a lease, it
+cannot respond to context cancellation during shutdown. `pool.New` returns `ErrConfigInvalid`
+if `WithWaitForLease` is detected.
+
+See [ADR-0011](adr/0011-pool-scope-and-permanent-error-interface.md).
+
+---
+
+## Testing Approach
+
+### Unit Tests — Ginkgo/Gomega BDD
+
+All tests use Ginkgo/Gomega. Each test file has one outer `Describe` per component, with
+nested `Describe` blocks for lifecycle phases, `Context` blocks for conditions, and `It` blocks
+as outcome assertions.
+
+```go
+var _ = Describe("leaseClient", func() {
+    // shared vars, BeforeEach, AfterEach at this level
+
+    Describe("Phase 1: Constructor and Initialization", func() {
+        It("returns ErrLeaseHeld when the lease is already held", func() {
+            ...
+        })
+    })
+
+    Describe("Phase 3: Core Operations", func() {
+        It("returns ErrFenced when the fencing token is stale", func() {
+            ...
+        })
+    })
+})
+```
+
+`It` text is a complete sentence describing the expected outcome. Tests at the library core
+level use the in-memory backend or mockgen-generated mocks — no database required.
 
 ### Integration Tests — PostgreSQL Backend
 
 `backend/postgres/postgres_test.go` requires a real PostgreSQL instance. Set
-`WORKLEASE_TEST_DSN` to a valid DSN:
+`WORKLEASE_TEST_POSTGRES_DSN` to a valid DSN:
 
 ```bash
-WORKLEASE_TEST_DSN="postgres://user:pass@localhost/worklease_test?sslmode=disable" \
-    go test -race -tags integration ./backend/postgres/...
+WORKLEASE_TEST_POSTGRES_DSN="postgres://user:pass@localhost/worklease_test?sslmode=disable" \
+    go test ./backend/postgres/...
 ```
 
 Integration tests verify the SQL operations that are not testable with the in-memory backend:
-expiry semantics via `NOW()`, the `ON CONFLICT` upsert behavior, and `TIMESTAMPTZ` precision.
+expiry semantics via `NOW()`, the `ON CONFLICT` upsert behavior, `TIMESTAMPTZ` precision, and
+the two-query `ReadCheckpoint` and `Renew` disambiguation paths.
 
-### Race Detection
+### Race Detection and CI
 
-All tests run with `-race`. Concurrent access to the in-memory backend and the renewal
-goroutine are areas that benefit most from race detection.
+All tests run with `-race`. The CI pipeline runs two jobs: `lint + govulncheck` and
+`test + postgres service container`. The in-memory backend and the renewal goroutine are the
+areas that benefit most from race detection.
 
 ```bash
-go test -race ./...
+make ci   # lint, build, test (all three targets)
 ```
 
 ---
@@ -704,10 +975,11 @@ never used for expiry decisions.
 cancelled. The goroutine will eventually self-terminate when the lease expires or is acquired
 by another holder (fencing). Callers should `defer stopRenewal()` immediately after
 `StartRenewal` returns to prevent this. The godoc for `StartRenewal` makes this explicit.
+`worker.Runner` handles this correctly by design.
 
-**R3 — In-memory backend real-time expiry.** The in-memory backend uses `time.Now()` for
-expiry checks. Tests that exercise lease expiry must either use real sleep or inject a clock.
-Clock injection is a v0.2 concern for the in-memory backend.
+**R3 — In-memory backend real-time expiry.** Resolved in v0.2. The `Clock` interface is
+injected via `memory.WithClock`. All expiry paths inside `memory.go` use `mb.clock.Now()`;
+no bare `time.Now()` remains. Tests exercise expiry deterministically without real sleep.
 
 **R4 — External side effects are not fenced.** `worklease` fences writes to the lease store.
 It does not fence external mutations — Stripe charges, email sends, S3 writes, or domain table
@@ -715,8 +987,7 @@ updates outside the lease schema. A zombie worker can initiate external mutation
 expiry and its next `Checkpoint` or `Renew` call. `renewCtx` cancellation propagates fencing
 into Go context-aware code, but does not cancel in-flight network calls already dispatched.
 Callers must make every external mutation idempotent, use an outbox pattern, or enforce
-idempotency keys at each downstream system. This is not a limitation unique to `worklease` —
-it is an inherent property of any coordination primitive operating below the application layer.
+idempotency keys at each downstream system.
 
 **R5 — Checkpoint ordering and external effect sequencing.** Two failure modes exist at the
 boundary between checkpointing and external effects:
@@ -731,6 +1002,12 @@ boundary between checkpointing and external effects:
 Neither case is a library defect — they are inherent to at-least-once execution between
 checkpoint boundaries. The correct mitigation is idempotent external effects with
 checkpoint-aligned boundaries: checkpoint after the effect completes successfully, not before.
+
+**R6 — pool WithWaitForLease misuse.** Passing `worklease.WithWaitForLease()` in
+`pool.Config.AcquireOptions` causes each slot goroutine to block inside `runner.Run` during
+acquisition, preventing the goroutine from responding to context cancellation until the lease
+becomes available. This breaks clean pool shutdown. `pool.New` returns `ErrConfigInvalid` if
+`WithWaitForLease` is detected in `AcquireOptions`.
 
 ---
 
@@ -747,15 +1024,27 @@ checkpoint-aligned boundaries: checkpoint after the effect completes successfull
 - Error sentinels: `ErrFenced`, `ErrLeaseHeld`, `ErrLeaseExpired`
 - ADR-0001 through ADR-0006 ✅
 
-### v0.2 — Planned
+### v0.2 — Released (v0.2.0, 2026-06-09)
+
+- `LeaseObserver` — five-method hook interface; injected via `Config.Observer`; no-op default
+- `memory.Clock` interface + `memory.Option` + `memory.WithClock` — deterministic expiry in tests
+- `worker.Runner` — acquire/checkpoint/release lifecycle management
+- `checkpoint` package — `Codec` interface, `JSON()` codec, `Encode[T]`/`Decode[T]` helpers
+- Both examples rewritten to use `Runner` and `checkpoint`
+- Three retroactive backend correctness fixes (issues #13, #14, #15)
+- ADR-0007, ADR-0008, ADR-0009 ✅
+
+### v0.3 — In Design
+
+- `HasWaitForLease([]AcquireOption) bool` — option inspection helper for higher-level packages
+- `Codec` interface method rename: `Encode`/`Decode` → `Marshal`/`Unmarshal` (breaking change; see `UPGRADING.md`)
+- `leader` package — `Elect`, `Config`
+- `pool` package — `Pool`, `WorkFn`, `PermanentError`, `Config`
+- ADR-0010, ADR-0011
+
+### v0.4 — Planned
 
 - Redis backend
-- Clock injection in in-memory backend (addresses R3)
-- Observability interface injection (logger, metrics)
-- `Token` test constructor (addresses the table-driven test limitation from ADR-0002)
-
-### Future
-
 - etcd backend
 
 ---
@@ -773,7 +1062,12 @@ the decision made, and the consequences — including the alternatives that were
 | [0004](adr/0004-renewal-loop-managed-goroutine.md) | StartRenewal is a managed goroutine returning (renewCtx, stopRenewal) | Accepted |
 | [0005](adr/0005-acquire-default-returns-err-lease-held.md) | Acquire returns ErrLeaseHeld immediately by default; wait+retry is opt-in | Accepted |
 | [0006](adr/0006-backend-acquire-single-attempt.md) | Backend.Acquire is single-attempt; the wait+retry loop lives in library core | Accepted |
+| [0007](adr/0007-observer-config-field.md) | LeaseObserver injected via Config field; nil installs no-op | Accepted |
+| [0008](adr/0008-clock-interface-memory-backend.md) | Clock interface for in-memory backend testability | Accepted |
+| [0009](adr/0009-checkpoint-subpackage-codec-interface.md) | checkpoint subpackage with Codec interface and generic helpers | Accepted |
+| [0010](adr/0010-leader-fn-signature-and-acquire-semantics.md) | leader.Elect fn receives no Token; acquire semantics are caller-controlled | Accepted |
+| [0011](adr/0011-pool-scope-and-permanent-error-interface.md) | pool scope is cross-process; permanent slot failure signals via interface | Accepted |
 
 ---
 
-*Last updated: June 2026 — v0.1.0*
+*Last updated: June 2026 — v0.2.0 released, v0.3 in design*
