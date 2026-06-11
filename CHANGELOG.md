@@ -13,6 +13,9 @@ This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 
 - `examples/cluster-singleton-scheduler` — demonstrates `leader.Elect` with `WithWaitForLease`
   standby failover and fencing propagation via context cancellation
+- `examples/partition-processor` — demonstrates `pool.Pool` with concurrent slot acquisition,
+  `ActiveSlots` observability, checkpoint-as-cursor resume on clean handoff, and `PermanentError`
+  slot eviction
 
 ---
 

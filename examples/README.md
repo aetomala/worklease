@@ -64,3 +64,23 @@ A background scheduler that must run on exactly one cluster node at a time, usin
 cd cluster-singleton-scheduler
 go run .
 ```
+
+---
+
+### [Partition Processor](partition-processor/)
+
+An event pipeline with a fixed set of named partitions, using the `pool` package. Best for:
+- Understanding `pool.Pool` as a concurrent alternative to running a single `worker.Runner`
+- Seeing `ActiveSlots` used for runtime observability of partition ownership
+- Understanding `PermanentError` for permanent slot eviction and cross-holder checkpoint resume
+
+**Features**:
+- Scenario 1: Pool acquires all 6 partitions immediately; `ActiveSlots` shows concurrent ownership
+- Scenario 2: Pool-A checkpoints per-partition cursors; Pool-B resumes from those offsets on clean handoff
+- Scenario 3: `PermanentError` evicts a decommissioned partition while the rest of the pool keeps running
+
+**Run**:
+```bash
+cd partition-processor
+go run .
+```
