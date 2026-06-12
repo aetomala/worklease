@@ -1,6 +1,8 @@
 # worklease
 
+[![CI](https://github.com/aetomala/worklease/actions/workflows/ci.yml/badge.svg)](https://github.com/aetomala/worklease/actions/workflows/ci.yml)
 [![Go Reference](https://pkg.go.dev/badge/github.com/aetomala/worklease.svg)](https://pkg.go.dev/github.com/aetomala/worklease)
+[![Go 1.25+](https://img.shields.io/badge/Go-1.25%2B-00ADD8?logo=go&logoColor=white)](go.mod)
 [![Go Report Card](https://goreportcard.com/badge/github.com/aetomala/worklease)](https://goreportcard.com/report/github.com/aetomala/worklease)
 [![License](https://img.shields.io/badge/license-Apache%202.0-blue.svg)](LICENSE)
 
