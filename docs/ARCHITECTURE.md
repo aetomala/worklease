@@ -567,6 +567,12 @@ Setting `expires_at` to a past timestamp makes the record satisfy the `Acquire` 
 (`expires_at < NOW()`) immediately, so the successor can acquire without waiting for the
 original TTL to elapse.
 
+**Operational note on `expires_at` ambiguity:** After `Release`, a row with
+`expires_at < NOW()` is ambiguous — it may indicate a clean release, a crash-timeout that
+elapsed, or an expired stale row. `clean_handoff = TRUE` disambiguates intent for ad-hoc
+operational queries. `expires_at > NOW()` continues to reliably identify a currently held
+lease.
+
 ---
 
 ## In-Memory Backend
@@ -852,7 +858,14 @@ Blocking vs fail-fast acquire behavior is caller-controlled via `cfg.AcquireOpti
 `Elect` does not force `WithWaitForLease`. Pass it explicitly to block until leadership is
 available.
 
-See [ADR-0010](adr/0010-leader-fn-signature-and-acquire-semantics.md).
+`Elect` has no built-in backoff between attempts. Callers that wrap `Elect` in a retry loop
+are responsible for supplying their own backoff — because `Release` now expires the lease
+immediately, a fast-returning `fn` and an immediate re-call of `Elect` will produce rapid
+acquire/release/reacquire cycling across competing processes. `pool.Pool` callers are
+unaffected — `Config.BackoffInterval` governs reacquisition delay.
+
+See [ADR-0010](adr/0010-leader-fn-signature-and-acquire-semantics.md) and
+[ADR-0012](adr/0012-release-expires-lease-immediately.md).
 
 ---
 
@@ -1041,7 +1054,8 @@ becomes available. This breaks clean pool shutdown. `pool.New` returns `ErrConfi
 - `Codec` interface method rename: `Encode`/`Decode` → `Marshal`/`Unmarshal` (breaking change; see `UPGRADING.md`)
 - `leader` package — `Elect`, `Config`
 - `pool` package — `Pool`, `WorkFn`, `PermanentError`, `Config`
-- ADR-0010, ADR-0011
+- `Release` semantics corrected — now expires the lease immediately in both backends, enabling instant clean handoff (issue #33)
+- ADR-0010, ADR-0011, ADR-0012
 
 ### v0.4 — Planned
 
@@ -1068,6 +1082,7 @@ the decision made, and the consequences — including the alternatives that were
 | [0009](adr/0009-checkpoint-subpackage-codec-interface.md) | checkpoint subpackage with Codec interface and generic helpers | Accepted |
 | [0010](adr/0010-leader-fn-signature-and-acquire-semantics.md) | leader.Elect fn receives no Token; acquire semantics are caller-controlled | Accepted |
 | [0011](adr/0011-pool-scope-and-permanent-error-interface.md) | pool scope is cross-process; permanent slot failure signals via interface | Accepted |
+| [0012](adr/0012-release-expires-lease-immediately.md) | Release expires the lease immediately — successor acquires without TTL wait | Accepted |
 
 ---
 
