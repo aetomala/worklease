@@ -167,8 +167,9 @@ func (mb *memoryBackend) Renew(ctx context.Context, record backend.LeaseRecord, 
 	return nil
 }
 
-// Release surrenders the lease. If the fencing token does not match, ErrFenced
-// is returned without modification.
+// Release surrenders the lease and expires it immediately by setting expiresAt to
+// the past, so a successor can acquire without waiting for the TTL. If the fencing
+// token does not match, ErrFenced is returned without modification.
 func (mb *memoryBackend) Release(ctx context.Context, record backend.LeaseRecord) error {
 	// ===== STEP 1: Acquire Lock =====
 	mb.mu.Lock()
@@ -182,8 +183,11 @@ func (mb *memoryBackend) Release(ctx context.Context, record backend.LeaseRecord
 		return worklease.ErrFenced
 	}
 
-	// ===== STEP 4: Set Clean Handoff Flag =====
+	// ===== STEP 4: Mark clean and expire immediately =====
+	// Setting expiresAt to the past makes the record immediately acquirable
+	// by a successor — the TTL governs crash detection, not clean-handoff latency.
 	r.cleanHandoff = true
+	r.expiresAt = mb.clock.Now().Add(-time.Millisecond)
 
 	return nil
 }

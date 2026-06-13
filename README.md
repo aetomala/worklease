@@ -60,7 +60,7 @@ These are intentional scope boundaries, not gaps.
 
 **Recovery logic is yours.** The library delivers checkpoint bytes and the `cleanHandoff` flag. What those bytes mean, how to validate partial state, and how to reconcile external effects that happened before the crash are application concerns.
 
-**Release marks intent, not immediate transfer.** Calling `Release` sets a flag and returns — it does not expire the lease. A successor cannot acquire until the TTL elapses. Choose TTLs and poll intervals that match the handoff latency your application can tolerate.
+**Release expires the lease immediately.** Calling `Release` sets `clean_handoff = true` and sets the lease expiration to the past, making the work item immediately available. A successor using `WithWaitForLease` will acquire on its next poll; a fail-fast successor can call `Acquire` immediately after. The TTL governs crash detection only — it does not add latency to clean handoffs.
 
 ---
 

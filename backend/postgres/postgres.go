@@ -59,6 +59,7 @@ WHERE work_id       = $1
 	queryRelease = `
 UPDATE worklease_leases
 SET clean_handoff = TRUE,
+    expires_at    = NOW() - INTERVAL '1 millisecond',
     updated_at    = NOW()
 WHERE work_id       = $1
   AND holder_id     = $2
@@ -179,8 +180,9 @@ func (p *postgresBackend) Renew(ctx context.Context, record backend.LeaseRecord,
 	return nil
 }
 
-// Release surrenders the lease. Returns ErrFenced if the record's fencing token
-// no longer matches the stored lease.
+// Release surrenders the lease and expires it immediately by setting expires_at to
+// the past, so a successor can acquire without waiting for the TTL. Returns ErrFenced
+// if the record's fencing token no longer matches the stored lease.
 func (p *postgresBackend) Release(ctx context.Context, record backend.LeaseRecord) error {
 	// ===== STEP 1: Execute UPDATE =====
 	result, err := p.db.ExecContext(ctx, queryRelease, record.WorkID, record.HolderID, record.FencingToken)

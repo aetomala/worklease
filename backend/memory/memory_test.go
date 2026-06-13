@@ -334,8 +334,8 @@ var _ = Describe("Backend (memory)", func() {
 				})
 			})
 
-			Context("when the expired lease had a checkpoint and a clean Release", func() {
-				It("re-acquires; successor reads previous checkpoint bytes and cleanHandoff=true", func() {
+			Context("when the lease had a checkpoint and a clean Release", func() {
+				It("re-acquires immediately; successor reads previous checkpoint bytes and cleanHandoff=true", func() {
 					rec1, err := b.Acquire(ctx, "w1", "h1", 5*time.Second)
 					Expect(err).NotTo(HaveOccurred())
 
@@ -345,8 +345,8 @@ var _ = Describe("Backend (memory)", func() {
 					err = b.Release(ctx, rec1)
 					Expect(err).NotTo(HaveOccurred())
 
-					fc.Advance(6 * time.Second)
-
+					// No clock advance needed: Release sets expiresAt to the past,
+					// making the record immediately acquirable.
 					rec2, err := b.Acquire(ctx, "w1", "h2", 5*time.Second)
 					Expect(err).NotTo(HaveOccurred())
 

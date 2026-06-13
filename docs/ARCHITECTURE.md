@@ -159,17 +159,17 @@ the guarantee is that the successor starts from the last checkpointed state, not
 Exactly-once execution of individual steps requires idempotent steps or external coordination
 beyond what this library provides.
 
-### Release marks intent, not immediate transfer
+### Release expires the lease immediately
 
-`Release` sets `clean_handoff = TRUE` in the lease store and returns. It does not expire the
-lease or immediately transfer ownership. A successor worker still cannot acquire the lease
-until `expires_at < NOW()` — unless it uses `WithWaitForLease` with a short poll interval.
+`Release` sets `clean_handoff = TRUE` in the lease store and sets `expires_at` to a past
+timestamp, making the work item immediately acquirable by a successor. A successor using
+`WithWaitForLease` will acquire on its next poll; a fail-fast successor can call `Acquire`
+immediately after.
 
 "Clean handoff" is a semantic flag that tells the successor the previous owner finished
-intentionally. It is not a mechanism for instant ownership transfer. If the TTL is 30 seconds
-and Worker A calls `Release` at second 5, Worker B cannot acquire until second 30 unless the
-poll loop catches the expiry. Choose TTLs and poll intervals that match the handoff latency
-your application can tolerate.
+intentionally. The TTL governs crash detection only — when a holder crashes without calling
+`Release`, the successor must wait for the TTL to elapse before the record appears expired.
+A clean `Release` bypasses that wait.
 
 ### Recovery logic lives in caller code
 
@@ -548,11 +548,12 @@ updated and `ErrLeaseExpired` is returned — the renewal goroutine cancels `ren
 signals to downstream work that the lease is lost. No bare `time.Now()` — the database's
 `NOW()` is authoritative.
 
-### Release — Set clean_handoff
+### Release — Set clean_handoff and expire immediately
 
 ```sql
 UPDATE worklease_leases
 SET clean_handoff = TRUE,
+    expires_at    = NOW() - INTERVAL '1 millisecond',
     updated_at    = NOW()
 WHERE work_id       = $1
   AND holder_id     = $2
@@ -562,9 +563,9 @@ WHERE work_id       = $1
 The checkpoint column is not touched. The final checkpoint written by the last `Checkpoint`
 call survives. The successor will read it alongside `cleanHandoff = true`.
 
-`Release` does not expire the lease or shorten the TTL. The successor cannot acquire until
-`expires_at < NOW()`. See [What worklease Does Not Solve — Release marks intent, not immediate
-transfer](#what-worklease-does-not-solve).
+Setting `expires_at` to a past timestamp makes the record satisfy the `Acquire` condition
+(`expires_at < NOW()`) immediately, so the successor can acquire without waiting for the
+original TTL to elapse.
 
 ---
 

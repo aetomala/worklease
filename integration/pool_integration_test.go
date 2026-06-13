@@ -147,8 +147,7 @@ var _ = Describe("pool.Pool", func() {
 	// ===== PHASE 4: Checkpoint-as-Cursor Resume =====
 	Describe("Phase 4: Checkpoint-as-Cursor Resume", func() {
 		It("Pool B reads clean-handoff checkpoints left by Pool A", func() {
-			fc := &fakeClock{now: time.Now()}
-			b := memory.New(memory.WithClock(fc))
+			b := memory.New()
 
 			codec := checkpoint.JSON()
 			type cursor struct{ Offset int }
@@ -167,8 +166,8 @@ var _ = Describe("pool.Pool", func() {
 			Expect(err).NotTo(HaveOccurred())
 			Expect(pA.Run(ctx)).To(Succeed())
 
-			// Advance fake clock past TTL so Pool B can acquire expired leases.
-			fc.Advance(31 * time.Second)
+			// No clock advance needed: Pool A's slots are released via permDone exit,
+			// and Release now sets expiresAt to the past — Pool B can acquire immediately.
 
 			// Pool B: capture prior and cleanHandoff per slot.
 			leaseB, err := worklease.New(b, worklease.Config{TTL: 30 * time.Second, HolderID: "pool-b"})

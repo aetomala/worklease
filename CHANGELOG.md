@@ -17,6 +17,12 @@ This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
   `ActiveSlots` observability, checkpoint-as-cursor resume on clean handoff, and `PermanentError`
   slot eviction
 
+### Fixed
+
+- `Release` now expires the lease immediately in both the memory and PostgreSQL backends,
+  allowing a successor to acquire without waiting for the TTL to elapse. Previously a
+  cleanly-released lease required the same full TTL wait as a crashed holder.
+
 ### Chore
 
 - Add integration tests for `worker.Runner`, `leader.Elect`, and `pool.Pool` against
