@@ -11,8 +11,12 @@ This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 
 ### Added
 
+- `leader.Config.BackoffInterval` — optional duration Elect sleeps before returning on
+  non-fencing paths; throttles retry loops that would otherwise see rapid
+  acquire/release/reacquire cycling now that Release expires the lease immediately (issue #36)
 - `examples/cluster-singleton-scheduler` — demonstrates `leader.Elect` with `WithWaitForLease`
-  standby failover and fencing propagation via context cancellation
+  standby failover and fencing propagation via context cancellation; Scenario 4 shows
+  competing retry loops with `BackoffInterval`
 - `examples/partition-processor` — demonstrates `pool.Pool` with concurrent slot acquisition,
   `ActiveSlots` observability, checkpoint-as-cursor resume on clean handoff, and `PermanentError`
   slot eviction

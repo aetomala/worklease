@@ -160,10 +160,70 @@ var _ = Describe("leader", func() {
 				mockLease.EXPECT().Release(gomock.Any(), worklease.Token{}).Return(nil)
 
 				fnErr := leader.Elect(ctx, mockLease, "work-1", leader.Config{}, func(renewCtx context.Context) error {
-					// Simulate fn detecting context cancellation
 					return context.Canceled
 				})
 				Expect(errors.Is(fnErr, context.Canceled)).To(BeTrue())
+			})
+		})
+
+		Context("when BackoffInterval is positive", func() {
+			It("sleeps for BackoffInterval before returning on a clean fn exit", func() {
+				stopFn := func() {}
+				renewCtx, renewCancel := context.WithCancel(ctx)
+				defer renewCancel()
+
+				mockLease.EXPECT().Acquire(gomock.Any(), "work-1").Return(worklease.Token{}, nil)
+				mockLease.EXPECT().StartRenewal(gomock.Any(), worklease.Token{}).Return(renewCtx, stopFn)
+				mockLease.EXPECT().Release(gomock.Any(), worklease.Token{}).Return(nil)
+
+				cfg := leader.Config{BackoffInterval: 50 * time.Millisecond}
+				start := time.Now()
+				err := leader.Elect(ctx, mockLease, "work-1", cfg, func(context.Context) error {
+					return nil
+				})
+				elapsed := time.Since(start)
+
+				Expect(err).NotTo(HaveOccurred())
+				Expect(elapsed).To(BeNumerically(">=", 40*time.Millisecond))
+			})
+
+			It("bypasses the sleep when fn returns ErrFenced", func() {
+				stopFn := func() {}
+				renewCtx, renewCancel := context.WithCancel(ctx)
+				defer renewCancel()
+
+				mockLease.EXPECT().Acquire(gomock.Any(), "work-1").Return(worklease.Token{}, nil)
+				mockLease.EXPECT().StartRenewal(gomock.Any(), worklease.Token{}).Return(renewCtx, stopFn)
+
+				cfg := leader.Config{BackoffInterval: 5 * time.Second}
+				start := time.Now()
+				err := leader.Elect(ctx, mockLease, "work-1", cfg, func(context.Context) error {
+					return worklease.ErrFenced
+				})
+				elapsed := time.Since(start)
+
+				Expect(errors.Is(err, worklease.ErrFenced)).To(BeTrue())
+				Expect(elapsed).To(BeNumerically("<", time.Second))
+			})
+
+			It("bypasses the sleep when Release returns ErrFenced", func() {
+				stopFn := func() {}
+				renewCtx, renewCancel := context.WithCancel(ctx)
+				defer renewCancel()
+
+				mockLease.EXPECT().Acquire(gomock.Any(), "work-1").Return(worklease.Token{}, nil)
+				mockLease.EXPECT().StartRenewal(gomock.Any(), worklease.Token{}).Return(renewCtx, stopFn)
+				mockLease.EXPECT().Release(gomock.Any(), worklease.Token{}).Return(worklease.ErrFenced)
+
+				cfg := leader.Config{BackoffInterval: 5 * time.Second}
+				start := time.Now()
+				err := leader.Elect(ctx, mockLease, "work-1", cfg, func(context.Context) error {
+					return nil
+				})
+				elapsed := time.Since(start)
+
+				Expect(errors.Is(err, worklease.ErrFenced)).To(BeTrue())
+				Expect(elapsed).To(BeNumerically("<", time.Second))
 			})
 		})
 	})

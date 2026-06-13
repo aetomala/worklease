@@ -858,11 +858,22 @@ Blocking vs fail-fast acquire behavior is caller-controlled via `cfg.AcquireOpti
 `Elect` does not force `WithWaitForLease`. Pass it explicitly to block until leadership is
 available.
 
-`Elect` has no built-in backoff between attempts. Callers that wrap `Elect` in a retry loop
-are responsible for supplying their own backoff — because `Release` now expires the lease
-immediately, a fast-returning `fn` and an immediate re-call of `Elect` will produce rapid
-acquire/release/reacquire cycling across competing processes. `pool.Pool` callers are
-unaffected — `Config.BackoffInterval` governs reacquisition delay.
+**Retry loops and backoff:** Because `Release` expires the lease immediately (ADR-0012), a
+caller wrapping `Elect` in a retry loop with a fast-returning `fn` will see rapid
+acquire/release/reacquire cycling without throttling. Set `cfg.BackoffInterval` to avoid
+this — `Elect` sleeps for that duration before returning on non-fencing paths. Fencing paths
+bypass the sleep:
+
+```go
+for {
+    err := leader.Elect(ctx, lease, "scheduler:primary", leader.Config{
+        BackoffInterval: 500 * time.Millisecond,
+    }, runScheduler)
+    if errors.Is(err, worklease.ErrFenced) || ctx.Err() != nil {
+        return
+    }
+}
+```
 
 See [ADR-0010](adr/0010-leader-fn-signature-and-acquire-semantics.md) and
 [ADR-0012](adr/0012-release-expires-lease-immediately.md).
