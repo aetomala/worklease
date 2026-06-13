@@ -3,6 +3,7 @@ package leader
 import (
 	"context"
 	"errors"
+	"time"
 
 	"github.com/aetomala/worklease"
 )
@@ -25,6 +26,19 @@ type Config struct {
 	// RenewalOptions are passed to Lease.StartRenewal. Optional; nil uses
 	// the default renewal interval (TTL/2).
 	RenewalOptions []worklease.RenewalOption
+
+	// BackoffInterval is the duration Elect sleeps before returning on
+	// non-fencing paths. Zero means no sleep. Fencing paths (ErrFenced from
+	// fn or Release) bypass the sleep — callers must react to fencing
+	// immediately.
+	//
+	// Set this when wrapping Elect in a retry loop. Because Release expires
+	// the lease immediately (ADR-0012), a fast-returning fn and an immediate
+	// re-call of Elect will produce rapid acquire/release/reacquire cycling.
+	// BackoffInterval throttles that cycling without requiring the caller to
+	// manage its own sleep. pool.Pool callers are unaffected — Pool already
+	// governs reacquisition delay via Config.BackoffInterval.
+	BackoffInterval time.Duration
 }
 
 // Elect acquires workID and calls fn under a managed renewal context.
@@ -36,8 +50,9 @@ type Config struct {
 // from the underlying Lease unchanged.
 // Elect does not force blocking acquisition — pass worklease.WithWaitForLease()
 // in cfg.AcquireOptions to block until leadership is available.
-// Callers that wrap Elect in a retry loop are responsible for their own backoff — Elect
-// itself does not throttle reacquisition after a non-fencing error or a fast-returning fn.
+// If cfg.BackoffInterval is positive, Elect sleeps for that duration before returning
+// on non-fencing paths — throttling retry loops without requiring callers to manage
+// their own sleep. Fencing paths bypass the sleep.
 func Elect(ctx context.Context, lease worklease.Lease, workID string, cfg Config, fn func(ctx context.Context) error) error {
 	// ===== STEP 1: Nil check =====
 	if lease == nil {
@@ -73,7 +88,15 @@ func Elect(ctx context.Context, lease worklease.Lease, workID string, cfg Config
 		return worklease.ErrFenced
 	}
 
-	// ===== STEP 9: Return fn error if present, else release error =====
+	// ===== STEP 9: BackoffInterval sleep (non-fencing paths only) =====
+	if cfg.BackoffInterval > 0 {
+		select {
+		case <-time.After(cfg.BackoffInterval):
+		case <-ctx.Done():
+		}
+	}
+
+	// ===== STEP 10: Return fn error if present, else release error =====
 	if fnErr != nil {
 		return fnErr
 	}

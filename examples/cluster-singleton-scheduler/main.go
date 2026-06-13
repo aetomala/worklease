@@ -137,10 +137,51 @@ func scenario3FencedLeader(ctx context.Context, b backend.Backend) {
 	log.Println()
 }
 
+func scenario4PersistentLeaderWithBackoff(ctx context.Context, b backend.Backend) {
+	log.Println("=== Scenario 4: Persistent Leader with BackoffInterval ===")
+	log.Println("  Two nodes compete in retry loops. BackoffInterval=300ms throttles")
+	log.Println("  reacquisition after Release — which now expires the lease immediately.")
+
+	// runNode wraps Elect in a retry loop, executing up to maxTerms leadership terms.
+	// BackoffInterval prevents rapid acquire/release/reacquire cycling: without it,
+	// Release expiring the lease immediately (ADR-0012) means the losing node could
+	// reacquire before the winner has done meaningful work.
+	runNode := func(name string, lease worklease.Lease, maxTerms int, done chan<- string) {
+		term := 0
+		for term < maxTerms {
+			err := leader.Elect(ctx, lease, "scheduler:primary", leader.Config{
+				BackoffInterval: 300 * time.Millisecond,
+			}, func(renewCtx context.Context) error {
+				term++
+				log.Printf("  %s: leading (term %d/%d)", name, term, maxTerms)
+				return runScheduler(renewCtx, name, 1)
+			})
+			if errors.Is(err, worklease.ErrFenced) || ctx.Err() != nil {
+				break
+			}
+			// ErrLeaseHeld: another node is leading — BackoffInterval already slept,
+			// so the loop retries without an additional delay.
+		}
+		log.Printf("  %s: exiting after %d term(s)", name, term)
+		done <- name
+	}
+
+	leaseG, _ := worklease.New(b, worklease.Config{TTL: 30 * time.Second, HolderID: "node-G"})
+	leaseH, _ := worklease.New(b, worklease.Config{TTL: 30 * time.Second, HolderID: "node-H"})
+
+	done := make(chan string, 2)
+	go runNode("node-G", leaseG, 2, done)
+	go runNode("node-H", leaseH, 2, done)
+	<-done
+	<-done
+	log.Println()
+}
+
 func main() {
 	ctx := context.Background()
 
 	scenario1HappyPath(ctx, memory.New())
 	scenario2StandbyFailover(ctx, memory.New())
 	scenario3FencedLeader(ctx, memory.New())
+	scenario4PersistentLeaderWithBackoff(ctx, memory.New())
 }
