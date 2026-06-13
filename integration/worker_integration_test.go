@@ -55,8 +55,7 @@ var _ = Describe("worker.Runner", func() {
 	// ===== PHASE 2: Clean Handoff =====
 	Describe("Phase 2: Clean Handoff", func() {
 		It("Worker B receives prior state and cleanHandoff=true after Worker A releases", func() {
-			fc := &fakeClock{now: time.Now()}
-			b := memory.New(memory.WithClock(fc))
+			b := memory.New()
 			stateA := []byte("checkpoint-from-a")
 
 			// Worker A: runs, checkpoints stateA, releases cleanly.
@@ -71,9 +70,8 @@ var _ = Describe("worker.Runner", func() {
 			Expect(err).NotTo(HaveOccurred())
 			Expect(rA.Run(ctx, "work-1")).To(Succeed())
 
-			// Advance the fake clock past TTL — the released record appears expired,
-			// allowing Worker B to acquire (cleanHandoff carries through).
-			fc.Advance(31 * time.Second)
+			// No clock advance needed: Release sets expiresAt to the past, so
+			// Worker B can acquire immediately without waiting for the TTL.
 
 			// Worker B: same backend, different holder.
 			leaseB, err := worklease.New(b, worklease.Config{TTL: 30 * time.Second, HolderID: "node-b"})

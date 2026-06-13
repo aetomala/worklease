@@ -144,18 +144,22 @@ var _ = Describe("Backend (postgres)", func() {
 	})
 
 	Describe("Release", func() {
-		It("fencing token matches → sets clean_handoff=true, returns nil", func() {
+		It("fencing token matches → sets clean_handoff=true, expires lease immediately, returns nil", func() {
 			record, err := b.Acquire(ctx, "w8", "holder", 30*time.Second)
 			Expect(err).NotTo(HaveOccurred())
 
 			err = b.Release(ctx, record)
 			Expect(err).NotTo(HaveOccurred())
 
-			// Verify clean_handoff was set
+			// Verify clean_handoff was set and expires_at is in the past.
 			var cleanHandoff bool
-			err = db.QueryRowContext(ctx, "SELECT clean_handoff FROM worklease_leases WHERE work_id = $1", "w8").Scan(&cleanHandoff)
+			var expiresAt time.Time
+			err = db.QueryRowContext(ctx,
+				"SELECT clean_handoff, expires_at FROM worklease_leases WHERE work_id = $1", "w8",
+			).Scan(&cleanHandoff, &expiresAt)
 			Expect(err).NotTo(HaveOccurred())
 			Expect(cleanHandoff).To(BeTrue())
+			Expect(expiresAt).To(BeTemporally("<", time.Now()))
 		})
 
 		It("fencing token stale → returns ErrFenced", func() {
