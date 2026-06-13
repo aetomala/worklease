@@ -58,8 +58,44 @@ offset.
 - The TTL can be sized purely for crash detection, not for handoff latency.
 
 **Negative:**
-- None identified. The behavior change is backward-compatible: no API changes, no sentinel
-  changes, and no caller relied on a lease being "held" after `Release` returned.
+- **Silent behavioral change to a documented guarantee.** "Release marks intent, not immediate
+  transfer" was stated in ARCHITECTURE.md and the public documentation. A caller that relied on
+  this — for example, calling `Release` as an early informational signal while continuing
+  post-release cleanup under the assumption that no successor could acquire until TTL — now has
+  a race it did not have before. No compiler error or sentinel surfaces this; the failure mode
+  is silent. This is acceptable because the library is pre-1.0 and the old behavior was never a
+  deliberate safety property, but characterizing the change as zero-impact is incorrect.
+
+- **`expires_at` alone is no longer sufficient for ad-hoc "is this item held?" queries.**
+  Before this change, `expires_at > NOW()` reliably identified a live, held lease. After this
+  change, a row with `expires_at < NOW()` is ambiguous: it may mean a clean release just
+  happened, a crash occurred and the TTL elapsed, or the row is stale. The `clean_handoff`
+  column disambiguates intent, but only if the reader checks it. Operational queries against
+  `worklease_leases` — dashboards, runbooks, incident investigation queries — that relied on
+  `expires_at` as a proxy for "currently held" will silently become incorrect for the
+  clean-release case. Any operational runbook for the PostgreSQL backend should be updated to
+  note that "currently held" requires `expires_at > NOW()`, not the absence of
+  `expires_at < NOW()`. (Note: `expires_at > NOW()` for "is it actively held right now"
+  continues to work correctly.)
+
+- **Removes an incidental rate limiter on `leader.Elect` retry loops.** `pool.Pool` is
+  unaffected — `Config.BackoffInterval` already governs reacquisition delay after any
+  non-permanent error. `leader.Elect` has no built-in backoff: a caller that wraps `Elect` in
+  its own retry loop with a fast-failing `fn` will now see rapid acquire/release/reacquire
+  cycling across competing processes (leader flapping) that the old TTL-bound delay incidentally
+  throttled. Callers building retry loops around `leader.Elect` are responsible for their own
+  backoff; this responsibility must be documented in `leader.Elect`'s godoc.
+
+- **The 1ms offset is an implicit cross-backend clock-precision contract.** The contract
+  is that `expires_at` written by `Release` must satisfy `expires_at < NOW()` on any subsequent
+  `Acquire` call. For the PostgreSQL backend, `NOW()` is server-side with microsecond precision
+  and is consistent within a transaction — the 1ms offset is safe. For the in-memory backend,
+  both `Release` and `Acquire` read the same `Clock` instance; a fake clock that advances in
+  integer-second ticks will nonetheless treat `now - 1ms < now` correctly because time
+  comparisons use `time.Time` precision regardless of how the clock is advanced. This assumption
+  holds for all known clock implementations but is not stress-tested against clocks with
+  millisecond or coarser resolution. A future backend with a coarser clock must document this
+  requirement explicitly.
 
 ## References
 

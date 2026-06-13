@@ -30,11 +30,14 @@ type Config struct {
 // Elect acquires workID and calls fn under a managed renewal context.
 // The fn argument receives a context cancelled if the lease is fenced or renewal fails.
 // Callers must respect context cancellation — fencing propagates via context.
-// Elect calls Release before returning in all non-fencing paths.
+// Elect calls Release before returning in all non-fencing paths. Because Release expires
+// the lease immediately, the work item is available to a successor as soon as Elect returns.
 // Elect surfaces worklease.ErrLeaseHeld, worklease.ErrFenced, and context errors
 // from the underlying Lease unchanged.
 // Elect does not force blocking acquisition — pass worklease.WithWaitForLease()
 // in cfg.AcquireOptions to block until leadership is available.
+// Callers that wrap Elect in a retry loop are responsible for their own backoff — Elect
+// itself does not throttle reacquisition after a non-fencing error or a fast-returning fn.
 func Elect(ctx context.Context, lease worklease.Lease, workID string, cfg Config, fn func(ctx context.Context) error) error {
 	// ===== STEP 1: Nil check =====
 	if lease == nil {
