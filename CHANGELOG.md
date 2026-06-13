@@ -17,6 +17,12 @@ This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
   `ActiveSlots` observability, checkpoint-as-cursor resume on clean handoff, and `PermanentError`
   slot eviction
 
+### Chore
+
+- Add integration tests for `worker.Runner`, `leader.Elect`, and `pool.Pool` against
+  the real in-memory backend; covers first acquisition, crash recovery, clean handoff,
+  fencing propagation, `PermanentError` eviction, and `ActiveSlots` observability
+
 ---
 
 ## [v0.3.0] — 2026-06-11
