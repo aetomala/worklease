@@ -15,14 +15,14 @@ type fakeCodec struct {
 	decodeErr error
 }
 
-func (f fakeCodec) Encode(_ any) ([]byte, error) {
+func (f fakeCodec) Marshal(_ any) ([]byte, error) {
 	if f.encodeErr != nil {
 		return nil, f.encodeErr
 	}
 	return []byte("fake"), nil
 }
 
-func (f fakeCodec) Decode(_ []byte, _ any) error {
+func (f fakeCodec) Unmarshal(_ []byte, _ any) error {
 	return f.decodeErr
 }
 

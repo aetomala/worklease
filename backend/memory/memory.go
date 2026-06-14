@@ -46,6 +46,12 @@ func WithClock(c Clock) Option {
 	}
 }
 
+// releaseGracePeriod is the offset applied to the current time when Release expires the
+// lease immediately. It must satisfy: clock.Now() + releaseGracePeriod < clock.Now() at
+// the moment of the next Acquire call — one millisecond in the past is sufficient for
+// any clock with at least millisecond resolution.
+const releaseGracePeriod = -time.Millisecond
+
 // memoryBackend is an in-memory implementation of the Backend interface.
 type memoryBackend struct {
 	mu    sync.Mutex
@@ -167,8 +173,9 @@ func (mb *memoryBackend) Renew(ctx context.Context, record backend.LeaseRecord, 
 	return nil
 }
 
-// Release surrenders the lease. If the fencing token does not match, ErrFenced
-// is returned without modification.
+// Release surrenders the lease and expires it immediately by setting expiresAt to
+// the past, so a successor can acquire without waiting for the TTL. If the fencing
+// token does not match, ErrFenced is returned without modification.
 func (mb *memoryBackend) Release(ctx context.Context, record backend.LeaseRecord) error {
 	// ===== STEP 1: Acquire Lock =====
 	mb.mu.Lock()
@@ -182,8 +189,11 @@ func (mb *memoryBackend) Release(ctx context.Context, record backend.LeaseRecord
 		return worklease.ErrFenced
 	}
 
-	// ===== STEP 4: Set Clean Handoff Flag =====
+	// ===== STEP 4: Mark clean and expire immediately =====
+	// Setting expiresAt to the past makes the record immediately acquirable
+	// by a successor — the TTL governs crash detection, not clean-handoff latency.
 	r.cleanHandoff = true
+	r.expiresAt = mb.clock.Now().Add(releaseGracePeriod)
 
 	return nil
 }

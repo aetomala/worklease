@@ -40,8 +40,10 @@ type Lease interface {
 	// lease has already expired.
 	Renew(ctx context.Context, token Token) error
 
-	// Release surrenders the lease. Returns ErrFenced if the token's fencing token
-	// no longer matches the stored lease.
+	// Release surrenders the lease and expires it immediately, making the work item
+	// available for acquisition by a successor without waiting for the TTL. Sets
+	// clean_handoff so the successor knows the previous owner finished intentionally.
+	// Returns ErrFenced if the fencing token no longer matches the stored lease.
 	Release(ctx context.Context, token Token) error
 
 	// ReadCheckpoint retrieves persisted state and the clean handoff flag for the
@@ -118,6 +120,17 @@ func WithPollInterval(d time.Duration) AcquireOption {
 			c.pollInterval = d
 		}
 	}
+}
+
+// HasWaitForLease reports whether opts includes WithWaitForLease.
+// Pool.New uses this to enforce that WithWaitForLease is not passed in
+// Config.AcquireOptions at construction time.
+func HasWaitForLease(opts []AcquireOption) bool {
+	cfg := acquireConfig{}
+	for _, opt := range opts {
+		opt(&cfg)
+	}
+	return cfg.waitForLease
 }
 
 // RenewalOption is a functional option for StartRenewal.

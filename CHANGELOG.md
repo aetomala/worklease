@@ -11,6 +11,43 @@ This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 
 ---
 
+## [v0.3.0] — 2026-06-13
+
+### Breaking
+
+- `checkpoint.Codec` interface methods renamed: `Encode` → `Marshal`, `Decode` → `Unmarshal`. Callers who implement `Codec` directly must rename their method implementations. Callers using only `checkpoint.JSON()` are unaffected — `JSONCodec` is updated transparently. The package-level generic helpers `Encode[T]` and `Decode[T]` are unchanged.
+
+### Added
+
+- `worklease.HasWaitForLease(opts []AcquireOption) bool` — reports whether a `[]AcquireOption` slice includes `WithWaitForLease`; used by `pool.New` to enforce that blocking acquisition is not passed through the pool
+- `leader` package — `leader.Elect` acquires a work ID, starts managed lease renewal, calls `fn(renewCtx)`, stops renewal, and releases; fencing bypasses release and propagates via context cancellation
+- `pool` package — `pool.Pool` distributes a fixed set of work IDs across competing processes; one slot goroutine per work ID; supports backoff on transient errors, immediate reacquisition on fencing, and `PermanentError` to drop a slot without reacquisition; `ActiveSlots()` reports currently held IDs
+- `leader.Config.BackoffInterval` — optional duration Elect sleeps before returning on
+  non-fencing paths; throttles retry loops that would otherwise see rapid
+  acquire/release/reacquire cycling now that Release expires the lease immediately (issue #36)
+- `examples/cluster-singleton-scheduler` — demonstrates `leader.Elect` with `WithWaitForLease`
+  standby failover and fencing propagation via context cancellation; Scenario 4 shows
+  competing retry loops with `BackoffInterval`
+- `examples/partition-processor` — demonstrates `pool.Pool` with concurrent slot acquisition,
+  `ActiveSlots` observability, checkpoint-as-cursor resume on clean handoff, and `PermanentError`
+  slot eviction
+
+### Fixed
+
+- `Release` now expires the lease immediately in both the memory and PostgreSQL backends,
+  allowing a successor to acquire without waiting for the TTL to elapse. Previously a
+  cleanly-released lease required the same full TTL wait as a crashed holder.
+
+### Chore
+
+- Add integration tests for `worker.Runner`, `leader.Elect`, and `pool.Pool` against
+  the real in-memory backend; covers first acquisition, crash recovery, clean handoff,
+  fencing propagation, `PermanentError` eviction, and `ActiveSlots` observability
+- Named `releaseGracePeriod` constant in the memory backend and documented the
+  `Release` immediate-expiry postcondition in the `Backend` interface contract (issue #37)
+
+---
+
 ## [v0.2.0] — 2026-06-09
 
 ### Fixed
