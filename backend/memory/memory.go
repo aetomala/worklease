@@ -46,6 +46,12 @@ func WithClock(c Clock) Option {
 	}
 }
 
+// releaseGracePeriod is the offset applied to the current time when Release expires the
+// lease immediately. It must satisfy: clock.Now() + releaseGracePeriod < clock.Now() at
+// the moment of the next Acquire call — one millisecond in the past is sufficient for
+// any clock with at least millisecond resolution.
+const releaseGracePeriod = -time.Millisecond
+
 // memoryBackend is an in-memory implementation of the Backend interface.
 type memoryBackend struct {
 	mu    sync.Mutex
@@ -187,7 +193,7 @@ func (mb *memoryBackend) Release(ctx context.Context, record backend.LeaseRecord
 	// Setting expiresAt to the past makes the record immediately acquirable
 	// by a successor — the TTL governs crash detection, not clean-handoff latency.
 	r.cleanHandoff = true
-	r.expiresAt = mb.clock.Now().Add(-time.Millisecond)
+	r.expiresAt = mb.clock.Now().Add(releaseGracePeriod)
 
 	return nil
 }
