@@ -9,8 +9,19 @@ This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 
 ## [Unreleased]
 
+---
+
+## [v0.3.0] — 2026-06-13
+
+### Breaking
+
+- `checkpoint.Codec` interface methods renamed: `Encode` → `Marshal`, `Decode` → `Unmarshal`. Callers who implement `Codec` directly must rename their method implementations. Callers using only `checkpoint.JSON()` are unaffected — `JSONCodec` is updated transparently. The package-level generic helpers `Encode[T]` and `Decode[T]` are unchanged.
+
 ### Added
 
+- `worklease.HasWaitForLease(opts []AcquireOption) bool` — reports whether a `[]AcquireOption` slice includes `WithWaitForLease`; used by `pool.New` to enforce that blocking acquisition is not passed through the pool
+- `leader` package — `leader.Elect` acquires a work ID, starts managed lease renewal, calls `fn(renewCtx)`, stops renewal, and releases; fencing bypasses release and propagates via context cancellation
+- `pool` package — `pool.Pool` distributes a fixed set of work IDs across competing processes; one slot goroutine per work ID; supports backoff on transient errors, immediate reacquisition on fencing, and `PermanentError` to drop a slot without reacquisition; `ActiveSlots()` reports currently held IDs
 - `leader.Config.BackoffInterval` — optional duration Elect sleeps before returning on
   non-fencing paths; throttles retry loops that would otherwise see rapid
   acquire/release/reacquire cycling now that Release expires the lease immediately (issue #36)
@@ -34,20 +45,6 @@ This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
   fencing propagation, `PermanentError` eviction, and `ActiveSlots` observability
 - Named `releaseGracePeriod` constant in the memory backend and documented the
   `Release` immediate-expiry postcondition in the `Backend` interface contract (issue #37)
-
----
-
-## [v0.3.0] — 2026-06-11
-
-### Breaking
-
-- `checkpoint.Codec` interface methods renamed: `Encode` → `Marshal`, `Decode` → `Unmarshal`. Callers who implement `Codec` directly must rename their method implementations. Callers using only `checkpoint.JSON()` are unaffected — `JSONCodec` is updated transparently. The package-level generic helpers `Encode[T]` and `Decode[T]` are unchanged.
-
-### Added
-
-- `worklease.HasWaitForLease(opts []AcquireOption) bool` — reports whether a `[]AcquireOption` slice includes `WithWaitForLease`; used by `pool.New` to enforce that blocking acquisition is not passed through the pool
-- `leader` package — `leader.Elect` acquires a work ID, starts managed lease renewal, calls `fn(renewCtx)`, stops renewal, and releases; fencing bypasses release and propagates via context cancellation
-- `pool` package — `pool.Pool` distributes a fixed set of work IDs across competing processes; one slot goroutine per work ID; supports backoff on transient errors, immediate reacquisition on fencing, and `PermanentError` to drop a slot without reacquisition; `ActiveSlots()` reports currently held IDs
 
 ---
 

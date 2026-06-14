@@ -25,3 +25,15 @@ No breaking changes. All existing code compiles without modification.
 - `worklease.HasWaitForLease` — reports whether a `[]AcquireOption` slice includes `WithWaitForLease`
 - `leader` package — `leader.Elect` runs a function under managed lease acquisition and renewal
 - `pool` package — `pool.Pool` distributes a fixed set of work IDs across competing processes
+- `leader.Config.BackoffInterval` — optional duration `Elect` sleeps before returning on
+  non-fencing paths; set this when wrapping `Elect` in a retry loop to prevent rapid
+  acquire/release/reacquire cycling
+
+### Behavioral Changes in v0.3.0
+
+- **`Release` expires the lease immediately.** Previously, a cleanly-released lease remained
+  inaccessible to successors until the full TTL elapsed. Now `Release` sets `expires_at` to
+  one millisecond in the past, allowing an immediate successor `Acquire`. Callers with retry
+  loops that call `Acquire` immediately after `Release` may now see the lease acquired before
+  the retry loop fires — this is the intended behavior. Callers who depended on the TTL gap
+  as an incidental rate limiter should add an explicit backoff (see `leader.Config.BackoffInterval`).

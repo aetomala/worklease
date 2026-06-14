@@ -1059,7 +1059,7 @@ becomes available. This breaks clean pool shutdown. `pool.New` returns `ErrConfi
 - Three retroactive backend correctness fixes (issues #13, #14, #15)
 - ADR-0007, ADR-0008, ADR-0009 ✅
 
-### v0.3 — Released (v0.3.0, 2026-06-11)
+### v0.3 — Released (v0.3.0, 2026-06-13)
 
 - `HasWaitForLease([]AcquireOption) bool` — option inspection helper for higher-level packages
 - `Codec` interface method rename: `Encode`/`Decode` → `Marshal`/`Unmarshal` (breaking change; see `UPGRADING.md`)
