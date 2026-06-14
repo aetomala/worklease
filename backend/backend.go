@@ -24,6 +24,10 @@ type Backend interface {
 
 	// Release surrenders the lease. Returns ErrFenced if the record's fencing
 	// token no longer matches the stored lease.
+	// Implementations must set expires_at to a value strictly less than NOW() so
+	// that a successor's immediately following Acquire call satisfies the expiry
+	// condition. A one-millisecond past offset satisfies this for any backend with
+	// at least millisecond clock resolution.
 	Release(ctx context.Context, record LeaseRecord) error
 
 	// ReadCheckpoint retrieves persisted state and the clean handoff flag for the

@@ -32,6 +32,8 @@ This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 - Add integration tests for `worker.Runner`, `leader.Elect`, and `pool.Pool` against
   the real in-memory backend; covers first acquisition, crash recovery, clean handoff,
   fencing propagation, `PermanentError` eviction, and `ActiveSlots` observability
+- Named `releaseGracePeriod` constant in the memory backend and documented the
+  `Release` immediate-expiry postcondition in the `Backend` interface contract (issue #37)
 
 ---
 

@@ -59,6 +59,9 @@ WHERE work_id       = $1
 	queryRelease = `
 UPDATE worklease_leases
 SET clean_handoff = TRUE,
+    -- expires_at must be set to a past value so the immediately following
+    -- Acquire satisfies expires_at < NOW(). One millisecond is sufficient
+    -- for any backend with at least millisecond clock resolution.
     expires_at    = NOW() - INTERVAL '1 millisecond',
     updated_at    = NOW()
 WHERE work_id       = $1
