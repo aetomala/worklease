@@ -89,14 +89,17 @@ go run .
 
 ### [Observability](observability/)
 
-A stdlib-only `LeaseObserver` wired into a lease, exercising one of each operation. Best for:
+A stdlib-only `LeaseObserver` that produces real metrics — counts, latency, hold duration, and a fencing counter — without any external library. Best for:
 - Understanding the v0.4 event-struct `LeaseObserver` as the injection seam for metrics, logs, and traces
-- Seeing every callback — `OnAcquire`, `OnCheckpoint`, `OnRenew`, `OnReadCheckpoint`, `OnRelease`, `OnFenced` — and the `Duration` field
+- Learning the non-obvious patterns: per-operation latency from the `Duration` field, lease hold duration via `OnAcquire`/`OnRelease` correlation on `token.FencingToken()`, and a dedicated fencing counter via `OnFenced` (which fires *in addition to* the operation callback)
 
 **Features**:
-- A `logObserver` implementing `worklease.LeaseObserver` with only the standard `log` package
+- A `metricsObserver` implementing `worklease.LeaseObserver` with only the standard library
+- Per-operation call counts, error counts, and average latency (read from `e.Duration`)
+- Lease hold duration correlated on the fencing token across `OnAcquire` → `OnRelease`
+- A dedicated fencing counter, exercised by a real fencing scenario (a successor steals an expired lease)
+- A comment block mapping each field to the equivalent Prometheus / OpenTelemetry instrument
 - Compile-time interface assertion; injected via `Config.Observer`
-- One Acquire → Checkpoint → Renew → ReadCheckpoint → Release cycle, one log line per callback
 
 **Run**:
 ```bash
