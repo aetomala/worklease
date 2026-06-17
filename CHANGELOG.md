@@ -22,7 +22,7 @@ This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 - Distinct `pool` config sentinels — `ErrNilLease`, `ErrEmptyWorkIDs`, `ErrWithWaitForLeaseProhibited` — each wrapping `ErrConfigInvalid`.
 - `leader.Config` lifecycle callbacks — `OnElected` (after acquire, before `fn`), `OnLost` (when the renewal context is cancelled before `fn` returns), and `OnRelinquished` (after a successful `Release`). All optional; nil is a no-op.
 - `backend/conformance` package — `RunSuite(newBackend func() backend.Backend) func()` returns a backend-agnostic Ginkgo spec tree that enforces memory-vs-Postgres parity structurally (ADR-0015). Wired into both backend test suites; expiry is exercised via non-positive TTL with no clock injection. Covers acquire/checkpoint/renew/release/read-checkpoint semantics including `ErrLeaseExpired` on renew-of-expired, `ErrFenced` on stale and never-acquired records, and slice-ownership invariants.
-- `examples/observability` — a stdlib-only `LeaseObserver` reference implementation exercising every callback.
+- `examples/observability` — a stdlib-only `LeaseObserver` reference implementation producing per-operation counts and latency, lease hold duration (via `OnAcquire`/`OnRelease` correlation on the fencing token), and a dedicated fencing counter, with a mapping to Prometheus/OpenTelemetry instruments.
 
 ### Changed
 
