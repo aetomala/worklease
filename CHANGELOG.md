@@ -9,6 +9,10 @@ This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 
 ## [Unreleased]
 
+---
+
+## [v0.4.0] — 2026-06-17
+
 ### Breaking
 
 - `LeaseObserver` redesigned: the five flat-parameter methods are replaced by six event-struct methods — `OnAcquire(ctx, AcquireEvent)`, `OnCheckpoint(ctx, CheckpointEvent)`, `OnRenew(ctx, RenewEvent)`, `OnRelease(ctx, ReleaseEvent)`, `OnReadCheckpoint(ctx, ReadCheckpointEvent)`, and `OnFenced(ctx, FencedEvent)`. New `OnReadCheckpoint` callback; `OnFenced` now also fires on the `Release` path (it previously fired only on Checkpoint and Renew); a `Duration` field on all operation events measures the final backend call only — not the wait loop. Implementers of `LeaseObserver` must convert to the event structs. See `UPGRADING.md`.
