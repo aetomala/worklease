@@ -346,7 +346,7 @@ Requires Go 1.26+. PostgreSQL backend requires PostgreSQL 12+.
 
 ## Status
 
-v0.3.0 is the latest tagged release. v0.4.0 is feature-complete on `dev` and pending release. The core public API (`Lease`, `Token`, options, sentinels) is stable.
+v0.4.0 is the latest tagged release. The core public API (`Lease`, `Token`, options, sentinels) is stable.
 
 ---
 
@@ -357,7 +357,7 @@ v0.3.0 is the latest tagged release. v0.4.0 is feature-complete on `dev` and pen
 - **v0.1.0** — Core lease primitives: `Lease`, `Backend`, PostgreSQL + in-memory backends, fencing, checkpoint
 - **v0.2.0** — `worker.Runner`, `checkpoint.Codec`, `LeaseObserver`, `memory.Clock`, examples
 - **v0.3.0** — `leader.Elect`, `pool.Pool`, `HasWaitForLease`, `checkpoint.Codec` method rename (breaking — see `UPGRADING.md`)
-- **v0.4.0** _(pending release)_ — `LeaseObserver` event-struct redesign (breaking), `backend/conformance` suite, `pool.Observer`/`Permanent`/`ErrAllSlotsDead`, `leader` lifecycle callbacks, memory slice-ownership fix
+- **v0.4.0** — `LeaseObserver` event-struct redesign (breaking), `backend/conformance` suite, `pool.Observer`/`Permanent`/`ErrAllSlotsDead`, `leader` lifecycle callbacks, memory slice-ownership fix
 
 ### Future
 

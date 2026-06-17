@@ -1186,7 +1186,7 @@ becomes available. This breaks clean pool shutdown. `pool.New` returns
 - `Release` semantics corrected — now expires the lease immediately in both backends, enabling instant clean handoff (issue #33)
 - ADR-0010, ADR-0011, ADR-0012
 
-### v0.4 — Complete on `dev` (v0.4.0 pending release)
+### v0.4 — Released (v0.4.0, 2026-06-17)
 
 - `LeaseObserver` redesign — six event-struct methods, new `OnReadCheckpoint`, `OnFenced` on the Release path, `Duration` on all operation events (breaking; see `UPGRADING.md`)
 - Memory backend slice-ownership defensive copies (ADR-0014)
@@ -1242,4 +1242,4 @@ land with v0.5/v0.6; no ADR file exists yet.
 
 ---
 
-*Last updated: June 2026 — v0.4 (v0.4.0 pending release)*
+*Last updated: June 2026 — v0.4 (v0.4.0)*
