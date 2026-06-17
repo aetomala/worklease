@@ -10,8 +10,17 @@ import (
 
 	"github.com/aetomala/worklease"
 	"github.com/aetomala/worklease/backend"
+	"github.com/aetomala/worklease/backend/conformance"
 	wlpostgres "github.com/aetomala/worklease/backend/postgres"
 )
+
+var _ = Describe("conformance", conformance.RunSuite(func() backend.Backend {
+	_, err := db.Exec("DELETE FROM worklease_leases")
+	Expect(err).NotTo(HaveOccurred())
+	b, err := wlpostgres.New(db)
+	Expect(err).NotTo(HaveOccurred())
+	return b
+}))
 
 var _ = Describe("Backend (postgres)", func() {
 	var (

@@ -15,65 +15,57 @@ import (
 	"github.com/aetomala/worklease/testutil"
 )
 
-type spyAcquireCall struct {
-	workID string
-	token  worklease.Token
-	err    error
-}
-
-type spyCheckpointCall struct {
-	token worklease.Token
-	size  int
-	err   error
-}
-
-type spyRenewCall struct {
-	token worklease.Token
-	err   error
-}
-
-type spyReleaseCall struct {
-	token worklease.Token
-	err   error
-}
-
 type spyObserver struct {
-	acquireCalls    []spyAcquireCall
-	checkpointCalls []spyCheckpointCall
-	renewCalls      []spyRenewCall
-	releaseCalls    []spyReleaseCall
-	fencedCalls     []worklease.Token
-	mu              sync.Mutex
+	acquireCalls        []worklease.AcquireEvent
+	checkpointCalls     []worklease.CheckpointEvent
+	renewCalls          []worklease.RenewEvent
+	releaseCalls        []worklease.ReleaseEvent
+	readCheckpointCalls []worklease.ReadCheckpointEvent
+	fencedCalls         []worklease.FencedEvent
+	order               []string
+	mu                  sync.Mutex
 }
 
-func (s *spyObserver) OnAcquire(_ context.Context, workID string, token worklease.Token, err error) {
+func (s *spyObserver) OnAcquire(_ context.Context, e worklease.AcquireEvent) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	s.acquireCalls = append(s.acquireCalls, spyAcquireCall{workID: workID, token: token, err: err})
+	s.acquireCalls = append(s.acquireCalls, e)
+	s.order = append(s.order, "OnAcquire")
 }
 
-func (s *spyObserver) OnCheckpoint(_ context.Context, token worklease.Token, size int, err error) {
+func (s *spyObserver) OnCheckpoint(_ context.Context, e worklease.CheckpointEvent) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	s.checkpointCalls = append(s.checkpointCalls, spyCheckpointCall{token: token, size: size, err: err})
+	s.checkpointCalls = append(s.checkpointCalls, e)
+	s.order = append(s.order, "OnCheckpoint")
 }
 
-func (s *spyObserver) OnRenew(_ context.Context, token worklease.Token, err error) {
+func (s *spyObserver) OnRenew(_ context.Context, e worklease.RenewEvent) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	s.renewCalls = append(s.renewCalls, spyRenewCall{token: token, err: err})
+	s.renewCalls = append(s.renewCalls, e)
+	s.order = append(s.order, "OnRenew")
 }
 
-func (s *spyObserver) OnRelease(_ context.Context, token worklease.Token, err error) {
+func (s *spyObserver) OnRelease(_ context.Context, e worklease.ReleaseEvent) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	s.releaseCalls = append(s.releaseCalls, spyReleaseCall{token: token, err: err})
+	s.releaseCalls = append(s.releaseCalls, e)
+	s.order = append(s.order, "OnRelease")
 }
 
-func (s *spyObserver) OnFenced(_ context.Context, token worklease.Token) {
+func (s *spyObserver) OnReadCheckpoint(_ context.Context, e worklease.ReadCheckpointEvent) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	s.fencedCalls = append(s.fencedCalls, token)
+	s.readCheckpointCalls = append(s.readCheckpointCalls, e)
+	s.order = append(s.order, "OnReadCheckpoint")
+}
+
+func (s *spyObserver) OnFenced(_ context.Context, e worklease.FencedEvent) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.fencedCalls = append(s.fencedCalls, e)
+	s.order = append(s.order, "OnFenced")
 }
 
 var _ = Describe("worklease", func() {
@@ -611,9 +603,9 @@ var _ = Describe("worklease", func() {
 				spy.mu.Unlock()
 
 				Expect(calls).To(HaveLen(1))
-				Expect(calls[0].workID).To(Equal("w1"))
-				Expect(calls[0].err).To(BeNil())
-				Expect(calls[0].token.WorkID()).To(Equal(token.WorkID()))
+				Expect(calls[0].WorkID).To(Equal("w1"))
+				Expect(calls[0].Err).To(BeNil())
+				Expect(calls[0].Token.WorkID()).To(Equal(token.WorkID()))
 			})
 
 			It("calls OnAcquire with zero Token and non-nil error on failed Acquire", func() {
@@ -628,8 +620,8 @@ var _ = Describe("worklease", func() {
 				spy.mu.Unlock()
 
 				Expect(calls).To(HaveLen(1))
-				Expect(calls[0].err).To(MatchError(worklease.ErrLeaseHeld))
-				Expect(calls[0].token).To(Equal(worklease.Token{}))
+				Expect(calls[0].Err).To(MatchError(worklease.ErrLeaseHeld))
+				Expect(calls[0].Token).To(Equal(worklease.Token{}))
 			})
 
 			It("calls OnCheckpoint with the token, state size, and nil error on successful Checkpoint", func() {
@@ -647,8 +639,8 @@ var _ = Describe("worklease", func() {
 				spy.mu.Unlock()
 
 				Expect(calls).To(HaveLen(1))
-				Expect(calls[0].size).To(Equal(7))
-				Expect(calls[0].err).To(BeNil())
+				Expect(calls[0].Size).To(Equal(7))
+				Expect(calls[0].Err).To(BeNil())
 			})
 
 			It("calls OnCheckpoint then OnFenced when Checkpoint returns ErrFenced", func() {
@@ -666,7 +658,7 @@ var _ = Describe("worklease", func() {
 				spy.mu.Unlock()
 
 				Expect(cCalls).To(HaveLen(1))
-				Expect(errors.Is(cCalls[0].err, worklease.ErrFenced)).To(BeTrue())
+				Expect(errors.Is(cCalls[0].Err, worklease.ErrFenced)).To(BeTrue())
 				Expect(fCalls).To(HaveLen(1))
 			})
 
@@ -685,7 +677,7 @@ var _ = Describe("worklease", func() {
 				spy.mu.Unlock()
 
 				Expect(calls).To(HaveLen(1))
-				Expect(calls[0].err).To(BeNil())
+				Expect(calls[0].Err).To(BeNil())
 			})
 
 			It("calls OnRenew then OnFenced when Renew returns ErrFenced", func() {
@@ -703,7 +695,7 @@ var _ = Describe("worklease", func() {
 				spy.mu.Unlock()
 
 				Expect(rCalls).To(HaveLen(1))
-				Expect(errors.Is(rCalls[0].err, worklease.ErrFenced)).To(BeTrue())
+				Expect(errors.Is(rCalls[0].Err, worklease.ErrFenced)).To(BeTrue())
 				Expect(fCalls).To(HaveLen(1))
 			})
 
@@ -722,7 +714,7 @@ var _ = Describe("worklease", func() {
 				spy.mu.Unlock()
 
 				Expect(calls).To(HaveLen(1))
-				Expect(calls[0].err).To(BeNil())
+				Expect(calls[0].Err).To(BeNil())
 			})
 
 			It("calls OnAcquire with ErrLeaseHeld when lease is held and WithWaitForLease is not passed", func() {
@@ -736,7 +728,7 @@ var _ = Describe("worklease", func() {
 				spy.mu.Unlock()
 
 				Expect(calls).To(HaveLen(1))
-				Expect(errors.Is(calls[0].err, worklease.ErrLeaseHeld)).To(BeTrue())
+				Expect(errors.Is(calls[0].Err, worklease.ErrLeaseHeld)).To(BeTrue())
 			})
 		})
 
@@ -760,7 +752,7 @@ var _ = Describe("worklease", func() {
 				spy.mu.Lock()
 				firstCall := spy.renewCalls[0]
 				spy.mu.Unlock()
-				Expect(firstCall.err).To(BeNil())
+				Expect(firstCall.Err).To(BeNil())
 			})
 
 			It("calls OnRenew then OnFenced when renewal returns ErrFenced", func() {
@@ -781,8 +773,172 @@ var _ = Describe("worklease", func() {
 				spy.mu.Unlock()
 
 				Expect(rCalls).To(HaveLen(1))
-				Expect(errors.Is(rCalls[0].err, worklease.ErrFenced)).To(BeTrue())
+				Expect(errors.Is(rCalls[0].Err, worklease.ErrFenced)).To(BeTrue())
 				Expect(fCalls).To(HaveLen(1))
+			})
+		})
+	})
+
+	Describe("leaseClient observer", func() {
+		var (
+			spy    *spyObserver
+			lease  worklease.Lease
+			record backend.LeaseRecord
+		)
+
+		BeforeEach(func() {
+			spy = &spyObserver{}
+			cfg.Observer = spy
+			lease, _ = worklease.New(mockB, cfg)
+			record = backend.LeaseRecord{WorkID: "w1", HolderID: "test-worker", FencingToken: 1, ExpiresAt: time.Now().Add(30 * time.Second)}
+		})
+
+		acquire := func() worklease.Token {
+			mockB.EXPECT().Acquire(gomock.Any(), "w1", "test-worker", 30*time.Second).Return(record, nil)
+			token, err := lease.Acquire(ctx, "w1")
+			Expect(err).NotTo(HaveOccurred())
+			return token
+		}
+
+		Context("Checkpoint", func() {
+			It("calls OnCheckpoint before OnFenced when the backend returns ErrFenced", func() {
+				token := acquire()
+				mockB.EXPECT().Checkpoint(gomock.Any(), record, gomock.Any(), 30*time.Second).Return(worklease.ErrFenced)
+				_ = lease.Checkpoint(ctx, token, []byte("s"))
+				Expect(spy.order).To(Equal([]string{"OnAcquire", "OnCheckpoint", "OnFenced"}))
+				Expect(spy.fencedCalls[0].Operation).To(Equal(worklease.OperationCheckpoint))
+			})
+			It("calls OnCheckpoint with correct Duration measured from the backend call", func() {
+				token := acquire()
+				mockB.EXPECT().Checkpoint(gomock.Any(), record, gomock.Any(), 30*time.Second).DoAndReturn(
+					func(context.Context, backend.LeaseRecord, []byte, time.Duration) error {
+						time.Sleep(5 * time.Millisecond)
+						return nil
+					})
+				_ = lease.Checkpoint(ctx, token, []byte("s"))
+				Expect(spy.checkpointCalls[0].Duration).To(BeNumerically(">=", 5*time.Millisecond))
+			})
+			It("calls OnCheckpoint with Size equal to len(state)", func() {
+				token := acquire()
+				mockB.EXPECT().Checkpoint(gomock.Any(), record, gomock.Any(), 30*time.Second).Return(nil)
+				_ = lease.Checkpoint(ctx, token, []byte("payload"))
+				Expect(spy.checkpointCalls[0].Size).To(Equal(7))
+			})
+			It("does not call OnFenced when the backend returns a non-fencing error", func() {
+				token := acquire()
+				mockB.EXPECT().Checkpoint(gomock.Any(), record, gomock.Any(), 30*time.Second).Return(errors.New("boom"))
+				_ = lease.Checkpoint(ctx, token, []byte("s"))
+				Expect(spy.fencedCalls).To(BeEmpty())
+			})
+			It("does not call OnFenced when the backend returns nil", func() {
+				token := acquire()
+				mockB.EXPECT().Checkpoint(gomock.Any(), record, gomock.Any(), 30*time.Second).Return(nil)
+				_ = lease.Checkpoint(ctx, token, []byte("s"))
+				Expect(spy.fencedCalls).To(BeEmpty())
+			})
+		})
+
+		Context("Renew", func() {
+			It("calls OnRenew before OnFenced when the backend returns ErrFenced", func() {
+				token := acquire()
+				mockB.EXPECT().Renew(gomock.Any(), record, 30*time.Second).Return(worklease.ErrFenced)
+				_ = lease.Renew(ctx, token)
+				Expect(spy.order).To(Equal([]string{"OnAcquire", "OnRenew", "OnFenced"}))
+				Expect(spy.fencedCalls[0].Operation).To(Equal(worklease.OperationRenew))
+			})
+			It("calls OnRenew with correct Duration measured from the backend call", func() {
+				token := acquire()
+				mockB.EXPECT().Renew(gomock.Any(), record, 30*time.Second).DoAndReturn(
+					func(context.Context, backend.LeaseRecord, time.Duration) error {
+						time.Sleep(5 * time.Millisecond)
+						return nil
+					})
+				_ = lease.Renew(ctx, token)
+				Expect(spy.renewCalls[0].Duration).To(BeNumerically(">=", 5*time.Millisecond))
+			})
+			It("does not call OnFenced when the backend returns nil", func() {
+				token := acquire()
+				mockB.EXPECT().Renew(gomock.Any(), record, 30*time.Second).Return(nil)
+				_ = lease.Renew(ctx, token)
+				Expect(spy.fencedCalls).To(BeEmpty())
+			})
+		})
+
+		Context("Release", func() {
+			It("calls OnRelease before OnFenced when the backend returns ErrFenced", func() {
+				token := acquire()
+				mockB.EXPECT().Release(gomock.Any(), record).Return(worklease.ErrFenced)
+				_ = lease.Release(ctx, token)
+				Expect(spy.order).To(Equal([]string{"OnAcquire", "OnRelease", "OnFenced"}))
+				Expect(spy.fencedCalls[0].Operation).To(Equal(worklease.OperationRelease))
+			})
+			It("calls OnRelease with correct Duration measured from the backend call", func() {
+				token := acquire()
+				mockB.EXPECT().Release(gomock.Any(), record).DoAndReturn(
+					func(context.Context, backend.LeaseRecord) error {
+						time.Sleep(5 * time.Millisecond)
+						return nil
+					})
+				_ = lease.Release(ctx, token)
+				Expect(spy.releaseCalls[0].Duration).To(BeNumerically(">=", 5*time.Millisecond))
+			})
+			It("does not call OnFenced when the backend returns nil", func() {
+				token := acquire()
+				mockB.EXPECT().Release(gomock.Any(), record).Return(nil)
+				_ = lease.Release(ctx, token)
+				Expect(spy.fencedCalls).To(BeEmpty())
+			})
+		})
+
+		Context("ReadCheckpoint", func() {
+			It("calls OnReadCheckpoint with CleanHandoff true when the backend returns true", func() {
+				token := acquire()
+				mockB.EXPECT().ReadCheckpoint(gomock.Any(), record).Return([]byte("prior"), true, nil)
+				_, _, _ = lease.ReadCheckpoint(ctx, token)
+				Expect(spy.readCheckpointCalls).To(HaveLen(1))
+				Expect(spy.readCheckpointCalls[0].CleanHandoff).To(BeTrue())
+			})
+			It("calls OnReadCheckpoint with Size equal to len of the returned state", func() {
+				token := acquire()
+				mockB.EXPECT().ReadCheckpoint(gomock.Any(), record).Return([]byte("prior"), false, nil)
+				_, _, _ = lease.ReadCheckpoint(ctx, token)
+				Expect(spy.readCheckpointCalls[0].Size).To(Equal(5))
+			})
+			It("calls OnReadCheckpoint with the error when the backend returns ErrFenced", func() {
+				token := acquire()
+				mockB.EXPECT().ReadCheckpoint(gomock.Any(), record).Return(nil, false, worklease.ErrFenced)
+				_, _, _ = lease.ReadCheckpoint(ctx, token)
+				Expect(errors.Is(spy.readCheckpointCalls[0].Err, worklease.ErrFenced)).To(BeTrue())
+			})
+			It("does not call OnFenced when ReadCheckpoint returns ErrFenced", func() {
+				token := acquire()
+				mockB.EXPECT().ReadCheckpoint(gomock.Any(), record).Return(nil, false, worklease.ErrFenced)
+				_, _, _ = lease.ReadCheckpoint(ctx, token)
+				Expect(spy.fencedCalls).To(BeEmpty())
+			})
+		})
+
+		Context("Acquire", func() {
+			It("calls OnAcquire with the zero Token when the backend returns an error", func() {
+				mockB.EXPECT().Acquire(gomock.Any(), "w1", "test-worker", 30*time.Second).Return(backend.LeaseRecord{}, worklease.ErrLeaseHeld)
+				_, _ = lease.Acquire(ctx, "w1")
+				Expect(spy.acquireCalls[0].Token).To(Equal(worklease.Token{}))
+				Expect(errors.Is(spy.acquireCalls[0].Err, worklease.ErrLeaseHeld)).To(BeTrue())
+			})
+			It("calls OnAcquire with a populated Token on success", func() {
+				_ = acquire()
+				Expect(spy.acquireCalls[0].Token.WorkID()).To(Equal("w1"))
+				Expect(spy.acquireCalls[0].Err).To(BeNil())
+			})
+			It("calls OnAcquire with Duration measured from the backend call only — not the wait loop", func() {
+				mockB.EXPECT().Acquire(gomock.Any(), "w1", "test-worker", 30*time.Second).DoAndReturn(
+					func(context.Context, string, string, time.Duration) (backend.LeaseRecord, error) {
+						time.Sleep(5 * time.Millisecond)
+						return record, nil
+					})
+				_, err := lease.Acquire(ctx, "w1")
+				Expect(err).NotTo(HaveOccurred())
+				Expect(spy.acquireCalls[0].Duration).To(BeNumerically(">=", 5*time.Millisecond))
 			})
 		})
 	})

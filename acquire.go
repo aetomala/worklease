@@ -27,12 +27,14 @@ func (c *leaseClient) Acquire(ctx context.Context, workID string, opts ...Acquir
 
 	// ===== STEP 3: Single-Attempt Path =====
 	if !cfg.waitForLease {
+		start := time.Now()
 		record, err := c.b.Acquire(ctx, workID, c.cfg.HolderID, c.cfg.TTL)
+		dur := time.Since(start)
 		token := Token{}
 		if err == nil {
 			token = newToken(record)
 		}
-		c.obs.OnAcquire(ctx, workID, token, err)
+		c.obs.OnAcquire(ctx, AcquireEvent{WorkID: workID, Token: token, Duration: dur, Err: err})
 		if err != nil {
 			return Token{}, fmt.Errorf("worklease: Acquire: %w", err)
 		}
@@ -41,12 +43,14 @@ func (c *leaseClient) Acquire(ctx context.Context, workID string, opts ...Acquir
 
 	// ===== STEP 4: Wait+Retry Loop =====
 	for {
+		start := time.Now()
 		record, err := c.b.Acquire(ctx, workID, c.cfg.HolderID, c.cfg.TTL)
+		dur := time.Since(start)
 		token := Token{}
 		if err == nil {
 			token = newToken(record)
 		}
-		c.obs.OnAcquire(ctx, workID, token, err)
+		c.obs.OnAcquire(ctx, AcquireEvent{WorkID: workID, Token: token, Duration: dur, Err: err})
 		if err == nil {
 			return newToken(record), nil
 		}

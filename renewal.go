@@ -48,10 +48,12 @@ func (c *leaseClient) StartRenewal(ctx context.Context, token Token, opts ...Ren
 			case <-ctx.Done():
 				return // Path 4: parent cancelled — renewCtx auto-cancels
 			case <-ticker.C:
+				start := time.Now()
 				err := c.b.Renew(ctx, toRecord(token), c.cfg.TTL)
-				c.obs.OnRenew(ctx, token, err)
+				dur := time.Since(start)
+				c.obs.OnRenew(ctx, RenewEvent{Token: token, Duration: dur, Err: err})
 				if errors.Is(err, ErrFenced) {
-					c.obs.OnFenced(ctx, token)
+					c.obs.OnFenced(ctx, FencedEvent{Token: token, Operation: OperationRenew})
 					cancel()
 					return
 				}

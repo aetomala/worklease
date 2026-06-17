@@ -9,6 +9,18 @@ This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 
 ## [Unreleased]
 
+### Added
+
+- `backend/conformance` package — `RunSuite(newBackend func() backend.Backend) func()` returns a backend-agnostic Ginkgo spec tree that enforces memory-vs-Postgres parity structurally (ADR-0015). Wired into both backend test suites; expiry is exercised via non-positive TTL with no clock injection. Covers acquire/checkpoint/renew/release/read-checkpoint semantics including `ErrLeaseExpired` on renew-of-expired, `ErrFenced` on stale and never-acquired records, and slice-ownership invariants.
+
+### Fixed
+
+- Memory backend no longer aliases caller slices (ADR-0014). `Checkpoint` now stores a defensive copy of the incoming `state`, and `ReadCheckpoint` returns a fresh copy of the stored slice. Previously, mutating a slice after `Checkpoint` or mutating a `ReadCheckpoint` result silently corrupted stored state — a backend-dependent bug, since the Postgres backend was immune via BYTEA serialization.
+
+### Breaking
+
+- `LeaseObserver` redesigned: the five flat-parameter methods are replaced by six event-struct methods — `OnAcquire(ctx, AcquireEvent)`, `OnCheckpoint(ctx, CheckpointEvent)`, `OnRenew(ctx, RenewEvent)`, `OnRelease(ctx, ReleaseEvent)`, `OnReadCheckpoint(ctx, ReadCheckpointEvent)`, and `OnFenced(ctx, FencedEvent)`. New `OnReadCheckpoint` callback; `OnFenced` now also fires on the `Release` path (it previously fired only on Checkpoint and Renew); a `Duration` field on all operation events measures the final backend call only — not the wait loop. Implementers of `LeaseObserver` must convert to the event structs. See `UPGRADING.md`.
+
 ---
 
 ## [v0.3.0] — 2026-06-13

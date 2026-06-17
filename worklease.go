@@ -79,10 +79,12 @@ func toRecord(t Token) backend.LeaseRecord {
 func (c *leaseClient) Checkpoint(ctx context.Context, token Token, state []byte) error {
 	// ===== Validate and Delegate =====
 	record := toRecord(token)
+	start := time.Now()
 	err := c.b.Checkpoint(ctx, record, state, c.cfg.TTL)
-	c.obs.OnCheckpoint(ctx, token, len(state), err)
+	dur := time.Since(start)
+	c.obs.OnCheckpoint(ctx, CheckpointEvent{Token: token, Size: len(state), Duration: dur, Err: err})
 	if errors.Is(err, ErrFenced) {
-		c.obs.OnFenced(ctx, token)
+		c.obs.OnFenced(ctx, FencedEvent{Token: token, Operation: OperationCheckpoint})
 	}
 
 	if errors.Is(err, ErrFenced) {
@@ -102,10 +104,12 @@ func (c *leaseClient) Checkpoint(ctx context.Context, token Token, state []byte)
 func (c *leaseClient) Renew(ctx context.Context, token Token) error {
 	// ===== Validate and Delegate =====
 	record := toRecord(token)
+	start := time.Now()
 	err := c.b.Renew(ctx, record, c.cfg.TTL)
-	c.obs.OnRenew(ctx, token, err)
+	dur := time.Since(start)
+	c.obs.OnRenew(ctx, RenewEvent{Token: token, Duration: dur, Err: err})
 	if errors.Is(err, ErrFenced) {
-		c.obs.OnFenced(ctx, token)
+		c.obs.OnFenced(ctx, FencedEvent{Token: token, Operation: OperationRenew})
 	}
 
 	if errors.Is(err, ErrFenced) {
@@ -124,8 +128,13 @@ func (c *leaseClient) Renew(ctx context.Context, token Token) error {
 func (c *leaseClient) Release(ctx context.Context, token Token) error {
 	// ===== Validate and Delegate =====
 	record := toRecord(token)
+	start := time.Now()
 	err := c.b.Release(ctx, record)
-	c.obs.OnRelease(ctx, token, err)
+	dur := time.Since(start)
+	c.obs.OnRelease(ctx, ReleaseEvent{Token: token, Duration: dur, Err: err})
+	if errors.Is(err, ErrFenced) {
+		c.obs.OnFenced(ctx, FencedEvent{Token: token, Operation: OperationRelease})
+	}
 
 	if errors.Is(err, ErrFenced) {
 		return fmt.Errorf("worklease: Release: workID=%q holderID=%q: %w", token.WorkID(), token.HolderID(), ErrFenced)
@@ -144,5 +153,9 @@ func (c *leaseClient) Release(ctx context.Context, token Token) error {
 func (c *leaseClient) ReadCheckpoint(ctx context.Context, token Token) ([]byte, bool, error) {
 	// ===== Delegate to Backend =====
 	record := toRecord(token)
-	return c.b.ReadCheckpoint(ctx, record)
+	start := time.Now()
+	state, cleanHandoff, err := c.b.ReadCheckpoint(ctx, record)
+	dur := time.Since(start)
+	c.obs.OnReadCheckpoint(ctx, ReadCheckpointEvent{Token: token, Duration: dur, CleanHandoff: cleanHandoff, Size: len(state), Err: err})
+	return state, cleanHandoff, err
 }
