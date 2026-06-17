@@ -180,7 +180,11 @@ if state == nil {
 
 ## Upgrading
 
-`v0.3.0` includes a breaking change in the `checkpoint` package: `Codec.Encode` and `Codec.Decode` are renamed to `Marshal` and `Unmarshal`. Callers using `checkpoint.JSON()` are unaffected. See [`UPGRADING.md`](UPGRADING.md) for full migration instructions.
+`v0.4.0` redesigns `LeaseObserver` from flat parameters to event structs (adds `OnReadCheckpoint`, fires `OnFenced` on the Release path, adds `Duration`), and `pool.New` now returns distinct config sentinels (`ErrNilLease` / `ErrEmptyWorkIDs` / `ErrWithWaitForLeaseProhibited`, all wrapping `ErrConfigInvalid`) while `pool.Pool.Run` returns `ErrAllSlotsDead` when every slot dies permanently.
+
+`v0.3.0` includes a breaking change in the `checkpoint` package: `Codec.Encode` and `Codec.Decode` are renamed to `Marshal` and `Unmarshal`. Callers using `checkpoint.JSON()` are unaffected.
+
+See [`UPGRADING.md`](UPGRADING.md) for full migration instructions.
 
 ---
 
@@ -219,7 +223,7 @@ err := leader.Elect(ctx, lease, "scheduler:primary", leader.Config{}, func(ctx c
 })
 ```
 
-Pass `worklease.WithWaitForLease()` in `leader.Config.AcquireOptions` to block until leadership is available rather than returning `ErrLeaseHeld` immediately.
+Pass `worklease.WithWaitForLease()` in `leader.Config.AcquireOptions` to block until leadership is available rather than returning `ErrLeaseHeld` immediately. `leader.Config` also accepts optional lifecycle callbacks — `OnElected`, `OnLost`, and `OnRelinquished` — for observing leadership transitions.
 
 ### pool — Distributed work distribution
 
@@ -239,11 +243,15 @@ if err != nil { ... }
 if err := p.Run(ctx); err != nil { ... }
 ```
 
-Return a `PermanentError` from the work function to drop a slot without reacquisition.
+Return a `PermanentError` from the work function to drop a slot without reacquisition — implement the interface on a custom type, or wrap an error with `pool.Permanent(err)`. When every slot exits permanently, `Run` returns `pool.ErrAllSlotsDead` (rather than `nil`, which signals clean context cancellation). Set `pool.Config.Observer` to a `pool.Observer` to receive slot lifecycle events (`OnSlotAcquired` / `OnSlotLost` / `OnSlotBackoff` / `OnSlotDead`), and call `ActiveSlots()` for a point-in-time view of slots currently executing their work function. Construction errors are distinct sentinels (`ErrNilLease` / `ErrEmptyWorkIDs` / `ErrWithWaitForLeaseProhibited`) that all satisfy `errors.Is(err, pool.ErrConfigInvalid)`.
 
 ### checkpoint — Typed serialization helpers
 
 `checkpoint.Codec` and the generic `Encode[T]` / `Decode[T]` helpers add typed serialization on top of the raw `[]byte` checkpoint layer. `checkpoint.JSON()` returns a `JSONCodec` backed by `encoding/json`.
+
+### Observability — LeaseObserver
+
+Set `worklease.Config.Observer` to a `LeaseObserver` to receive a synchronous callback after every lease operation — `OnAcquire`, `OnCheckpoint`, `OnRenew`, `OnRelease`, `OnReadCheckpoint`, and `OnFenced` — each with a per-operation event struct carrying the `Token`, error, and a `Duration` for the final backend call. nil installs a no-op, so observability is fully opt-in. See [`examples/observability`](examples/observability/) for a stdlib-only implementation.
 
 ---
 
@@ -338,7 +346,7 @@ Requires Go 1.26+. PostgreSQL backend requires PostgreSQL 12+.
 
 ## Status
 
-v0.3.0 is the current stable release. The public API (`Lease`, `Token`, options, sentinels) is stable.
+v0.3.0 is the latest tagged release. v0.4.0 is feature-complete on `dev` and pending release. The core public API (`Lease`, `Token`, options, sentinels) is stable.
 
 ---
 
@@ -349,11 +357,13 @@ v0.3.0 is the current stable release. The public API (`Lease`, `Token`, options,
 - **v0.1.0** — Core lease primitives: `Lease`, `Backend`, PostgreSQL + in-memory backends, fencing, checkpoint
 - **v0.2.0** — `worker.Runner`, `checkpoint.Codec`, `LeaseObserver`, `memory.Clock`, examples
 - **v0.3.0** — `leader.Elect`, `pool.Pool`, `HasWaitForLease`, `checkpoint.Codec` method rename (breaking — see `UPGRADING.md`)
+- **v0.4.0** _(pending release)_ — `LeaseObserver` event-struct redesign (breaking), `backend/conformance` suite, `pool.Observer`/`Permanent`/`ErrAllSlotsDead`, `leader` lifecycle callbacks, memory slice-ownership fix
 
 ### Future
 
-- Redis backend
-- etcd backend
+- **v0.5** — renewal retry policy with backoff; single-statement `Acquire` with `RETURNING` + global fencing sequence
+- **v0.6** — caller-governed row lifecycle (`Forget` / `Vacuum.Sweep`)
+- Redis backend, etcd backend (unscheduled, post-1.0)
 - `Token` test constructor — unblocks table-driven tests that construct tokens directly
 
 ---
