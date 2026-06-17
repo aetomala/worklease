@@ -10,8 +10,13 @@ import (
 
 	"github.com/aetomala/worklease"
 	"github.com/aetomala/worklease/backend"
+	"github.com/aetomala/worklease/backend/conformance"
 	"github.com/aetomala/worklease/backend/memory"
 )
+
+var _ = Describe("conformance", conformance.RunSuite(func() backend.Backend {
+	return memory.New()
+}))
 
 type fakeClock struct {
 	now time.Time
