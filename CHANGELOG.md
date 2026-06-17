@@ -16,6 +16,7 @@ This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 - `pool.ErrAllSlotsDead` — returned by `pool.Pool.Run` when every slot exits via `PermanentError`, distinguishing a fully-dead pool from clean shutdown.
 - Distinct `pool` config sentinels — `ErrNilLease`, `ErrEmptyWorkIDs`, `ErrWithWaitForLeaseProhibited` — each wrapping `ErrConfigInvalid`.
 - `leader.Config` lifecycle callbacks — `OnElected` (after acquire, before `fn`), `OnLost` (when the renewal context is cancelled before `fn` returns), and `OnRelinquished` (after a successful `Release`). All optional; nil is a no-op.
+- `examples/observability` — a stdlib-only `LeaseObserver` reference implementation exercising every callback.
 
 ### Changed
 
