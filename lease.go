@@ -151,34 +151,104 @@ func WithRenewalInterval(d time.Duration) RenewalOption {
 	}
 }
 
-// LeaseObserver is called synchronously after each Lease operation.
-// All methods are safe for concurrent use — the caller guarantees the
-// implementation is goroutine-safe.
+// LeaseObserver receives callbacks after each Lease operation.
+// All methods are called synchronously. Implementations must not block or panic.
+// The zero value of Config.Observer is nil; the library substitutes a no-op observer.
 type LeaseObserver interface {
-	// OnAcquire is called after Acquire returns, whether successful or not.
-	// token is the zero Token when err is non-nil.
-	OnAcquire(ctx context.Context, workID string, token Token, err error)
+	// OnAcquire is called after every Acquire attempt, successful or not.
+	// e.Duration is the duration of the final backend call only — not the wait loop.
+	// e.Token is the zero value of Token if e.Err is non-nil.
+	OnAcquire(ctx context.Context, e AcquireEvent)
 
-	// OnCheckpoint is called after Checkpoint returns.
-	// size is the length in bytes of the state argument.
-	OnCheckpoint(ctx context.Context, token Token, size int, err error)
+	// OnCheckpoint is called after every Checkpoint attempt.
+	// If e.Err is ErrFenced, OnFenced is also called after this method returns.
+	OnCheckpoint(ctx context.Context, e CheckpointEvent)
 
-	// OnRenew is called after Renew returns.
-	OnRenew(ctx context.Context, token Token, err error)
+	// OnRenew is called after every Renew attempt.
+	// If e.Err is ErrFenced, OnFenced is also called after this method returns.
+	OnRenew(ctx context.Context, e RenewEvent)
 
-	// OnRelease is called after Release returns.
-	OnRelease(ctx context.Context, token Token, err error)
+	// OnRelease is called after every Release attempt.
+	// If e.Err is ErrFenced, OnFenced is also called after this method returns.
+	OnRelease(ctx context.Context, e ReleaseEvent)
 
-	// OnFenced is called after OnCheckpoint or OnRenew when the returned
-	// error wraps ErrFenced — the lease has been superseded.
-	OnFenced(ctx context.Context, token Token)
+	// OnReadCheckpoint is called after every ReadCheckpoint attempt.
+	// OnFenced is NOT called on ReadCheckpoint — ErrFenced surfaces via e.Err only.
+	OnReadCheckpoint(ctx context.Context, e ReadCheckpointEvent)
+
+	// OnFenced is called when Checkpoint, Renew, or Release returns ErrFenced.
+	// Called in addition to the operation-specific callback — not instead of.
+	// e.Operation identifies which operation triggered the fencing event.
+	OnFenced(ctx context.Context, e FencedEvent)
+}
+
+// Operation identifies the Lease operation that triggered a fencing event.
+type Operation uint8
+
+// Operation values for fencing events.
+const (
+	OperationCheckpoint Operation = iota
+	OperationRenew
+	OperationRelease
+)
+
+// AcquireEvent carries the result of an Acquire call.
+// Duration is the duration of the final backend call only — not the wait loop.
+// Token is the zero value of Token if Err is non-nil.
+type AcquireEvent struct {
+	WorkID   string
+	Token    Token
+	Duration time.Duration
+	Err      error
+}
+
+// CheckpointEvent carries the result of a Checkpoint call.
+// Size is len(state) from the call site.
+type CheckpointEvent struct {
+	Token    Token
+	Size     int
+	Duration time.Duration
+	Err      error
+}
+
+// RenewEvent carries the result of a Renew call.
+type RenewEvent struct {
+	Token    Token
+	Duration time.Duration
+	Err      error
+}
+
+// ReleaseEvent carries the result of a Release call.
+type ReleaseEvent struct {
+	Token    Token
+	Duration time.Duration
+	Err      error
+}
+
+// ReadCheckpointEvent carries the result of a ReadCheckpoint call.
+// Size is len of the returned state slice; 0 if nil.
+type ReadCheckpointEvent struct {
+	Token        Token
+	Duration     time.Duration
+	CleanHandoff bool
+	Size         int
+	Err          error
+}
+
+// FencedEvent carries the context of a fencing event.
+// Called in addition to the operation-specific event — not instead of.
+type FencedEvent struct {
+	Token     Token
+	Operation Operation
 }
 
 // noopObserver is a LeaseObserver that discards all events.
+// Substituted when Config.Observer is nil.
 type noopObserver struct{}
 
-func (noopObserver) OnAcquire(_ context.Context, _ string, _ Token, _ error)    {}
-func (noopObserver) OnCheckpoint(_ context.Context, _ Token, _ int, _ error)    {}
-func (noopObserver) OnRenew(_ context.Context, _ Token, _ error)                {}
-func (noopObserver) OnRelease(_ context.Context, _ Token, _ error)              {}
-func (noopObserver) OnFenced(_ context.Context, _ Token)                        {}
+func (noopObserver) OnAcquire(_ context.Context, _ AcquireEvent)               {}
+func (noopObserver) OnCheckpoint(_ context.Context, _ CheckpointEvent)         {}
+func (noopObserver) OnRenew(_ context.Context, _ RenewEvent)                   {}
+func (noopObserver) OnRelease(_ context.Context, _ ReleaseEvent)               {}
+func (noopObserver) OnReadCheckpoint(_ context.Context, _ ReadCheckpointEvent) {}
+func (noopObserver) OnFenced(_ context.Context, _ FencedEvent)                 {}

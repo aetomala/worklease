@@ -99,10 +99,43 @@ parameter after `ctx` to identify which slot is executing; the remaining paramet
 - In-process fan-out use cases are explicitly out of scope; callers who want that use
   `errgroup`.
 
+## v0.4 Amendment (2026-06-16)
+
+v0.4 extends `pool` along four axes; the cross-process scope and `PermanentError` interface
+decisions above are unchanged.
+
+- **`pool.Permanent(err error) error`** — a constructor returning a value that satisfies
+  `PermanentError`. The original decision (interface, no concrete type) stands; `Permanent` is an
+  additive convenience so a `WorkFn` can drop its slot without defining a custom type. The
+  interface remains the canonical mechanism — `Permanent` simply wraps the common case.
+
+- **`pool.Observer` interface** — `OnSlotAcquired`, `OnSlotLost`, `OnSlotBackoff`, `OnSlotDead`,
+  each taking an event struct, injected via `Config.Observer`; nil installs a no-op.
+  This is an **interface**, unlike `leader`'s `func` callbacks (ADR-0010), because the pool has
+  four distinct slot events — enough surface to justify selective implementation via embedding a
+  no-op. Event structs (not flat params) keep it consistent with `LeaseObserver` (ADR-0007) and
+  forward-extensible. `OnSlotAcquired` fires at `WorkFn` entry — the same point `ActiveSlots`
+  starts reporting the slot — not when the internal `Acquire` succeeds. The pool observer layers
+  above each slot's `Runner → Lease` `LeaseObserver`: same underlying events, different altitude.
+
+- **Distinct config sentinels** — `ErrNilLease`, `ErrEmptyWorkIDs`, and
+  `ErrWithWaitForLeaseProhibited` replace the single `ErrConfigInvalid` at the `New` call site.
+  Each wraps `ErrConfigInvalid` via `%w`, so `errors.Is(err, ErrConfigInvalid)` still holds for
+  callers checking the broad case while distinct sentinels aid debugging. `ErrConfigInvalid`'s
+  message changed to `"pool: invalid configuration"`.
+
+- **`ErrAllSlotsDead`** — `Run` returns it when every slot has exited via `PermanentError`,
+  distinguishing a fully-dead pool from clean shutdown (`nil` on context cancellation). The last
+  slot to die cancels an internal context so idle siblings unblock.
+
+These are breaking at the margins (the `ErrConfigInvalid` message and the `Run`-returns-
+`ErrAllSlotsDead` behavior); see `UPGRADING.md` (v0.3 → v0.4).
+
 ## References
 
-- `pool/pool.go` — `Pool`, `WorkFn`, `PermanentError`, `Config`, `New`
+- `pool/pool.go` — `Pool`, `WorkFn`, `PermanentError`, `Permanent`, `Observer`, `Config`, `New`, sentinels
 - `worker/runner.go` — `Runner.Run`, used per slot internally
 - `lease.go` — `AcquireOption`, `WithWaitForLease`
 - `docs/adr/0006-backend-acquire-single-attempt.md` — single-attempt backend contract
-- `docs/adr/0010-leader-fn-signature-and-acquire-semantics.md` — parallel design decisions for `leader`
+- `docs/adr/0007-observer-config-field.md` — `LeaseObserver`, the event-struct pattern `pool.Observer` mirrors
+- `docs/adr/0010-leader-fn-signature-and-acquire-semantics.md` — parallel design decisions for `leader` (callbacks vs interface)

@@ -164,61 +164,73 @@ func (m *MockLeaseObserver) EXPECT() *MockLeaseObserverMockRecorder {
 }
 
 // OnAcquire mocks base method.
-func (m *MockLeaseObserver) OnAcquire(ctx context.Context, workID string, token worklease.Token, err error) {
+func (m *MockLeaseObserver) OnAcquire(ctx context.Context, e worklease.AcquireEvent) {
 	m.ctrl.T.Helper()
-	m.ctrl.Call(m, "OnAcquire", ctx, workID, token, err)
+	m.ctrl.Call(m, "OnAcquire", ctx, e)
 }
 
 // OnAcquire indicates an expected call of OnAcquire.
-func (mr *MockLeaseObserverMockRecorder) OnAcquire(ctx, workID, token, err any) *gomock.Call {
+func (mr *MockLeaseObserverMockRecorder) OnAcquire(ctx, e any) *gomock.Call {
 	mr.mock.ctrl.T.Helper()
-	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "OnAcquire", reflect.TypeOf((*MockLeaseObserver)(nil).OnAcquire), ctx, workID, token, err)
+	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "OnAcquire", reflect.TypeOf((*MockLeaseObserver)(nil).OnAcquire), ctx, e)
 }
 
 // OnCheckpoint mocks base method.
-func (m *MockLeaseObserver) OnCheckpoint(ctx context.Context, token worklease.Token, size int, err error) {
+func (m *MockLeaseObserver) OnCheckpoint(ctx context.Context, e worklease.CheckpointEvent) {
 	m.ctrl.T.Helper()
-	m.ctrl.Call(m, "OnCheckpoint", ctx, token, size, err)
+	m.ctrl.Call(m, "OnCheckpoint", ctx, e)
 }
 
 // OnCheckpoint indicates an expected call of OnCheckpoint.
-func (mr *MockLeaseObserverMockRecorder) OnCheckpoint(ctx, token, size, err any) *gomock.Call {
+func (mr *MockLeaseObserverMockRecorder) OnCheckpoint(ctx, e any) *gomock.Call {
 	mr.mock.ctrl.T.Helper()
-	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "OnCheckpoint", reflect.TypeOf((*MockLeaseObserver)(nil).OnCheckpoint), ctx, token, size, err)
+	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "OnCheckpoint", reflect.TypeOf((*MockLeaseObserver)(nil).OnCheckpoint), ctx, e)
 }
 
 // OnFenced mocks base method.
-func (m *MockLeaseObserver) OnFenced(ctx context.Context, token worklease.Token) {
+func (m *MockLeaseObserver) OnFenced(ctx context.Context, e worklease.FencedEvent) {
 	m.ctrl.T.Helper()
-	m.ctrl.Call(m, "OnFenced", ctx, token)
+	m.ctrl.Call(m, "OnFenced", ctx, e)
 }
 
 // OnFenced indicates an expected call of OnFenced.
-func (mr *MockLeaseObserverMockRecorder) OnFenced(ctx, token any) *gomock.Call {
+func (mr *MockLeaseObserverMockRecorder) OnFenced(ctx, e any) *gomock.Call {
 	mr.mock.ctrl.T.Helper()
-	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "OnFenced", reflect.TypeOf((*MockLeaseObserver)(nil).OnFenced), ctx, token)
+	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "OnFenced", reflect.TypeOf((*MockLeaseObserver)(nil).OnFenced), ctx, e)
+}
+
+// OnReadCheckpoint mocks base method.
+func (m *MockLeaseObserver) OnReadCheckpoint(ctx context.Context, e worklease.ReadCheckpointEvent) {
+	m.ctrl.T.Helper()
+	m.ctrl.Call(m, "OnReadCheckpoint", ctx, e)
+}
+
+// OnReadCheckpoint indicates an expected call of OnReadCheckpoint.
+func (mr *MockLeaseObserverMockRecorder) OnReadCheckpoint(ctx, e any) *gomock.Call {
+	mr.mock.ctrl.T.Helper()
+	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "OnReadCheckpoint", reflect.TypeOf((*MockLeaseObserver)(nil).OnReadCheckpoint), ctx, e)
 }
 
 // OnRelease mocks base method.
-func (m *MockLeaseObserver) OnRelease(ctx context.Context, token worklease.Token, err error) {
+func (m *MockLeaseObserver) OnRelease(ctx context.Context, e worklease.ReleaseEvent) {
 	m.ctrl.T.Helper()
-	m.ctrl.Call(m, "OnRelease", ctx, token, err)
+	m.ctrl.Call(m, "OnRelease", ctx, e)
 }
 
 // OnRelease indicates an expected call of OnRelease.
-func (mr *MockLeaseObserverMockRecorder) OnRelease(ctx, token, err any) *gomock.Call {
+func (mr *MockLeaseObserverMockRecorder) OnRelease(ctx, e any) *gomock.Call {
 	mr.mock.ctrl.T.Helper()
-	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "OnRelease", reflect.TypeOf((*MockLeaseObserver)(nil).OnRelease), ctx, token, err)
+	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "OnRelease", reflect.TypeOf((*MockLeaseObserver)(nil).OnRelease), ctx, e)
 }
 
 // OnRenew mocks base method.
-func (m *MockLeaseObserver) OnRenew(ctx context.Context, token worklease.Token, err error) {
+func (m *MockLeaseObserver) OnRenew(ctx context.Context, e worklease.RenewEvent) {
 	m.ctrl.T.Helper()
-	m.ctrl.Call(m, "OnRenew", ctx, token, err)
+	m.ctrl.Call(m, "OnRenew", ctx, e)
 }
 
 // OnRenew indicates an expected call of OnRenew.
-func (mr *MockLeaseObserverMockRecorder) OnRenew(ctx, token, err any) *gomock.Call {
+func (mr *MockLeaseObserverMockRecorder) OnRenew(ctx, e any) *gomock.Call {
 	mr.mock.ctrl.T.Helper()
-	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "OnRenew", reflect.TypeOf((*MockLeaseObserver)(nil).OnRenew), ctx, token, err)
+	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "OnRenew", reflect.TypeOf((*MockLeaseObserver)(nil).OnRenew), ctx, e)
 }

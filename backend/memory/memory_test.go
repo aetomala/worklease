@@ -10,8 +10,13 @@ import (
 
 	"github.com/aetomala/worklease"
 	"github.com/aetomala/worklease/backend"
+	"github.com/aetomala/worklease/backend/conformance"
 	"github.com/aetomala/worklease/backend/memory"
 )
+
+var _ = Describe("conformance", conformance.RunSuite(func() backend.Backend {
+	return memory.New()
+}))
 
 type fakeClock struct {
 	now time.Time
@@ -425,6 +430,35 @@ var _ = Describe("Backend (memory)", func() {
 					Expect(err).NotTo(HaveOccurred())
 					Expect(state).To(Equal([]byte("saved-state")))
 					Expect(cleanHandoff).To(BeTrue())
+				})
+			})
+		})
+
+		// ===== ADR-0014: slice ownership =====
+		Describe("memoryBackend slice ownership", func() {
+			Context("Checkpoint", func() {
+				It("does not reflect mutations to the state slice made after Checkpoint returns", func() {
+					rec, err := b.Acquire(ctx, "w1", "holder-a", 30*time.Second)
+					Expect(err).NotTo(HaveOccurred())
+					state := []byte("abc")
+					Expect(b.Checkpoint(ctx, rec, state, 30*time.Second)).To(Succeed())
+					state[0] = 'X' // mutate after Checkpoint returns
+					got, _, err := b.ReadCheckpoint(ctx, rec)
+					Expect(err).NotTo(HaveOccurred())
+					Expect(got).To(Equal([]byte("abc")))
+				})
+			})
+			Context("ReadCheckpoint", func() {
+				It("returns a slice that is independent of the stored state — mutations do not affect storage", func() {
+					rec, err := b.Acquire(ctx, "w1", "holder-a", 30*time.Second)
+					Expect(err).NotTo(HaveOccurred())
+					Expect(b.Checkpoint(ctx, rec, []byte("abc"), 30*time.Second)).To(Succeed())
+					got, _, err := b.ReadCheckpoint(ctx, rec)
+					Expect(err).NotTo(HaveOccurred())
+					got[0] = 'X' // mutate the returned slice
+					again, _, err := b.ReadCheckpoint(ctx, rec)
+					Expect(err).NotTo(HaveOccurred())
+					Expect(again).To(Equal([]byte("abc")))
 				})
 			})
 		})

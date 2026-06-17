@@ -11,6 +11,38 @@ This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 
 ---
 
+## [v0.4.0] — 2026-06-17
+
+### Breaking
+
+- `LeaseObserver` redesigned: the five flat-parameter methods are replaced by six event-struct methods — `OnAcquire(ctx, AcquireEvent)`, `OnCheckpoint(ctx, CheckpointEvent)`, `OnRenew(ctx, RenewEvent)`, `OnRelease(ctx, ReleaseEvent)`, `OnReadCheckpoint(ctx, ReadCheckpointEvent)`, and `OnFenced(ctx, FencedEvent)`. New `OnReadCheckpoint` callback; `OnFenced` now also fires on the `Release` path (it previously fired only on Checkpoint and Renew); a `Duration` field on all operation events measures the final backend call only — not the wait loop. Implementers of `LeaseObserver` must convert to the event structs. See `UPGRADING.md`.
+- `pool.ErrConfigInvalid` message changed to `"pool: invalid configuration"`, and `pool.New` now returns the distinct sentinels below instead of the single `ErrConfigInvalid`. Callers matching the exact old error string must switch to `errors.Is(err, pool.ErrConfigInvalid)` (still satisfied by all three). `pool.Pool.Run` now returns `ErrAllSlotsDead` (previously `nil`) when all slots exit via `PermanentError`.
+
+### Added
+
+- `pool.Observer` interface (`OnSlotAcquired`, `OnSlotLost`, `OnSlotBackoff`, `OnSlotDead`) with event structs, injected via `pool.Config.Observer`; nil installs a no-op.
+- `pool.Permanent(err error) error` — constructor returning a value that satisfies `PermanentError`, so a `WorkFn` can drop its slot without defining a custom error type.
+- `pool.ErrAllSlotsDead` — returned by `pool.Pool.Run` when every slot exits via `PermanentError`, distinguishing a fully-dead pool from clean shutdown.
+- Distinct `pool` config sentinels — `ErrNilLease`, `ErrEmptyWorkIDs`, `ErrWithWaitForLeaseProhibited` — each wrapping `ErrConfigInvalid`.
+- `leader.Config` lifecycle callbacks — `OnElected` (after acquire, before `fn`), `OnLost` (when the renewal context is cancelled before `fn` returns), and `OnRelinquished` (after a successful `Release`). All optional; nil is a no-op.
+- `backend/conformance` package — `RunSuite(newBackend func() backend.Backend) func()` returns a backend-agnostic Ginkgo spec tree that enforces memory-vs-Postgres parity structurally (ADR-0015). Wired into both backend test suites; expiry is exercised via non-positive TTL with no clock injection. Covers acquire/checkpoint/renew/release/read-checkpoint semantics including `ErrLeaseExpired` on renew-of-expired, `ErrFenced` on stale and never-acquired records, and slice-ownership invariants.
+- `examples/observability` — a stdlib-only `LeaseObserver` reference implementation producing per-operation counts and latency, lease hold duration (via `OnAcquire`/`OnRelease` correlation on the fencing token), and a dedicated fencing counter, with a mapping to Prometheus/OpenTelemetry instruments.
+
+### Changed
+
+- `pool.Pool.ActiveSlots` now reflects slots that are actively executing `WorkFn` (marking moved to WorkFn entry), excluding the acquire phase.
+
+### Fixed
+
+- Memory backend no longer aliases caller slices (ADR-0014). `Checkpoint` now stores a defensive copy of the incoming `state`, and `ReadCheckpoint` returns a fresh copy of the stored slice. Previously, mutating a slice after `Checkpoint` or mutating a `ReadCheckpoint` result silently corrupted stored state — a backend-dependent bug, since the Postgres backend was immune via BYTEA serialization.
+
+### Documentation
+
+- Synced `docs/ARCHITECTURE.md`, `README.md`, and `doc.go` to the v0.4 surface (LeaseObserver event structs, pool observer/sentinels/`ErrAllSlotsDead`, leader callbacks, backend conformance suite, slice-ownership contract).
+- Added ADR-0014 (backend slice ownership contract) and ADR-0015 (backend conformance suite); amended ADR-0007, ADR-0010, and ADR-0011 with v0.4 addenda.
+
+---
+
 ## [v0.3.0] — 2026-06-13
 
 ### Breaking

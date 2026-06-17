@@ -39,6 +39,19 @@ type Config struct {
 	// manage its own sleep. pool.Pool callers are unaffected — Pool already
 	// governs reacquisition delay via Config.BackoffInterval.
 	BackoffInterval time.Duration
+
+	// OnElected is called after Acquire succeeds, before fn is invoked.
+	// Optional — nil is a no-op.
+	OnElected func(ctx context.Context, token worklease.Token)
+
+	// OnLost is called when the renewal context is cancelled due to fencing
+	// or renewal failure, before fn returns.
+	// Optional — nil is a no-op.
+	OnLost func(ctx context.Context, token worklease.Token)
+
+	// OnRelinquished is called after Release succeeds on a clean exit.
+	// Optional — nil is a no-op.
+	OnRelinquished func(ctx context.Context, token worklease.Token)
 }
 
 // Elect acquires workID and calls fn under a managed renewal context.
@@ -65,30 +78,45 @@ func Elect(ctx context.Context, lease worklease.Lease, workID string, cfg Config
 		return err
 	}
 
-	// ===== STEP 3: StartRenewal =====
+	// ===== STEP 3: OnElected (use ctx, not renewCtx) =====
+	if cfg.OnElected != nil {
+		cfg.OnElected(ctx, token)
+	}
+
+	// ===== STEP 4: StartRenewal =====
 	renewCtx, stopRenewal := lease.StartRenewal(ctx, token, cfg.RenewalOptions...)
 
-	// ===== STEP 4: Defer stopRenewal =====
+	// ===== STEP 5: Defer stopRenewal (panic-safety net) =====
 	defer stopRenewal()
 
-	// ===== STEP 5: Call fn =====
+	// ===== STEP 6: Call fn =====
 	fnErr := fn(renewCtx)
 
-	// ===== STEP 6: stopRenewal (explicit) =====
+	// ===== STEP 7: OnLost if renewal context was cancelled before fn returned =====
+	if renewCtx.Err() != nil && cfg.OnLost != nil {
+		cfg.OnLost(ctx, token)
+	}
+
+	// ===== STEP 8: stopRenewal (explicit, before Release) =====
 	stopRenewal()
 
-	// ===== STEP 7: Check for fencing =====
+	// ===== STEP 9: Check for fencing — do not Release or call OnRelinquished =====
 	if errors.Is(fnErr, worklease.ErrFenced) {
 		return worklease.ErrFenced
 	}
 
-	// ===== STEP 8: Release =====
+	// ===== STEP 10: Release =====
 	releaseErr := lease.Release(ctx, token)
 	if errors.Is(releaseErr, worklease.ErrFenced) {
 		return worklease.ErrFenced
 	}
 
-	// ===== STEP 9: BackoffInterval sleep (non-fencing paths only) =====
+	// ===== STEP 11: OnRelinquished only if Release succeeded =====
+	if releaseErr == nil && cfg.OnRelinquished != nil {
+		cfg.OnRelinquished(ctx, token)
+	}
+
+	// ===== STEP 12: BackoffInterval sleep (non-fencing paths only) =====
 	if cfg.BackoffInterval > 0 {
 		select {
 		case <-time.After(cfg.BackoffInterval):
@@ -96,7 +124,7 @@ func Elect(ctx context.Context, lease worklease.Lease, workID string, cfg Config
 		}
 	}
 
-	// ===== STEP 10: Return fn error if present, else release error =====
+	// ===== STEP 13: Return fn error if present, else release error =====
 	if fnErr != nil {
 		return fnErr
 	}

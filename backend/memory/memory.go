@@ -140,7 +140,15 @@ func (mb *memoryBackend) Checkpoint(ctx context.Context, record backend.LeaseRec
 	}
 
 	// ===== STEP 4: Update Checkpoint =====
-	r.checkpoint = state
+	// Defensive copy (ADR-0014): do not alias the caller's slice — the caller
+	// may mutate state after Checkpoint returns.
+	if state == nil {
+		r.checkpoint = nil
+	} else {
+		stored := make([]byte, len(state))
+		copy(stored, state)
+		r.checkpoint = stored
+	}
 	r.expiresAt = mb.clock.Now().Add(ttl)
 	r.cleanHandoff = false
 
@@ -215,5 +223,12 @@ func (mb *memoryBackend) ReadCheckpoint(ctx context.Context, record backend.Leas
 	}
 
 	// ===== STEP 4: Return Checkpoint and Clean Handoff Flag =====
-	return r.checkpoint, r.cleanHandoff, nil
+	// Defensive copy (ADR-0014): return a fresh slice, never the stored backing
+	// array — mutation of the result must not affect stored state.
+	if r.checkpoint == nil {
+		return nil, r.cleanHandoff, nil
+	}
+	out := make([]byte, len(r.checkpoint))
+	copy(out, r.checkpoint)
+	return out, r.cleanHandoff, nil
 }
