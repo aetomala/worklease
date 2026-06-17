@@ -15,6 +15,7 @@ This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 - `pool.Permanent(err error) error` — constructor returning a value that satisfies `PermanentError`, so a `WorkFn` can drop its slot without defining a custom error type.
 - `pool.ErrAllSlotsDead` — returned by `pool.Pool.Run` when every slot exits via `PermanentError`, distinguishing a fully-dead pool from clean shutdown.
 - Distinct `pool` config sentinels — `ErrNilLease`, `ErrEmptyWorkIDs`, `ErrWithWaitForLeaseProhibited` — each wrapping `ErrConfigInvalid`.
+- `leader.Config` lifecycle callbacks — `OnElected` (after acquire, before `fn`), `OnLost` (when the renewal context is cancelled before `fn` returns), and `OnRelinquished` (after a successful `Release`). All optional; nil is a no-op.
 
 ### Changed
 
