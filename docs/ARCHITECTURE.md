@@ -258,7 +258,8 @@ constructs; the caller closes. See [ADR-0001](adr/0001-backend-interface-no-clos
 
 **6. Observability via LeaseObserver.** `Token` implements `fmt.Stringer`. `LeaseObserver`
 is the injection seam for metrics, structured logs, and traces — injected via `Config.Observer`,
-defaulting to a no-op. No observability framework is required or assumed.
+defaulting to a no-op. No observability framework is required or assumed. Its methods take
+per-operation event structs so new fields can be added without breaking implementers.
 See [ADR-0007](adr/0007-observer-config-field.md).
 
 **7. The code is the documentation.** Exported identifiers are documented, packages have doc
@@ -282,6 +283,7 @@ specific use-case shape; callers use only what they need.
 | `github.com/aetomala/worklease/backend` | Internal `Backend` interface and `LeaseRecord` type | v0.1 |
 | `github.com/aetomala/worklease/backend/postgres` | PostgreSQL-backed production backend | v0.1 |
 | `github.com/aetomala/worklease/backend/memory` | In-memory backend for testing; supports clock injection | v0.1 |
+| `github.com/aetomala/worklease/backend/conformance` | Backend-agnostic `RunSuite` enforcing memory/Postgres parity | v0.4 |
 | `github.com/aetomala/worklease/worker` | `Runner` — manages acquire/checkpoint/release lifecycle | v0.2 |
 | `github.com/aetomala/worklease/checkpoint` | `Codec` interface and typed `Encode[T]`/`Decode[T]` helpers | v0.2 |
 | `github.com/aetomala/worklease/leader` | `Elect` — simplified leader election without checkpoint state | v0.3 |
@@ -292,32 +294,38 @@ specific use-case shape; callers use only what they need.
 ```
 worklease/
 ├── doc.go              # Package-level documentation
-├── lease.go            # Lease interface, Token, LeaseObserver, AcquireOption, RenewalOption, errors
-├── worklease.go        # New() constructor, Config struct, noopObserver
+├── lease.go            # Lease interface, Token, LeaseObserver + event structs + Operation, noopObserver, errors
+├── worklease.go        # New() constructor, Config struct, leaseClient
 ├── acquire.go          # Acquire — wait+retry loop for WithWaitForLease
 ├── renewal.go          # StartRenewal — managed renewal goroutine
 ├── backend/
 │   ├── backend.go          # Backend interface, LeaseRecord — internal to library
+│   ├── conformance/        # v0.4
+│   │   └── conformance.go  # RunSuite — backend-agnostic parity spec
 │   ├── postgres/
 │   │   ├── postgres.go     # PostgreSQL backend implementation
 │   │   ├── schema.sql      # CREATE TABLE statement
 │   │   └── postgres_test.go
 │   └── memory/
-│       ├── memory.go       # In-memory backend; Clock interface, Option, WithClock
+│       ├── memory.go       # In-memory backend; Clock interface, Option, WithClock; defensive slice copies
 │       └── memory_test.go
 ├── worker/
 │   └── runner.go       # Runner, WorkFn, RunnerConfig, NewRunner
 ├── checkpoint/
 │   └── codec.go        # Codec, JSONCodec, Encode[T], Decode[T]
 ├── leader/             # v0.3
-│   └── leader.go       # Elect, Config
+│   └── leader.go       # Elect, Config (with OnElected/OnLost/OnRelinquished — v0.4)
 ├── pool/               # v0.3
-│   └── pool.go         # Pool, WorkFn, PermanentError, Config, New
+│   └── pool.go         # Pool, WorkFn, PermanentError, Permanent, Observer, Config, New, sentinels
 ├── testutil/
-│   └── mock_backend.go # Generated Backend mock (mockgen)
+│   ├── mock_backend.go # Generated Backend mock (mockgen)
+│   └── mock_lease.go   # Generated Lease + LeaseObserver mocks (mockgen)
 ├── examples/
 │   ├── subscription-cancellation/
-│   └── cross-tenant-migration/
+│   ├── cross-tenant-migration/
+│   ├── cluster-singleton-scheduler/  # v0.3
+│   ├── partition-processor/          # v0.3
+│   └── observability/                # v0.4
 └── docs/
     ├── ARCHITECTURE.md     # This document
     └── adr/                # Architecture Decision Records
@@ -462,6 +470,18 @@ see [ADR-0006](adr/0006-backend-acquire-single-attempt.md).
 
 `Backend` does not include `Close`. See [ADR-0001](adr/0001-backend-interface-no-close.md).
 
+**Slice ownership.** `Checkpoint` must not retain a reference to the caller's `state` slice
+after returning, and `ReadCheckpoint` must return a fresh allocation — never the stored backing
+array. This gives checkpoint state value semantics regardless of backend: the caller owns the
+slices it passes and receives, the backend owns its stored copy. The PostgreSQL backend is
+compliant by `BYTEA` serialization; the in-memory backend makes explicit `copy()` calls. See
+[ADR-0014](adr/0014-backend-slice-ownership-contract.md).
+
+**Non-positive TTL.** `Acquire` with a non-positive `ttl` must produce an already-expired
+record. This is a test-only affordance used by the conformance suite to exercise expiry without
+clock manipulation — production never passes a non-positive TTL because `worklease.New`
+validates `Config.TTL > 0`. See [ADR-0015](adr/0015-backend-conformance-suite.md).
+
 `LeaseRecord` is the currency between the library core and the backend. It mirrors `Token`
 but is the backend's internal representation — callers never see it. The library wraps
 `LeaseRecord` into `Token` before returning to callers.
@@ -589,6 +609,15 @@ b := memory.New()
 
 No `Close` method — no cleanup required.
 
+### Slice Ownership
+
+`Checkpoint` copies the incoming `state` into storage rather than aliasing the caller's slice,
+and `ReadCheckpoint` returns a fresh copy of the stored bytes. Without these copies, mutating a
+slice after `Checkpoint` — or mutating a `ReadCheckpoint` result — would silently corrupt stored
+state. The PostgreSQL backend is immune to this via `BYTEA` serialization, so the copies make the
+two backends behave identically; the conformance suite enforces it. See
+[ADR-0014](adr/0014-backend-slice-ownership-contract.md).
+
 ### Clock Injection
 
 Time-based expiry uses an injectable `Clock` interface. The default `realClock` delegates to
@@ -715,30 +744,53 @@ behind the current holder.
 
 ## Observability — LeaseObserver
 
-`LeaseObserver` is a five-method hook interface injected via `Config.Observer`. The library
+`LeaseObserver` is a six-method hook interface injected via `Config.Observer`. The library
 calls it synchronously after every lease operation. Implementations must not block or panic.
 When `Config.Observer` is nil, the library installs a no-op observer — no nil check is ever
 required at call sites.
 
+Each method takes a per-operation event struct. The event-struct shape (introduced in v0.4,
+replacing the earlier flat-parameter signatures) lets new fields be added without breaking
+implementers.
+
 ```go
 type LeaseObserver interface {
-    OnAcquire(ctx context.Context, workID string, token Token, err error)
-    OnCheckpoint(ctx context.Context, token Token, size int, err error)
-    OnRenew(ctx context.Context, token Token, err error)
-    OnRelease(ctx context.Context, token Token, err error)
-    OnFenced(ctx context.Context, token Token)
+    OnAcquire(ctx context.Context, e AcquireEvent)
+    OnCheckpoint(ctx context.Context, e CheckpointEvent)
+    OnRenew(ctx context.Context, e RenewEvent)
+    OnRelease(ctx context.Context, e ReleaseEvent)
+    OnReadCheckpoint(ctx context.Context, e ReadCheckpointEvent)
+    OnFenced(ctx context.Context, e FencedEvent)
 }
+
+// Operation identifies the Lease operation that triggered a fencing event.
+type Operation uint8
+const (
+    OperationCheckpoint Operation = iota
+    OperationRenew
+    OperationRelease
+)
 ```
 
-When a fencing event occurs, `OnCheckpoint` (or `OnRenew`) fires first, then `OnFenced`. This
-order is mandatory — observers can rely on it to distinguish a fencing event from a generic
-error in `OnCheckpoint`/`OnRenew`.
+Every event carries the `Token` (zero value when the operation errored before acquiring one)
+and the operation's `Err`. Operation events also carry a `Duration`; `CheckpointEvent`/
+`ReadCheckpointEvent` carry a `Size`; `ReadCheckpointEvent` carries `CleanHandoff`;
+`FencedEvent` carries the `Operation` that triggered it.
 
-`OnFenced` is not called for `Release` — a fenced release is surfaced via `OnRelease` only.
+**Fencing order.** When a fencing event occurs, the operation-specific callback fires first
+(`OnCheckpoint`, `OnRenew`, or `OnRelease`), then `OnFenced`. This order is mandatory.
+`OnFenced` fires on the **Release** path as well as Checkpoint and Renew — `FencedEvent.Operation`
+identifies which. `OnReadCheckpoint` is **not** a fencing trigger: a fenced `ReadCheckpoint`
+surfaces only through `ReadCheckpointEvent.Err`.
+
+**Duration contract.** `Duration` measures the single final backend call only — never the
+`WithWaitForLease` poll loop. A caller that needs cumulative wait-loop time records its own
+timestamp around `Acquire`.
 
 A typical use is a Prometheus implementation: each callback increments a labeled counter or
-records a histogram. The `Token` parameter gives access to `WorkID()`, `HolderID()`, and
-`FencingToken()` for structured labelling.
+records a histogram, using `e.Token.WorkID()` / `HolderID()` / `FencingToken()` for structured
+labels and `e.Duration` for latency histograms. See `examples/observability` for a stdlib-only
+reference implementation.
 
 See [ADR-0007](adr/0007-observer-config-field.md).
 
@@ -875,6 +927,24 @@ for {
 }
 ```
 
+**Lifecycle callbacks (v0.4):** `leader.Config` accepts three optional `func` fields for
+observing the leadership lifecycle:
+
+```go
+err := leader.Elect(ctx, lease, "scheduler:primary", leader.Config{
+    OnElected:      func(ctx context.Context, t worklease.Token) { /* became leader */ },
+    OnLost:         func(ctx context.Context, t worklease.Token) { /* fenced / renewal failed */ },
+    OnRelinquished: func(ctx context.Context, t worklease.Token) { /* released cleanly */ },
+}, runScheduler)
+```
+
+`OnElected` fires after `Acquire` succeeds, before `fn`; `OnLost` fires when the renewal context
+is cancelled before `fn` returns; `OnRelinquished` fires after a successful `Release`. All are
+optional (nil is a no-op) and receive the original `ctx`. They are plain `func` fields rather than
+a `leader.Observer` interface because the event surface is narrow — three closures are more
+idiomatic than a thin interface (contrast `pool.Observer` below). They sit above the underlying
+`Lease`'s own `LeaseObserver`: same events, higher altitude.
+
 See [ADR-0010](adr/0010-leader-fn-signature-and-acquire-semantics.md) and
 [ADR-0012](adr/0012-release-expires-lease-immediately.md).
 
@@ -918,14 +988,33 @@ type PermanentError interface {
 }
 ```
 
-`pool` provides no concrete implementation — callers define their own error type. `errors.As`
-unwrapping is used to detect it, so the error composes correctly with `fmt.Errorf` wrapping
-chains.
+`pool` detects it via `errors.As`, so it composes correctly with `fmt.Errorf` wrapping chains.
+Implement the interface on a custom error type, or wrap an existing error with the v0.4
+`pool.Permanent(err)` constructor when you do not need a named type:
+
+```go
+return nil, pool.Permanent(fmt.Errorf("partition %s decommissioned", workID))
+```
+
+**Slot observability (v0.4):** `pool.Config.Observer` accepts a `pool.Observer` — an interface
+with `OnSlotAcquired`, `OnSlotLost`, `OnSlotBackoff`, and `OnSlotDead`, each taking an event
+struct. nil installs a no-op. Unlike `leader`'s `func` callbacks, the pool uses an interface
+because it has four distinct slot events. `OnSlotAcquired` fires when a slot enters its `WorkFn`
+— the same moment the slot becomes visible in `ActiveSlots` — not when the internal `Acquire`
+succeeds. `ActiveSlots()` reflects only slots currently executing `WorkFn`; slots that are
+acquiring or in backoff are excluded.
+
+**Shutdown signal (v0.4):** `Run` returns `ErrAllSlotsDead` when every slot has exited via a
+`PermanentError`, distinguishing a fully-dead pool from clean shutdown (which returns `nil` on
+context cancellation). Supervisors can act on the difference without parsing a nil return.
 
 **`WithWaitForLease` is prohibited** in `pool.Config.AcquireOptions`. The pool manages its
 own acquisition loop — if a slot goroutine blocks inside `Runner.Run` waiting for a lease, it
-cannot respond to context cancellation during shutdown. `pool.New` returns `ErrConfigInvalid`
-if `WithWaitForLease` is detected.
+cannot respond to context cancellation during shutdown. `pool.New` returns
+`ErrWithWaitForLeaseProhibited` if `WithWaitForLease` is detected. Construction errors use
+distinct sentinels — `ErrNilLease`, `ErrEmptyWorkIDs`, `ErrWithWaitForLeaseProhibited` — each
+wrapping `ErrConfigInvalid`, so `errors.Is(err, pool.ErrConfigInvalid)` still matches the broad
+case.
 
 See [ADR-0011](adr/0011-pool-scope-and-permanent-error-interface.md).
 
@@ -973,6 +1062,34 @@ WORKLEASE_TEST_POSTGRES_DSN="postgres://user:pass@localhost/worklease_test?sslmo
 Integration tests verify the SQL operations that are not testable with the in-memory backend:
 expiry semantics via `NOW()`, the `ON CONFLICT` upsert behavior, `TIMESTAMPTZ` precision, and
 the two-query `ReadCheckpoint` and `Renew` disambiguation paths.
+
+### Backend Conformance Suite
+
+`backend/conformance` provides a single, backend-agnostic specification that both backends must
+pass, so memory-vs-Postgres parity is enforced structurally rather than discovered one bug at a
+time. `RunSuite` takes a factory and returns a Ginkgo spec tree; each backend's test file wires
+it in:
+
+```go
+// backend/memory/memory_test.go
+var _ = Describe("conformance", conformance.RunSuite(func() backend.Backend {
+    return memory.New()
+}))
+
+// backend/postgres/postgres_test.go — DSN-gated, truncates per spec
+var _ = Describe("conformance", conformance.RunSuite(func() backend.Backend {
+    _, _ = db.Exec("DELETE FROM worklease_leases")
+    b, _ := wlpostgres.New(db)
+    return b
+}))
+```
+
+The factory yields a clean backend per spec. Expiry is exercised with a non-positive TTL — no
+clock injection — so the same specs run identically on both backends. The package imports only
+`backend` and `worklease`, never a concrete backend. The suite locks the historical parity bugs
+(issues #13/#14/#15) and the [ADR-0014](adr/0014-backend-slice-ownership-contract.md)
+slice-aliasing invariants. A new backend must pass it before it is considered complete. See
+[ADR-0015](adr/0015-backend-conformance-suite.md).
 
 ### Race Detection and CI
 
@@ -1031,7 +1148,8 @@ checkpoint-aligned boundaries: checkpoint after the effect completes successfull
 **R6 — pool WithWaitForLease misuse.** Passing `worklease.WithWaitForLease()` in
 `pool.Config.AcquireOptions` causes each slot goroutine to block inside `runner.Run` during
 acquisition, preventing the goroutine from responding to context cancellation until the lease
-becomes available. This breaks clean pool shutdown. `pool.New` returns `ErrConfigInvalid` if
+becomes available. This breaks clean pool shutdown. `pool.New` returns
+`ErrWithWaitForLeaseProhibited` (which satisfies `errors.Is(err, ErrConfigInvalid)`) if
 `WithWaitForLease` is detected in `AcquireOptions`.
 
 ---
@@ -1068,7 +1186,26 @@ becomes available. This breaks clean pool shutdown. `pool.New` returns `ErrConfi
 - `Release` semantics corrected — now expires the lease immediately in both backends, enabling instant clean handoff (issue #33)
 - ADR-0010, ADR-0011, ADR-0012
 
-### v0.4 — Planned
+### v0.4 — Complete on `dev` (v0.4.0 pending release)
+
+- `LeaseObserver` redesign — six event-struct methods, new `OnReadCheckpoint`, `OnFenced` on the Release path, `Duration` on all operation events (breaking; see `UPGRADING.md`)
+- Memory backend slice-ownership defensive copies (ADR-0014)
+- `backend/conformance` suite — `RunSuite` enforcing memory/Postgres parity (ADR-0015)
+- `pool.Observer`, `pool.Permanent`, distinct config sentinels, `ErrAllSlotsDead`
+- `leader.Config` lifecycle callbacks — `OnElected`, `OnLost`, `OnRelinquished`
+- `examples/observability` — stdlib-only `LeaseObserver` reference
+- ADR-0014, ADR-0015
+
+### v0.5 — Planned
+
+- Renewal goroutine retry policy — exponential backoff bounded by the lease window; `WithRenewalBackoff` (ADR-0013, Proposed)
+- Global fencing sequence + single-statement `Acquire` with `RETURNING` — closes the read-back race and the token-reset split-brain vector; `Acquire` returns `ctx.Err()` on wait-loop cancellation (ADR-0016, Proposed)
+
+### v0.6 / pre-1.0 — Planned
+
+- `Forget` / `Vacuum.Sweep` — caller-governed row lifecycle and retention (ADR-0016, Proposed)
+
+### Unscheduled (post-1.0)
 
 - Redis backend
 - etcd backend
@@ -1092,9 +1229,17 @@ the decision made, and the consequences — including the alternatives that were
 | [0008](adr/0008-clock-interface-memory-backend.md) | Clock interface for in-memory backend testability | Accepted |
 | [0009](adr/0009-checkpoint-subpackage-codec-interface.md) | checkpoint subpackage with Codec interface and generic helpers | Accepted |
 | [0010](adr/0010-leader-fn-signature-and-acquire-semantics.md) | leader.Elect fn receives no Token; acquire semantics are caller-controlled | Accepted |
-| [0011](adr/0011-pool-scope-and-permanent-error-interface.md) | pool scope is cross-process; permanent slot failure signals via interface | Accepted |
+| [0011](adr/0011-pool-scope-and-permanent-error-interface.md) | pool scope is cross-process; permanent slot failure signals via interface (amended v0.4: Observer, Permanent, distinct sentinels, ErrAllSlotsDead) | Accepted |
 | [0012](adr/0012-release-expires-lease-immediately.md) | Release expires the lease immediately — successor acquires without TTL wait | Accepted |
+| 0013 | Renewal goroutine retry policy bounded by the lease window | Proposed (v0.5) |
+| [0014](adr/0014-backend-slice-ownership-contract.md) | Backend slice ownership contract — defensive copies required | Accepted |
+| [0015](adr/0015-backend-conformance-suite.md) | Backend conformance suite — RunSuite against all backends | Accepted |
+| 0016 | Row lifecycle: global fencing sequence + caller-governed retention | Proposed (v0.5/v0.6) |
+
+ADR-0007 and ADR-0010 carry v0.4 amendments (observer event-struct redesign; leader lifecycle
+callbacks). ADR-0013 and ADR-0016 are Proposed — their decisions live in the design record and
+land with v0.5/v0.6; no ADR file exists yet.
 
 ---
 
-*Last updated: June 2026 — v0.3.0 released*
+*Last updated: June 2026 — v0.4 (v0.4.0 pending release)*

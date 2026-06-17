@@ -30,7 +30,8 @@
 // job queue. For mutual exclusion alone, use distlock or pglock. For durable workflow
 // execution, use Temporal. For Kubernetes-native leader election, use
 // client-go/leaderelection. The leader subpackage provides simplified single-work-item
-// leadership built on worklease's own Lease primitives.
+// leadership, and the pool subpackage distributes a fixed set of work IDs across competing
+// processes — both built on worklease's own Lease primitives.
 //
 // # Backends
 //
