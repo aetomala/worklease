@@ -84,3 +84,22 @@ An event pipeline with a fixed set of named partitions, using the `pool` package
 cd partition-processor
 go run .
 ```
+
+---
+
+### [Observability](observability/)
+
+A stdlib-only `LeaseObserver` wired into a lease, exercising one of each operation. Best for:
+- Understanding the v0.4 event-struct `LeaseObserver` as the injection seam for metrics, logs, and traces
+- Seeing every callback — `OnAcquire`, `OnCheckpoint`, `OnRenew`, `OnReadCheckpoint`, `OnRelease`, `OnFenced` — and the `Duration` field
+
+**Features**:
+- A `logObserver` implementing `worklease.LeaseObserver` with only the standard `log` package
+- Compile-time interface assertion; injected via `Config.Observer`
+- One Acquire → Checkpoint → Renew → ReadCheckpoint → Release cycle, one log line per callback
+
+**Run**:
+```bash
+cd observability
+go run .
+```

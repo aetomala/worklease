@@ -3,6 +3,7 @@ package pool_test
 import (
 	"context"
 	"errors"
+	"sync"
 	"time"
 
 	. "github.com/onsi/ginkgo/v2"
@@ -18,6 +19,50 @@ type testPermError struct{ msg string }
 
 func (e testPermError) Error() string   { return e.msg }
 func (e testPermError) Permanent() bool { return true }
+
+// poolSpy captures pool.Observer slot lifecycle events for assertions.
+type poolSpy struct {
+	mu       sync.Mutex
+	acquired []string
+	lost     []string
+	backoff  []pool.SlotBackoffEvent
+	dead     []pool.SlotDeadEvent
+}
+
+func (s *poolSpy) OnSlotAcquired(_ context.Context, e pool.SlotAcquiredEvent) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.acquired = append(s.acquired, e.WorkID)
+}
+
+func (s *poolSpy) OnSlotLost(_ context.Context, e pool.SlotLostEvent) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.lost = append(s.lost, e.WorkID)
+}
+
+func (s *poolSpy) OnSlotBackoff(_ context.Context, e pool.SlotBackoffEvent) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.backoff = append(s.backoff, e)
+}
+
+func (s *poolSpy) OnSlotDead(_ context.Context, e pool.SlotDeadEvent) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.dead = append(s.dead, e)
+}
+
+func (s *poolSpy) snapshot() poolSpy {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return poolSpy{
+		acquired: append([]string(nil), s.acquired...),
+		lost:     append([]string(nil), s.lost...),
+		backoff:  append([]pool.SlotBackoffEvent(nil), s.backoff...),
+		dead:     append([]pool.SlotDeadEvent(nil), s.dead...),
+	}
+}
 
 var (
 	ctx       context.Context
@@ -40,38 +85,51 @@ var _ = Describe("pool", func() {
 
 	Describe("New", func() {
 		Context("when lease is nil", func() {
-			It("returns ErrConfigInvalid", func() {
-				p, err := pool.New(nil, pool.Config{WorkIDs: []string{"w1"}}, func(_ context.Context, _ string, _ worklease.Token, _ []byte, _ bool) ([]byte, error) { return nil, nil })
+			It("returns ErrNilLease which satisfies errors.Is(ErrConfigInvalid)", func() {
+				p, err := pool.New(nil, pool.Config{WorkIDs: []string{"w1"}}, func(_ context.Context, _ string, _ worklease.Token, _ []byte, _ bool) ([]byte, error) {
+					return nil, nil
+				})
+				Expect(errors.Is(err, pool.ErrNilLease)).To(BeTrue())
 				Expect(errors.Is(err, pool.ErrConfigInvalid)).To(BeTrue())
 				Expect(p).To(BeNil())
 			})
 		})
 		Context("when cfg.WorkIDs is empty", func() {
-			It("returns ErrConfigInvalid", func() {
-				p, err := pool.New(mockLease, pool.Config{WorkIDs: []string{}}, func(_ context.Context, _ string, _ worklease.Token, _ []byte, _ bool) ([]byte, error) { return nil, nil })
+			It("returns ErrEmptyWorkIDs which satisfies errors.Is(ErrConfigInvalid)", func() {
+				p, err := pool.New(mockLease, pool.Config{WorkIDs: []string{}}, func(_ context.Context, _ string, _ worklease.Token, _ []byte, _ bool) ([]byte, error) {
+					return nil, nil
+				})
+				Expect(errors.Is(err, pool.ErrEmptyWorkIDs)).To(BeTrue())
 				Expect(errors.Is(err, pool.ErrConfigInvalid)).To(BeTrue())
 				Expect(p).To(BeNil())
 			})
 		})
 		Context("when cfg.AcquireOptions includes WithWaitForLease", func() {
-			It("returns ErrConfigInvalid", func() {
+			It("returns ErrWithWaitForLeaseProhibited which satisfies errors.Is(ErrConfigInvalid)", func() {
 				p, err := pool.New(mockLease, pool.Config{
 					WorkIDs:        []string{"w1"},
 					AcquireOptions: []worklease.AcquireOption{worklease.WithWaitForLease()},
-				}, func(_ context.Context, _ string, _ worklease.Token, _ []byte, _ bool) ([]byte, error) { return nil, nil })
+				}, func(_ context.Context, _ string, _ worklease.Token, _ []byte, _ bool) ([]byte, error) {
+					return nil, nil
+				})
+				Expect(errors.Is(err, pool.ErrWithWaitForLeaseProhibited)).To(BeTrue())
 				Expect(errors.Is(err, pool.ErrConfigInvalid)).To(BeTrue())
 				Expect(p).To(BeNil())
 			})
 		})
 		Context("with valid config", func() {
 			It("returns a non-nil Pool", func() {
-				p, err := pool.New(mockLease, pool.Config{WorkIDs: []string{"w1"}}, func(_ context.Context, _ string, _ worklease.Token, _ []byte, _ bool) ([]byte, error) { return nil, nil })
+				p, err := pool.New(mockLease, pool.Config{WorkIDs: []string{"w1"}}, func(_ context.Context, _ string, _ worklease.Token, _ []byte, _ bool) ([]byte, error) {
+					return nil, nil
+				})
 				Expect(err).NotTo(HaveOccurred())
 				Expect(p).NotTo(BeNil())
 			})
 			It("does not start any goroutines", func() {
 				// Construction completes immediately with no mock calls
-				p, err := pool.New(mockLease, pool.Config{WorkIDs: []string{"w1"}}, func(_ context.Context, _ string, _ worklease.Token, _ []byte, _ bool) ([]byte, error) { return nil, nil })
+				p, err := pool.New(mockLease, pool.Config{WorkIDs: []string{"w1"}}, func(_ context.Context, _ string, _ worklease.Token, _ []byte, _ bool) ([]byte, error) {
+					return nil, nil
+				})
 				Expect(err).NotTo(HaveOccurred())
 				Expect(p).NotTo(BeNil())
 			})
@@ -89,7 +147,9 @@ var _ = Describe("pool", func() {
 				).AnyTimes()
 
 				lctx, lcancel := context.WithCancel(context.Background())
-				fn := func(_ context.Context, _ string, _ worklease.Token, _ []byte, _ bool) ([]byte, error) { return nil, nil }
+				fn := func(_ context.Context, _ string, _ worklease.Token, _ []byte, _ bool) ([]byte, error) {
+					return nil, nil
+				}
 				p, _ := pool.New(mockLease, pool.Config{WorkIDs: []string{"w1"}}, fn)
 
 				done := make(chan error, 1)
@@ -179,7 +239,8 @@ var _ = Describe("pool", func() {
 
 				Eventually(itCh, "2s").Should(Receive())
 				Eventually(itCh, "2s").Should(Receive())
-				Eventually(done, "2s").Should(Receive(BeNil()))
+				// The lone slot ends via PermanentError, so Run reports ErrAllSlotsDead.
+				Eventually(done, "2s").Should(Receive(MatchError(pool.ErrAllSlotsDead)))
 			})
 		})
 
@@ -204,7 +265,8 @@ var _ = Describe("pool", func() {
 
 				p, _ := pool.New(mockLease, pool.Config{WorkIDs: []string{"w1"}}, fn)
 				err := p.Run(lctx)
-				Expect(err).To(BeNil())
+				// The lone slot dies permanently, so Run reports ErrAllSlotsDead.
+				Expect(err).To(MatchError(pool.ErrAllSlotsDead))
 			})
 		})
 
@@ -250,7 +312,8 @@ var _ = Describe("pool", func() {
 				p, _ := pool.New(mockLease, pool.Config{WorkIDs: []string{"w1"}, BackoffInterval: backoff}, fn)
 				done := make(chan error, 1)
 				go func() { done <- p.Run(lctx) }()
-				Eventually(done, "2s").Should(Receive(BeNil()))
+				// Slot 1 backs off then ends via PermanentError → ErrAllSlotsDead.
+				Eventually(done, "2s").Should(Receive(MatchError(pool.ErrAllSlotsDead)))
 
 				Expect(times).To(HaveLen(2))
 				Expect(times[1].Sub(times[0])).To(BeNumerically(">=", backoff))
@@ -355,6 +418,129 @@ var _ = Describe("pool", func() {
 					<-results
 				}
 				lcancel()
+			})
+		})
+	})
+
+	Describe("Permanent", func() {
+		Context("constructor", func() {
+			It("returns an error satisfying PermanentError with Permanent() == true", func() {
+				err := pool.Permanent(errors.New("boom"))
+				var pe pool.PermanentError
+				Expect(errors.As(err, &pe)).To(BeTrue())
+				Expect(pe.Permanent()).To(BeTrue())
+			})
+			It("unwraps to the original error via errors.Unwrap", func() {
+				cause := errors.New("cause")
+				Expect(errors.Unwrap(pool.Permanent(cause))).To(Equal(cause))
+			})
+			It("preserves the original error message", func() {
+				Expect(pool.Permanent(errors.New("boom")).Error()).To(Equal("boom"))
+			})
+		})
+	})
+
+	Describe("Pool.Run shutdown", func() {
+		Context("all slots permanently dead", func() {
+			It("returns ErrAllSlotsDead when every slot exits via PermanentError", func() {
+				renewCtx, renewCancel := context.WithCancel(context.Background())
+				defer renewCancel()
+				stopFn := func() {}
+				mockLease.EXPECT().Acquire(gomock.Any(), gomock.Any()).Return(worklease.Token{}, nil).AnyTimes()
+				mockLease.EXPECT().ReadCheckpoint(gomock.Any(), gomock.Any()).Return(nil, false, nil).AnyTimes()
+				mockLease.EXPECT().StartRenewal(gomock.Any(), gomock.Any()).Return(renewCtx, stopFn).AnyTimes()
+				mockLease.EXPECT().Release(gomock.Any(), gomock.Any()).Return(nil).AnyTimes()
+
+				fn := func(_ context.Context, _ string, _ worklease.Token, _ []byte, _ bool) ([]byte, error) {
+					return nil, testPermError{"dead"}
+				}
+				lctx, lcancel := context.WithTimeout(context.Background(), 2*time.Second)
+				defer lcancel()
+				p, _ := pool.New(mockLease, pool.Config{WorkIDs: []string{"w1", "w2"}}, fn)
+				Expect(p.Run(lctx)).To(MatchError(pool.ErrAllSlotsDead))
+			})
+		})
+	})
+
+	Describe("Pool Observer", func() {
+		var (
+			spy      *poolSpy
+			renewCtx context.Context
+			stopFn   func()
+		)
+		BeforeEach(func() {
+			spy = &poolSpy{}
+			renewCtx = context.Background()
+			stopFn = func() {}
+			mockLease.EXPECT().Acquire(gomock.Any(), gomock.Any()).Return(worklease.Token{}, nil).AnyTimes()
+			mockLease.EXPECT().ReadCheckpoint(gomock.Any(), gomock.Any()).Return(nil, false, nil).AnyTimes()
+			mockLease.EXPECT().StartRenewal(gomock.Any(), gomock.Any()).Return(renewCtx, stopFn).AnyTimes()
+			mockLease.EXPECT().Release(gomock.Any(), gomock.Any()).Return(nil).AnyTimes()
+		})
+
+		runUntilDead := func(spy pool.Observer, fn pool.WorkFn) {
+			lctx, lcancel := context.WithTimeout(context.Background(), 2*time.Second)
+			defer lcancel()
+			p, _ := pool.New(mockLease, pool.Config{WorkIDs: []string{"w1"}, BackoffInterval: time.Millisecond, Observer: spy}, fn)
+			_ = p.Run(lctx)
+		}
+
+		Context("OnSlotAcquired", func() {
+			It("is called when WorkFn begins executing — not when Acquire succeeds", func() {
+				runUntilDead(spy, func(_ context.Context, _ string, _ worklease.Token, _ []byte, _ bool) ([]byte, error) {
+					return nil, testPermError{"stop"}
+				})
+				Expect(spy.snapshot().acquired).To(ContainElement("w1"))
+			})
+		})
+		Context("OnSlotLost", func() {
+			It("is called when runner.Run returns ErrFenced", func() {
+				it := 0
+				runUntilDead(spy, func(_ context.Context, _ string, _ worklease.Token, _ []byte, _ bool) ([]byte, error) {
+					it++
+					if it == 1 {
+						return nil, worklease.ErrFenced
+					}
+					return nil, testPermError{"stop"}
+				})
+				Expect(spy.snapshot().lost).To(ContainElement("w1"))
+			})
+		})
+		Context("OnSlotBackoff", func() {
+			It("is called with the error and BackoffInterval duration before the backoff sleep", func() {
+				it := 0
+				runUntilDead(spy, func(_ context.Context, _ string, _ worklease.Token, _ []byte, _ bool) ([]byte, error) {
+					it++
+					if it == 1 {
+						return nil, errors.New("transient")
+					}
+					return nil, testPermError{"stop"}
+				})
+				snap := spy.snapshot()
+				Expect(snap.backoff).To(HaveLen(1))
+				Expect(snap.backoff[0].WorkID).To(Equal("w1"))
+				Expect(snap.backoff[0].Duration).To(Equal(time.Millisecond))
+				Expect(snap.backoff[0].Err).To(MatchError("transient"))
+			})
+		})
+		Context("OnSlotDead", func() {
+			It("is called when WorkFn returns a PermanentError", func() {
+				runUntilDead(spy, func(_ context.Context, _ string, _ worklease.Token, _ []byte, _ bool) ([]byte, error) {
+					return nil, testPermError{"dead"}
+				})
+				snap := spy.snapshot()
+				Expect(snap.dead).To(HaveLen(1))
+				Expect(snap.dead[0].WorkID).To(Equal("w1"))
+			})
+		})
+		Context("nil Observer", func() {
+			It("does not panic when Config.Observer is nil", func() {
+				lctx, lcancel := context.WithTimeout(context.Background(), 2*time.Second)
+				defer lcancel()
+				p, _ := pool.New(mockLease, pool.Config{WorkIDs: []string{"w1"}}, func(_ context.Context, _ string, _ worklease.Token, _ []byte, _ bool) ([]byte, error) {
+					return nil, testPermError{"stop"}
+				})
+				Expect(func() { _ = p.Run(lctx) }).NotTo(Panic())
 			})
 		})
 	})

@@ -53,7 +53,8 @@ var _ = Describe("pool.Pool", func() {
 			})
 			Expect(err).NotTo(HaveOccurred())
 
-			Expect(p.Run(ctx)).To(Succeed())
+			// Every slot exits via PermanentError, so Run reports ErrAllSlotsDead.
+			Expect(p.Run(ctx)).To(MatchError(pool.ErrAllSlotsDead))
 
 			for _, id := range []string{"q-0", "q-1", "q-2"} {
 				_, ok := acquired.Load(id)
@@ -164,7 +165,8 @@ var _ = Describe("pool.Pool", func() {
 				return state, permDone{}
 			})
 			Expect(err).NotTo(HaveOccurred())
-			Expect(pA.Run(ctx)).To(Succeed())
+			// Pool A's slots all exit via PermanentError, so Run reports ErrAllSlotsDead.
+			Expect(pA.Run(ctx)).To(MatchError(pool.ErrAllSlotsDead))
 
 			// No clock advance needed: Pool A's slots are released via permDone exit,
 			// and Release now sets expiresAt to the past — Pool B can acquire immediately.
@@ -191,7 +193,8 @@ var _ = Describe("pool.Pool", func() {
 				return nil, permDone{}
 			})
 			Expect(err).NotTo(HaveOccurred())
-			Expect(pB.Run(ctx)).To(Succeed())
+			// Pool B's slots all exit via PermanentError, so Run reports ErrAllSlotsDead.
+			Expect(pB.Run(ctx)).To(MatchError(pool.ErrAllSlotsDead))
 
 			resultsMu.Lock()
 			defer resultsMu.Unlock()

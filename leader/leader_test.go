@@ -226,5 +226,144 @@ var _ = Describe("leader", func() {
 				Expect(elapsed).To(BeNumerically("<", time.Second))
 			})
 		})
+
+		Context("OnElected callback", func() {
+			It("calls OnElected after Acquire succeeds and before fn is invoked", func() {
+				stopFn := func() {}
+				renewCtx, renewCancel := context.WithCancel(ctx)
+				defer renewCancel()
+				mockLease.EXPECT().Acquire(gomock.Any(), "work-1").Return(worklease.Token{}, nil)
+				mockLease.EXPECT().StartRenewal(gomock.Any(), worklease.Token{}).Return(renewCtx, stopFn)
+				mockLease.EXPECT().Release(gomock.Any(), worklease.Token{}).Return(nil)
+
+				var order []string
+				cfg := leader.Config{OnElected: func(_ context.Context, _ worklease.Token) { order = append(order, "elected") }}
+				err := leader.Elect(ctx, mockLease, "work-1", cfg, func(context.Context) error {
+					order = append(order, "fn")
+					return nil
+				})
+				Expect(err).NotTo(HaveOccurred())
+				Expect(order).To(Equal([]string{"elected", "fn"}))
+			})
+			It("does not call OnElected when Acquire returns an error", func() {
+				mockLease.EXPECT().Acquire(gomock.Any(), "work-1").Return(worklease.Token{}, worklease.ErrLeaseHeld)
+				called := false
+				cfg := leader.Config{OnElected: func(_ context.Context, _ worklease.Token) { called = true }}
+				_ = leader.Elect(ctx, mockLease, "work-1", cfg, func(context.Context) error { return nil })
+				Expect(called).To(BeFalse())
+			})
+			It("does not panic when OnElected is nil", func() {
+				stopFn := func() {}
+				renewCtx, renewCancel := context.WithCancel(ctx)
+				defer renewCancel()
+				mockLease.EXPECT().Acquire(gomock.Any(), "work-1").Return(worklease.Token{}, nil)
+				mockLease.EXPECT().StartRenewal(gomock.Any(), worklease.Token{}).Return(renewCtx, stopFn)
+				mockLease.EXPECT().Release(gomock.Any(), worklease.Token{}).Return(nil)
+				Expect(func() {
+					_ = leader.Elect(ctx, mockLease, "work-1", leader.Config{}, func(context.Context) error { return nil })
+				}).NotTo(Panic())
+			})
+		})
+
+		Context("OnLost callback", func() {
+			It("calls OnLost when renewCtx is cancelled before fn returns", func() {
+				stopFn := func() {}
+				renewCtx, renewCancel := context.WithCancel(ctx)
+				mockLease.EXPECT().Acquire(gomock.Any(), "work-1").Return(worklease.Token{}, nil)
+				mockLease.EXPECT().StartRenewal(gomock.Any(), worklease.Token{}).Return(renewCtx, stopFn)
+				mockLease.EXPECT().Release(gomock.Any(), worklease.Token{}).Return(nil)
+
+				lost := false
+				cfg := leader.Config{OnLost: func(_ context.Context, _ worklease.Token) { lost = true }}
+				err := leader.Elect(ctx, mockLease, "work-1", cfg, func(context.Context) error {
+					renewCancel() // simulate fencing / renewal failure during fn
+					return nil
+				})
+				Expect(err).NotTo(HaveOccurred())
+				Expect(lost).To(BeTrue())
+			})
+			It("does not call OnLost on a clean fn return", func() {
+				stopFn := func() {}
+				renewCtx, renewCancel := context.WithCancel(ctx)
+				defer renewCancel()
+				mockLease.EXPECT().Acquire(gomock.Any(), "work-1").Return(worklease.Token{}, nil)
+				mockLease.EXPECT().StartRenewal(gomock.Any(), worklease.Token{}).Return(renewCtx, stopFn)
+				mockLease.EXPECT().Release(gomock.Any(), worklease.Token{}).Return(nil)
+
+				lost := false
+				cfg := leader.Config{OnLost: func(_ context.Context, _ worklease.Token) { lost = true }}
+				err := leader.Elect(ctx, mockLease, "work-1", cfg, func(context.Context) error { return nil })
+				Expect(err).NotTo(HaveOccurred())
+				Expect(lost).To(BeFalse())
+			})
+			It("does not panic when OnLost is nil", func() {
+				stopFn := func() {}
+				renewCtx, renewCancel := context.WithCancel(ctx)
+				mockLease.EXPECT().Acquire(gomock.Any(), "work-1").Return(worklease.Token{}, nil)
+				mockLease.EXPECT().StartRenewal(gomock.Any(), worklease.Token{}).Return(renewCtx, stopFn)
+				mockLease.EXPECT().Release(gomock.Any(), worklease.Token{}).Return(nil)
+				Expect(func() {
+					_ = leader.Elect(ctx, mockLease, "work-1", leader.Config{}, func(context.Context) error {
+						renewCancel()
+						return nil
+					})
+				}).NotTo(Panic())
+			})
+		})
+
+		Context("OnRelinquished callback", func() {
+			It("calls OnRelinquished after Release succeeds on a clean exit", func() {
+				stopFn := func() {}
+				renewCtx, renewCancel := context.WithCancel(ctx)
+				defer renewCancel()
+				mockLease.EXPECT().Acquire(gomock.Any(), "work-1").Return(worklease.Token{}, nil)
+				mockLease.EXPECT().StartRenewal(gomock.Any(), worklease.Token{}).Return(renewCtx, stopFn)
+				mockLease.EXPECT().Release(gomock.Any(), worklease.Token{}).Return(nil)
+
+				relinquished := false
+				cfg := leader.Config{OnRelinquished: func(_ context.Context, _ worklease.Token) { relinquished = true }}
+				err := leader.Elect(ctx, mockLease, "work-1", cfg, func(context.Context) error { return nil })
+				Expect(err).NotTo(HaveOccurred())
+				Expect(relinquished).To(BeTrue())
+			})
+			It("does not call OnRelinquished when Release returns ErrFenced", func() {
+				stopFn := func() {}
+				renewCtx, renewCancel := context.WithCancel(ctx)
+				defer renewCancel()
+				mockLease.EXPECT().Acquire(gomock.Any(), "work-1").Return(worklease.Token{}, nil)
+				mockLease.EXPECT().StartRenewal(gomock.Any(), worklease.Token{}).Return(renewCtx, stopFn)
+				mockLease.EXPECT().Release(gomock.Any(), worklease.Token{}).Return(worklease.ErrFenced)
+
+				relinquished := false
+				cfg := leader.Config{OnRelinquished: func(_ context.Context, _ worklease.Token) { relinquished = true }}
+				_ = leader.Elect(ctx, mockLease, "work-1", cfg, func(context.Context) error { return nil })
+				Expect(relinquished).To(BeFalse())
+			})
+			It("does not call OnRelinquished when fn returns ErrFenced", func() {
+				stopFn := func() {}
+				renewCtx, renewCancel := context.WithCancel(ctx)
+				defer renewCancel()
+				mockLease.EXPECT().Acquire(gomock.Any(), "work-1").Return(worklease.Token{}, nil)
+				mockLease.EXPECT().StartRenewal(gomock.Any(), worklease.Token{}).Return(renewCtx, stopFn)
+				// Release must NOT be called.
+
+				relinquished := false
+				cfg := leader.Config{OnRelinquished: func(_ context.Context, _ worklease.Token) { relinquished = true }}
+				err := leader.Elect(ctx, mockLease, "work-1", cfg, func(context.Context) error { return worklease.ErrFenced })
+				Expect(errors.Is(err, worklease.ErrFenced)).To(BeTrue())
+				Expect(relinquished).To(BeFalse())
+			})
+			It("does not panic when OnRelinquished is nil", func() {
+				stopFn := func() {}
+				renewCtx, renewCancel := context.WithCancel(ctx)
+				defer renewCancel()
+				mockLease.EXPECT().Acquire(gomock.Any(), "work-1").Return(worklease.Token{}, nil)
+				mockLease.EXPECT().StartRenewal(gomock.Any(), worklease.Token{}).Return(renewCtx, stopFn)
+				mockLease.EXPECT().Release(gomock.Any(), worklease.Token{}).Return(nil)
+				Expect(func() {
+					_ = leader.Elect(ctx, mockLease, "work-1", leader.Config{}, func(context.Context) error { return nil })
+				}).NotTo(Panic())
+			})
+		})
 	})
 })

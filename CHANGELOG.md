@@ -11,6 +11,21 @@ This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 
 ### Added
 
+- `pool.Observer` interface (`OnSlotAcquired`, `OnSlotLost`, `OnSlotBackoff`, `OnSlotDead`) with event structs, injected via `pool.Config.Observer`; nil installs a no-op.
+- `pool.Permanent(err error) error` — constructor returning a value that satisfies `PermanentError`, so a `WorkFn` can drop its slot without defining a custom error type.
+- `pool.ErrAllSlotsDead` — returned by `pool.Pool.Run` when every slot exits via `PermanentError`, distinguishing a fully-dead pool from clean shutdown.
+- Distinct `pool` config sentinels — `ErrNilLease`, `ErrEmptyWorkIDs`, `ErrWithWaitForLeaseProhibited` — each wrapping `ErrConfigInvalid`.
+- `leader.Config` lifecycle callbacks — `OnElected` (after acquire, before `fn`), `OnLost` (when the renewal context is cancelled before `fn` returns), and `OnRelinquished` (after a successful `Release`). All optional; nil is a no-op.
+- `examples/observability` — a stdlib-only `LeaseObserver` reference implementation exercising every callback.
+
+### Changed
+
+- `pool.Pool.ActiveSlots` now reflects slots that are actively executing `WorkFn` (marking moved to WorkFn entry), excluding the acquire phase.
+
+### Breaking
+
+- `pool.ErrConfigInvalid` message changed to `"pool: invalid configuration"`, and `pool.New` now returns the distinct sentinels above instead of the single `ErrConfigInvalid`. Callers matching the exact old error string must switch to `errors.Is(err, pool.ErrConfigInvalid)` (still satisfied by all three). `pool.Pool.Run` now returns `ErrAllSlotsDead` (previously `nil`) when all slots exit via `PermanentError`.
+
 - `backend/conformance` package — `RunSuite(newBackend func() backend.Backend) func()` returns a backend-agnostic Ginkgo spec tree that enforces memory-vs-Postgres parity structurally (ADR-0015). Wired into both backend test suites; expiry is exercised via non-positive TTL with no clock injection. Covers acquire/checkpoint/renew/release/read-checkpoint semantics including `ErrLeaseExpired` on renew-of-expired, `ErrFenced` on stale and never-acquired records, and slice-ownership invariants.
 
 ### Fixed
