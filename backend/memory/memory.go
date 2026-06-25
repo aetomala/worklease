@@ -3,6 +3,7 @@ package memory
 import (
 	"context"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/aetomala/worklease"
@@ -53,10 +54,15 @@ func WithClock(c Clock) Option {
 const releaseGracePeriod = -time.Millisecond
 
 // memoryBackend is an in-memory implementation of the Backend interface.
+// The seq field is the per-instance monotonic fencing counter, shared across all
+// work IDs in this instance and never reset for the life of the instance. Two
+// independent New() calls produce independent counters — this mirrors one Postgres
+// sequence per database, not a process-global counter.
 type memoryBackend struct {
-	mu    sync.Mutex
-	clock Clock // never nil after New()
+	mu      sync.Mutex
+	clock   Clock // never nil after New()
 	records map[string]*record
+	seq     atomic.Uint64
 }
 
 // New returns an in-memory Backend. Safe for concurrent use within a single process.
@@ -91,15 +97,14 @@ func (mb *memoryBackend) Acquire(ctx context.Context, workID, holderID string, t
 	}
 
 	// ===== STEP 4: Determine New Fencing Token and Preserve Checkpoint =====
-	// Mirrors the PostgreSQL backend's ON CONFLICT DO UPDATE: checkpoint and
-	// cleanHandoff are carried over from the expired record so that a successor
-	// can read what the previous owner left behind — the same semantics as the
-	// postgres backend's `checkpoint = worklease_leases.checkpoint` clause.
-	var newToken uint64 = 1
+	// Fencing token comes from the per-instance global sequence — strictly
+	// increasing across all work IDs, never reset. Checkpoint and cleanHandoff
+	// carry over from an expired record so a successor can read what the prior
+	// owner left behind (mirrors the postgres ON CONFLICT DO UPDATE clause).
+	newToken := mb.seq.Add(1)
 	var prevCheckpoint []byte
 	var prevCleanHandoff bool
 	if exists {
-		newToken = r.fencingToken + 1
 		prevCheckpoint = r.checkpoint
 		prevCleanHandoff = r.cleanHandoff
 	}
