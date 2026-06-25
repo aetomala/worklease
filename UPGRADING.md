@@ -1,5 +1,57 @@
 # Upgrading worklease
 
+## v0.4.x → v0.5.0
+
+### Breaking Changes
+
+- **`Acquire` with `WithWaitForLease` returns `ctx.Err()` on cancellation/deadline,
+  not `ErrLeaseHeld`.** Previously, when the wait loop observed `ctx.Done()` it
+  returned the bare `ErrLeaseHeld` sentinel. It now returns an error wrapping
+  `ctx.Err()` — `fmt.Errorf("worklease: acquire cancelled: %w", ctx.Err())` — which
+  satisfies `errors.Is(err, context.Canceled)` or `errors.Is(err, context.DeadlineExceeded)`
+  but **no longer** satisfies `errors.Is(err, worklease.ErrLeaseHeld)`.
+
+  This is a **runtime** break — it is not caught by the compiler. Callers who used
+  `WithWaitForLease` and treated `errors.Is(err, ErrLeaseHeld)` as their sole
+  loop-termination or timeout signal must now also check `context.Canceled` and
+  `context.DeadlineExceeded`:
+
+  ```go
+  _, err := lease.Acquire(ctx, workID, worklease.WithWaitForLease())
+  switch {
+  case err == nil:
+      // acquired
+  case errors.Is(err, context.DeadlineExceeded), errors.Is(err, context.Canceled):
+      // wait was cancelled or timed out — previously surfaced as ErrLeaseHeld
+  default:
+      // other backend error
+  }
+  ```
+
+  The synchronous, no-wait path (without `WithWaitForLease`) is unchanged — it still
+  surfaces the backend `ErrLeaseHeld` directly.
+
+### Behavioral Changes in v0.5.0
+
+- **The renewal goroutine now retries transient errors instead of giving up.**
+  Previously, a single non-fencing error from `Renew` cancelled the renewal context
+  and stopped renewal. The goroutine now retries with exponential backoff (plus
+  additive jitter), bounded strictly by the lease window: it stops retrying once
+  `token.ExpiresAt()` is reached and cancels the renewal context with cause
+  `ErrLeaseWindowExhausted` (inspect via `context.Cause(renewCtx)`). A fencing error
+  is still never retried — it cancels immediately with cause `ErrFenced`. Configure
+  the policy with `WithRenewalBackoff(initial, max, jitter)`; the defaults are
+  100ms / 5s / 0.20.
+
+### New in v0.5.0
+
+- `worklease.WithRenewalBackoff(initial, max time.Duration, jitter float64)` — configures
+  the renewal goroutine's bounded-retry backoff policy.
+- `worklease.ErrLeaseWindowExhausted` — the cancel cause set on the renewal context when
+  the lease window closes before a renewal succeeds; inspect via `context.Cause(renewCtx)`.
+- `RenewEvent.Attempt` — the 1-based attempt counter delivered to `OnRenew`, incremented on
+  each retry within the renewal goroutine. Direct `Renew` calls always report `Attempt: 1`.
+
 ## v0.3.x → v0.4.0
 
 ### Breaking Changes

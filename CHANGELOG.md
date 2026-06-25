@@ -9,6 +9,21 @@ This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 
 ## [Unreleased]
 
+### Breaking
+
+- `Acquire` with `WithWaitForLease` now returns an error wrapping `ctx.Err()` — `fmt.Errorf("worklease: acquire cancelled: %w", ctx.Err())` — when the wait loop is cancelled or its deadline is exceeded, instead of the bare `ErrLeaseHeld` sentinel. The returned error satisfies `errors.Is(err, context.Canceled)` / `errors.Is(err, context.DeadlineExceeded)` and no longer satisfies `errors.Is(err, ErrLeaseHeld)`. This is a runtime break (not compile-detectable); the synchronous no-wait path is unchanged. See `UPGRADING.md`.
+
+### Added
+
+- `WithRenewalBackoff(initial, max time.Duration, jitter float64)` — configures the renewal goroutine's bounded-retry backoff policy (defaults 100ms / 5s / 0.20, clamped).
+- `ErrLeaseWindowExhausted` — set as the cancel cause of the renewal context when the lease window closes before a renewal succeeds; inspect via `context.Cause(renewCtx)`.
+- `RenewEvent.Attempt` — 1-based attempt counter delivered to `OnRenew`, incremented on each retry within the renewal goroutine; direct `Renew` calls always report `Attempt: 1`.
+
+### Changed
+
+- The renewal goroutine now retries a non-fencing `Renew` error with exponential backoff plus additive jitter, bounded strictly by the lease window, instead of cancelling on the first error. When the window is exhausted it cancels the renewal context with cause `ErrLeaseWindowExhausted`; a fencing error still cancels immediately with cause `ErrFenced` and is never retried.
+- `StartRenewal` now derives its renewal context via `context.WithCancelCause`; the fencing and window-exhausted causes surface through `context.Cause(renewCtx)`. A normal `stopRenewal()` leaves the context uncancelled (`context.Cause` is `nil`).
+
 ---
 
 ## [v0.4.0] — 2026-06-17
