@@ -9,8 +9,10 @@ import (
 
 // Acquire attempts to acquire a lease for the given workID. Returns ErrLeaseHeld
 // if a lease already exists for this workID. If WithWaitForLease is set, blocks
-// until the lease is available, polling at the configured interval. Returns
-// ErrLeaseHeld on context cancellation while waiting.
+// until the lease is available, polling at the configured interval. On context
+// cancellation or deadline while waiting, returns an error wrapping ctx.Err()
+// (satisfying errors.Is(err, context.Canceled) or context.DeadlineExceeded) —
+// not ErrLeaseHeld.
 func (c *leaseClient) Acquire(ctx context.Context, workID string, opts ...AcquireOption) (Token, error) {
 	// ===== STEP 1: Validate Inputs =====
 	if workID == "" {
@@ -64,7 +66,7 @@ func (c *leaseClient) Acquire(ctx context.Context, workID string, opts ...Acquir
 		select {
 		case <-ctx.Done():
 			timer.Stop()
-			return Token{}, ErrLeaseHeld
+			return Token{}, fmt.Errorf("%s: %w", msgAcquireCancelled, ctx.Err())
 		case <-timer.C:
 			// Retry
 		}

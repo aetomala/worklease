@@ -107,7 +107,7 @@ func (c *leaseClient) Renew(ctx context.Context, token Token) error {
 	start := time.Now()
 	err := c.b.Renew(ctx, record, c.cfg.TTL)
 	dur := time.Since(start)
-	c.obs.OnRenew(ctx, RenewEvent{Token: token, Duration: dur, Err: err})
+	c.obs.OnRenew(ctx, RenewEvent{Token: token, Duration: dur, Attempt: 1, Err: err})
 	if errors.Is(err, ErrFenced) {
 		c.obs.OnFenced(ctx, FencedEvent{Token: token, Operation: OperationRenew})
 	}

@@ -9,9 +9,11 @@ import (
 
 // Error message constants for lease operations.
 const (
-	msgFenced       = "worklease: fenced — lease acquired by another holder"
-	msgLeaseHeld    = "worklease: lease is currently held"
-	msgLeaseExpired = "worklease: lease has expired"
+	msgFenced               = "worklease: fenced — lease acquired by another holder"
+	msgLeaseHeld            = "worklease: lease is currently held"
+	msgLeaseExpired         = "worklease: lease has expired"
+	msgLeaseWindowExhausted = "worklease: lease window exhausted before renewal succeeded"
+	msgAcquireCancelled     = "worklease: acquire cancelled"
 )
 
 // Sentinel errors for Lease operations.
@@ -19,6 +21,19 @@ var (
 	ErrFenced       = errors.New(msgFenced)
 	ErrLeaseHeld    = errors.New(msgLeaseHeld)
 	ErrLeaseExpired = errors.New(msgLeaseExpired)
+
+	// ErrLeaseWindowExhausted is set as the cancel cause of the renewal context
+	// when the renewal goroutine exhausts the remaining lease window without a
+	// successful renewal (goroutine lifecycle path 3).
+	// Inspect via context.Cause(renewCtx) — not returned directly from any method.
+	ErrLeaseWindowExhausted = errors.New(msgLeaseWindowExhausted)
+)
+
+// Default backoff parameters for the renewal goroutine retry policy.
+const (
+	defaultBackoffInitial = 100 * time.Millisecond
+	defaultBackoffMax     = 5 * time.Second
+	defaultBackoffJitter  = 0.20
 )
 
 // Lease defines the contract for acquiring, managing, and renewing leases on
@@ -136,18 +151,57 @@ func HasWaitForLease(opts []AcquireOption) bool {
 // RenewalOption is a functional option for StartRenewal.
 type RenewalOption func(*renewalConfig)
 
-// renewalConfig holds configuration for Renewal options.
+// renewalConfig holds resolved options for a StartRenewal call.
+// Unexported — the library resolves options internally.
 type renewalConfig struct {
+	// renewalInterval is the time between renewal attempts. Default: TTL/2.
 	renewalInterval time.Duration
+	// backoffInitial is the first retry interval after a non-fencing Renew error. Default: 100ms.
+	backoffInitial time.Duration
+	// backoffMax caps the retry interval after exponential growth. Default: 5s.
+	backoffMax time.Duration
+	// backoffJitter is the additive jitter fraction in [0, 1]. Default: 0.20.
+	backoffJitter float64
 }
 
-// WithRenewalInterval sets the interval at which StartRenewal renews the lease.
-// If d is zero or negative, the default is preserved.
+// WithRenewalInterval sets the time between renewal attempts.
+// Default: TTL/2. Zero or negative values are ignored — the default is used silently.
 func WithRenewalInterval(d time.Duration) RenewalOption {
 	return func(c *renewalConfig) {
 		if d > 0 {
 			c.renewalInterval = d
 		}
+	}
+}
+
+// WithRenewalBackoff configures the exponential backoff policy used by the
+// renewal goroutine when Renew returns a non-fencing, non-nil error.
+// The initial parameter is the first retry interval; maxInterval caps the
+// interval after growth. The jitter parameter is a fraction in [0, 1]; the
+// actual wait is drawn from [base, base+jitter*base].
+// Defaults: initial=100ms, max=5s, jitter=0.20.
+// Clamping (in order): initial floors to 1ms if <= 0; max floors to 1ms if <= 0;
+// jitter clamps to [0, 1]; finally initial caps at max if initial > max.
+func WithRenewalBackoff(initial, maxInterval time.Duration, jitter float64) RenewalOption {
+	return func(c *renewalConfig) {
+		if initial <= 0 {
+			initial = time.Millisecond
+		}
+		if maxInterval <= 0 {
+			maxInterval = time.Millisecond
+		}
+		if jitter < 0 {
+			jitter = 0
+		}
+		if jitter > 1 {
+			jitter = 1
+		}
+		if initial > maxInterval {
+			initial = maxInterval
+		}
+		c.backoffInitial = initial
+		c.backoffMax = maxInterval
+		c.backoffJitter = jitter
 	}
 }
 
@@ -212,9 +266,13 @@ type CheckpointEvent struct {
 }
 
 // RenewEvent carries the result of a Renew call.
+// Attempt is 1 on the first attempt. The renewal goroutine increments Attempt
+// on each retry attempt within the backoff loop. Direct calls to Renew from
+// caller code always produce Attempt: 1.
 type RenewEvent struct {
 	Token    Token
 	Duration time.Duration
+	Attempt  int
 	Err      error
 }
 
