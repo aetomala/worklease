@@ -76,8 +76,25 @@ queries, gRPC calls) without any library-specific plumbing.
   but the delay is TTL-length. Callers should `defer stopRenewal()` immediately after
   `StartRenewal` returns.
 
+## v0.5 Amendment — bounded retry (2026-06-25)
+
+The original "any renewal attempt fails after the configured retry budget" clause
+described a single-shot renewer: any non-fencing error from `Backend.Renew`
+immediately cancelled `renewCtx`. As of v0.5 that behavior is superseded by
+ADR-0013's bounded-retry policy. A non-fencing error is now retried with
+exponential backoff plus additive jitter, bounded strictly by `token.ExpiresAt()`;
+the goroutine cancels `renewCtx` with cause `ErrLeaseWindowExhausted` only once the
+lease window is exhausted. A fencing error is still never retried.
+
+Accordingly, `StartRenewal` now derives `renewCtx` via `context.WithCancelCause`
+(not `context.WithCancel`), and the stop reason is inspectable via
+`context.Cause(renewCtx)`: `nil` on a normal `stopRenewal()`, `ErrFenced` on
+fencing, `ErrLeaseWindowExhausted` on window exhaustion, and the parent's cause on
+parent cancellation. See ADR-0013 for the full policy and `WithRenewalBackoff`.
+
 ## References
 
 - `renewal.go` — `StartRenewal` implementation
 - `lease.go` — `Lease.StartRenewal` method signature and contract
+- `docs/adr/0013-renewal-goroutine-retry-policy.md` — the v0.5 bounded-retry amendment
 - Architecture document — Renewal Loop Design and Residual Risks R2

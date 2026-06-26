@@ -493,40 +493,51 @@ but is the backend's internal representation — callers never see it. The libra
 ### Schema
 
 ```sql
+CREATE SEQUENCE IF NOT EXISTS worklease_fencing_seq;
+
 CREATE TABLE worklease_leases (
     work_id         TEXT PRIMARY KEY,
     holder_id       TEXT NOT NULL,
-    fencing_token   BIGINT NOT NULL DEFAULT 1,
+    fencing_token   BIGINT NOT NULL DEFAULT nextval('worklease_fencing_seq'),
     expires_at      TIMESTAMPTZ NOT NULL,
     checkpoint      BYTEA,
     clean_handoff   BOOLEAN NOT NULL DEFAULT FALSE,
     acquired_at     TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     updated_at      TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
+
+CREATE INDEX IF NOT EXISTS idx_worklease_leases_updated_at ON worklease_leases (updated_at);
 ```
 
-`fencing_token` starts at 1 and increments on every acquisition. `checkpoint` is nullable —
-`NULL` on first acquisition means no prior state. `clean_handoff` is reset to `FALSE` on every
-acquisition and set to `TRUE` only by an explicit `Release`.
+As of v0.5, `fencing_token` is sourced from a single global `worklease_fencing_seq` SEQUENCE
+rather than a per-row `+ 1` (ADR-0016). Tokens are therefore strictly increasing across **all**
+work IDs, not just within a single row's history, and they survive row deletion — the property
+that makes the planned v0.6 retention work safe. `checkpoint` is nullable — `NULL` on first
+acquisition means no prior state. `clean_handoff` is reset to `FALSE` on every acquisition and
+set to `TRUE` only by an explicit `Release`.
 
-### Acquire — Upsert with Expiry Guard
+### Acquire — Single-Statement Upsert with RETURNING
 
 ```sql
 INSERT INTO worklease_leases (work_id, holder_id, fencing_token, expires_at, checkpoint, clean_handoff)
-VALUES ($1, $2, 1, NOW() + $3, NULL, FALSE)
+VALUES ($1, $2, nextval('worklease_fencing_seq'), NOW() + $3, NULL, FALSE)
 ON CONFLICT (work_id) DO UPDATE
 SET holder_id     = EXCLUDED.holder_id,
-    fencing_token = worklease_leases.fencing_token + 1,
+    fencing_token = nextval('worklease_fencing_seq'),
     expires_at    = EXCLUDED.expires_at,
     checkpoint    = worklease_leases.checkpoint,   -- preserve last checkpoint
     clean_handoff = worklease_leases.clean_handoff, -- preserve until successor reads
     updated_at    = NOW()
 WHERE worklease_leases.expires_at < NOW()           -- only if expired
+RETURNING fencing_token, expires_at
 ```
 
 The `WHERE` clause is the fencing gate. If the lease is held and unexpired, the condition is
-false — zero rows are updated. The backend returns `ErrLeaseHeld`. If the lease is absent or
-expired, the upsert succeeds and the fencing token is incremented atomically.
+false — zero rows are updated, the statement returns no row, and the backend maps the resulting
+`sql.ErrNoRows` to `ErrLeaseHeld`. If the lease is absent or expired, the upsert succeeds, draws
+a fresh token from the sequence, and `RETURNING` yields the token and expiry in the same
+statement. As of v0.5 this replaces the prior two-step `ExecContext` + read-back `SELECT`,
+closing the read-back race (R8/F4).
 
 **Clock note**: `NOW()` is the PostgreSQL server's clock — not the worker's clock. Expiry
 decisions are made by the database, not by the client. This is intentional; see
@@ -609,6 +620,15 @@ b := memory.New()
 
 No `Close` method — no cleanup required.
 
+### Global Fencing Sequence (v0.5)
+
+As of v0.5, fencing tokens come from a per-instance monotonic counter — a `seq atomic.Uint64`
+field advanced by `seq.Add(1)` on every successful acquire — rather than a per-row `+ 1`
+(ADR-0016). Tokens are strictly increasing across all work IDs on the instance and are never
+reset for its lifetime. The counter is per `memory.New()` instance: two independent instances
+have independent counters, mirroring one Postgres sequence per database rather than a
+process-global counter. The conformance suite asserts this global monotonicity on both backends.
+
 ### Slice Ownership
 
 `Checkpoint` copies the incoming `state` into storage rather than aliasing the caller's slice,
@@ -662,19 +682,29 @@ return lease.Release(ctx, token)
 
 ### Context Lifecycle
 
-The `renewCtx` is cancelled when any of the following occur:
+As of v0.5, `renewCtx` is derived via `context.WithCancelCause`, so the **reason** for
+cancellation is inspectable with `context.Cause(renewCtx)`:
 
-| Event | Signal |
-|-------|--------|
-| Renewal receives `ErrFenced` | `renewCtx` cancelled — this worker is a zombie, stop all work |
-| Renewal receives `ErrLeaseExpired` | `renewCtx` cancelled — lease expired without a competitor |
-| Renewal fails (non-fencing error) | `renewCtx` cancelled — lease state is uncertain |
-| Parent `ctx` is cancelled | `renewCtx` cancelled — propagated from parent |
-| `stopRenewal()` is called | `renewCtx` is **not** cancelled — clean shutdown |
+| Event | `context.Cause(renewCtx)` |
+|-------|---------------------------|
+| Renewal receives `ErrFenced` | `ErrFenced` — this worker is a zombie, stop all work (never retried) |
+| Lease window exhausted after retries | `ErrLeaseWindowExhausted` — renewal failed for the whole window |
+| Parent `ctx` is cancelled | the parent's cause — propagated from parent |
+| `stopRenewal()` is called | `nil` — `renewCtx` is **not** cancelled, clean shutdown |
 
-The distinction between `stopRenewal()` (clean) and context cancellation (fencing or error)
-is intentional. Downstream code can distinguish "work is done" from "we were fenced" by
-checking whether `stopRenewal()` was called before context cancellation occurred.
+The distinction between `stopRenewal()` (clean, cause `nil`) and context cancellation (fencing
+or window exhaustion) is intentional. Downstream code can distinguish "work is done" from "we
+were fenced" from "the lease window ran out" by inspecting `context.Cause(renewCtx)`.
+
+### Bounded Retry (v0.5)
+
+A non-fencing error from `Backend.Renew` no longer cancels `renewCtx` on the first failure.
+The goroutine retries with exponential backoff plus additive jitter, bounded strictly by
+`token.ExpiresAt()` — it never renews past the point where it could still be the legitimate
+owner. When the window is exhausted, it cancels with cause `ErrLeaseWindowExhausted`. A fencing
+error is never retried. Each attempt is reported to `OnRenew` via `RenewEvent.Attempt` (1-based,
+incremented per retry). Configure the policy with `WithRenewalBackoff(initial, max, jitter)`
+(defaults 100ms / 5s / 0.20). See [ADR-0013](adr/0013-renewal-goroutine-retry-policy.md).
 
 Note that `renewCtx` cancellation propagates fencing into downstream work — it does not fence
 external systems. An in-flight HTTP call or database write to an external system initiated
@@ -732,6 +762,14 @@ The retry loop lives in `acquire.go` in the library core — not in the backend.
 is always single-attempt. This keeps retry behavior consistent across all backends and keeps
 backend implementations simple. See [ADR-0005](adr/0005-acquire-default-returns-err-lease-held.md)
 and [ADR-0006](adr/0006-backend-acquire-single-attempt.md).
+
+As of v0.5, when the wait loop is cancelled or its deadline is exceeded, `Acquire` returns an
+error wrapping `ctx.Err()` — satisfying `errors.Is(err, context.Canceled)` or
+`errors.Is(err, context.DeadlineExceeded)` — rather than the bare `ErrLeaseHeld` it returned
+through v0.4. The synchronous no-wait path above still surfaces `ErrLeaseHeld` directly. This is
+a runtime break for callers that treated `ErrLeaseHeld` as their sole wait-loop termination
+signal; see `UPGRADING.md` and the [ADR-0005](adr/0005-acquire-default-returns-err-lease-held.md)
+v0.5 amendment.
 
 ### Why Fail-Fast is the Default
 
@@ -1196,14 +1234,17 @@ becomes available. This breaks clean pool shutdown. `pool.New` returns
 - `examples/observability` — stdlib-only `LeaseObserver` reference
 - ADR-0014, ADR-0015
 
-### v0.5 — Planned
+### v0.5 — Released (v0.5.0)
 
-- Renewal goroutine retry policy — exponential backoff bounded by the lease window; `WithRenewalBackoff` (ADR-0013, Proposed)
-- Global fencing sequence + single-statement `Acquire` with `RETURNING` — closes the read-back race and the token-reset split-brain vector; `Acquire` returns `ctx.Err()` on wait-loop cancellation (ADR-0016, Proposed)
+- Renewal goroutine bounded retry — exponential backoff plus additive jitter, bounded strictly by the lease window; `WithRenewalBackoff`, `ErrLeaseWindowExhausted` (via `context.Cause`), `RenewEvent.Attempt`; `StartRenewal` uses `context.WithCancelCause` (ADR-0013)
+- Global fencing sequence on both backends — Postgres `worklease_fencing_seq` and per-instance memory `atomic.Uint64`; tokens strictly increase across all work IDs and survive row deletion (ADR-0016 fencing component)
+- Single-statement `Acquire` with `RETURNING` — closes the read-back race (R8/F4)
+- `Acquire` with `WithWaitForLease` returns `ctx.Err()` on wait-loop cancellation/deadline (breaking; ADR-0005 amendment, see `UPGRADING.md`)
+- ADR-0013, ADR-0016 (fencing component)
 
 ### v0.6 / pre-1.0 — Planned
 
-- `Forget` / `Vacuum.Sweep` — caller-governed row lifecycle and retention (ADR-0016, Proposed)
+- `Forget` / `Vacuum.Sweep` — caller-governed row lifecycle and retention (ADR-0016 retention component, Proposed)
 
 ### Unscheduled (post-1.0)
 
@@ -1231,15 +1272,16 @@ the decision made, and the consequences — including the alternatives that were
 | [0010](adr/0010-leader-fn-signature-and-acquire-semantics.md) | leader.Elect fn receives no Token; acquire semantics are caller-controlled | Accepted |
 | [0011](adr/0011-pool-scope-and-permanent-error-interface.md) | pool scope is cross-process; permanent slot failure signals via interface (amended v0.4: Observer, Permanent, distinct sentinels, ErrAllSlotsDead) | Accepted |
 | [0012](adr/0012-release-expires-lease-immediately.md) | Release expires the lease immediately — successor acquires without TTL wait | Accepted |
-| 0013 | Renewal goroutine retry policy bounded by the lease window | Proposed (v0.5) |
+| [0013](adr/0013-renewal-goroutine-retry-policy.md) | Renewal goroutine retry policy bounded by the lease window | Accepted |
 | [0014](adr/0014-backend-slice-ownership-contract.md) | Backend slice ownership contract — defensive copies required | Accepted |
 | [0015](adr/0015-backend-conformance-suite.md) | Backend conformance suite — RunSuite against all backends | Accepted |
-| 0016 | Row lifecycle: global fencing sequence + caller-governed retention | Proposed (v0.5/v0.6) |
+| [0016](adr/0016-row-lifecycle-global-fencing-sequence.md) | Row lifecycle: global fencing sequence (Accepted); retention (Proposed, v0.6) | Accepted (fencing) |
 
 ADR-0007 and ADR-0010 carry v0.4 amendments (observer event-struct redesign; leader lifecycle
-callbacks). ADR-0013 and ADR-0016 are Proposed — their decisions live in the design record and
-land with v0.5/v0.6; no ADR file exists yet.
+callbacks). ADR-0004 and ADR-0005 carry v0.5 amendments (renewal bounded retry; acquire ctx.Err()
+propagation). ADR-0013 shipped in v0.5; ADR-0016's global-fencing-sequence component shipped in
+v0.5, while its retention component (`Forget` / `Vacuum.Sweep`) remains Proposed for v0.6.
 
 ---
 
-*Last updated: June 2026 — v0.4 (v0.4.0)*
+*Last updated: June 2026 — v0.5 (v0.5.0)*

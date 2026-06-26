@@ -70,8 +70,25 @@ option gives callers control without overloading `Acquire`'s signature.
   would require backend-specific notification mechanisms (PostgreSQL LISTEN/NOTIFY, Redis
   keyspace notifications) that cannot be expressed in the generic `Backend` interface.
 
+## v0.5 Amendment — ctx.Err() on wait-loop cancellation (2026-06-25)
+
+Through v0.4 the `WithWaitForLease` wait loop returned the bare `ErrLeaseHeld`
+sentinel when the context was cancelled or its deadline was exceeded — making a
+cancelled wait indistinguishable from a lease that is genuinely held. As of v0.5
+the wait loop returns `fmt.Errorf("worklease: acquire cancelled: %w", ctx.Err())`,
+which satisfies `errors.Is(err, context.Canceled)` / `errors.Is(err,
+context.DeadlineExceeded)` and no longer satisfies `errors.Is(err, ErrLeaseHeld)`.
+
+The synchronous, no-wait default (without `WithWaitForLease`) is unchanged — it
+still surfaces the backend's `ErrLeaseHeld` directly. This is a runtime break for
+callers that treated `ErrLeaseHeld` as their sole wait-loop termination signal; see
+the `UPGRADING.md` v0.4.x → v0.5.0 entry. The change is recorded under ADR-0016
+alongside the global-fencing-sequence work it shipped with.
+
 ## References
 
 - `acquire.go` — wait+retry loop implementation
 - `lease.go` — `AcquireOption`, `WithWaitForLease`, `WithPollInterval` definitions
 - `backend/backend.go` — `Backend.Acquire` is single-attempt; see ADR-0006
+- `docs/adr/0016-row-lifecycle-global-fencing-sequence.md` — the v0.5 amendment context
+- `UPGRADING.md` — v0.4.x → v0.5.0 acquire breaking change

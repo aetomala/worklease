@@ -180,6 +180,8 @@ if state == nil {
 
 ## Upgrading
 
+`v0.5.0` changes `Acquire` with `WithWaitForLease`: on context cancellation or deadline while waiting it now returns an error wrapping `ctx.Err()` (satisfying `errors.Is(err, context.Canceled)` / `context.DeadlineExceeded`) instead of bare `ErrLeaseHeld`. This is a runtime break for callers that treated `ErrLeaseHeld` as their sole wait-loop termination signal; the synchronous no-wait path is unchanged. The renewal goroutine also now retries transient errors with backoff bounded by the lease window rather than stopping on the first error (configure with `WithRenewalBackoff`).
+
 `v0.4.0` redesigns `LeaseObserver` from flat parameters to event structs (adds `OnReadCheckpoint`, fires `OnFenced` on the Release path, adds `Duration`), and `pool.New` now returns distinct config sentinels (`ErrNilLease` / `ErrEmptyWorkIDs` / `ErrWithWaitForLeaseProhibited`, all wrapping `ErrConfigInvalid`) while `pool.Pool.Run` returns `ErrAllSlotsDead` when every slot dies permanently.
 
 `v0.3.0` includes a breaking change in the `checkpoint` package: `Codec.Encode` and `Codec.Decode` are renamed to `Marshal` and `Unmarshal`. Callers using `checkpoint.JSON()` are unaffected.
@@ -346,7 +348,7 @@ Requires Go 1.26+. PostgreSQL backend requires PostgreSQL 12+.
 
 ## Status
 
-v0.4.0 is the latest tagged release. The core public API (`Lease`, `Token`, options, sentinels) is stable.
+v0.5.0 is the latest release line. The core public API (`Lease`, `Token`, options, sentinels) is stable. v0.5 adds bounded renewal retry (`WithRenewalBackoff`, `ErrLeaseWindowExhausted`, `RenewEvent.Attempt`), a global fencing sequence on both backends, a single-statement Postgres `Acquire` with `RETURNING`, and ctx-aware `Acquire` cancellation under `WithWaitForLease` (a runtime break — see `UPGRADING.md`).
 
 ---
 
@@ -358,10 +360,10 @@ v0.4.0 is the latest tagged release. The core public API (`Lease`, `Token`, opti
 - **v0.2.0** — `worker.Runner`, `checkpoint.Codec`, `LeaseObserver`, `memory.Clock`, examples
 - **v0.3.0** — `leader.Elect`, `pool.Pool`, `HasWaitForLease`, `checkpoint.Codec` method rename (breaking — see `UPGRADING.md`)
 - **v0.4.0** — `LeaseObserver` event-struct redesign (breaking), `backend/conformance` suite, `pool.Observer`/`Permanent`/`ErrAllSlotsDead`, `leader` lifecycle callbacks, memory slice-ownership fix
+- **v0.5.0** — bounded renewal retry (`WithRenewalBackoff`, `ErrLeaseWindowExhausted`, `RenewEvent.Attempt`); global fencing sequence on both backends; single-statement `Acquire` with `RETURNING`; ctx-aware `Acquire` cancellation under `WithWaitForLease` (breaking — see `UPGRADING.md`)
 
 ### Future
 
-- **v0.5** — renewal retry policy with backoff; single-statement `Acquire` with `RETURNING` + global fencing sequence
 - **v0.6** — caller-governed row lifecycle (`Forget` / `Vacuum.Sweep`)
 - Redis backend, etcd backend (unscheduled, post-1.0)
 - `Token` test constructor — unblocks table-driven tests that construct tokens directly

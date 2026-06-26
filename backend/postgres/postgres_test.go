@@ -44,12 +44,14 @@ var _ = Describe("Backend (postgres)", func() {
 	})
 
 	Describe("Acquire", func() {
-		It("no lease exists → inserts record with fencingToken=1; returns LeaseRecord with correct fields", func() {
+		It("no lease exists → inserts record with a positive fencingToken from the global sequence; returns LeaseRecord with correct fields", func() {
 			record, err := b.Acquire(ctx, "w1", "holder-1", 30*time.Second)
 			Expect(err).NotTo(HaveOccurred())
 			Expect(record.WorkID).To(Equal("w1"))
 			Expect(record.HolderID).To(Equal("holder-1"))
-			Expect(record.FencingToken).To(Equal(uint64(1)))
+			// Fencing tokens now come from worklease_fencing_seq, which is not reset
+			// between specs — assert a positive token rather than an absolute value.
+			Expect(record.FencingToken).To(BeNumerically(">", 0))
 			Expect(record.ExpiresAt).NotTo(BeZero())
 		})
 
@@ -63,24 +65,26 @@ var _ = Describe("Backend (postgres)", func() {
 			Expect(errors.Is(err, worklease.ErrLeaseHeld)).To(BeTrue())
 		})
 
-		It("lease exists and expired → updates record and increments fencingToken; preserves previous checkpoint bytes", func() {
-			// Insert an expired lease with prior checkpoint
-			_, err := db.ExecContext(ctx,
-				`INSERT INTO worklease_leases (work_id, holder_id, fencing_token, expires_at, checkpoint, clean_handoff)
-				 VALUES ($1, $2, 1, NOW() - INTERVAL '1 second', $3, FALSE)`,
-				"w3", "old-holder", []byte("prior-state"),
-			)
+		It("lease exists and expired → reacquire issues a strictly greater fencing token from the global sequence and preserves previous checkpoint bytes", func() {
+			// Acquire a baseline lease and checkpoint it.
+			rec1, err := b.Acquire(ctx, "w3", "old-holder", 30*time.Second)
+			Expect(err).NotTo(HaveOccurred())
+			Expect(b.Checkpoint(ctx, rec1, []byte("prior-state"), 30*time.Second)).To(Succeed())
+
+			// Expire the lease so it can be reacquired.
+			_, err = db.ExecContext(ctx,
+				"UPDATE worklease_leases SET expires_at = NOW() - INTERVAL '1 second' WHERE work_id = $1", "w3")
 			Expect(err).NotTo(HaveOccurred())
 
-			// Acquire with new holder should succeed
-			record, err := b.Acquire(ctx, "w3", "new-holder", 30*time.Second)
+			// Reacquire with a new holder should succeed and issue a strictly greater token.
+			rec2, err := b.Acquire(ctx, "w3", "new-holder", 30*time.Second)
 			Expect(err).NotTo(HaveOccurred())
-			Expect(record.WorkID).To(Equal("w3"))
-			Expect(record.HolderID).To(Equal("new-holder"))
-			Expect(record.FencingToken).To(Equal(uint64(2)))
+			Expect(rec2.WorkID).To(Equal("w3"))
+			Expect(rec2.HolderID).To(Equal("new-holder"))
+			Expect(rec2.FencingToken).To(BeNumerically(">", rec1.FencingToken))
 
-			// Verify previous checkpoint is preserved
-			checkpoint, cleanHandoff, err := b.ReadCheckpoint(ctx, record)
+			// Verify previous checkpoint is preserved across the reacquire.
+			checkpoint, cleanHandoff, err := b.ReadCheckpoint(ctx, rec2)
 			Expect(err).NotTo(HaveOccurred())
 			Expect(checkpoint).To(Equal([]byte("prior-state")))
 			Expect(cleanHandoff).To(BeFalse())
