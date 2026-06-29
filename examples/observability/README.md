@@ -21,7 +21,7 @@ observability/
 
 ## Setup
 
-Prerequisites: Go 1.26+.
+Prerequisites: Go 1.25+.
 
 ```bash
 go mod tidy

@@ -34,6 +34,11 @@ This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 - README quickstart DDL synced to `backend/postgres/schema.sql` — adds the v0.5 `worklease_fencing_seq` sequence, `nextval` default, and `updated_at` index; adds a canonical-source pointer so README and `schema.sql` cannot drift independently.
 - Corrected Go version floor in `README.md` and all five example `go.mod` files from `1.26` to `1.25`, consistent with the library `go.mod` floor and the README badge.
 
+### Chore
+
+- Added `build-examples` CI job — iterates `examples/*/` as independent Go modules and runs `go build ./...` in each; a broken example now fails CI.
+- Updated `Prerequisites` line in all five example READMEs from `Go 1.26+` to `Go 1.25+`, consistent with the library floor and `go.mod` directives.
+
 ---
 
 ## [v0.4.0] — 2026-06-17
