@@ -2,7 +2,7 @@
 // produces the signals a production deployment cares about — without pulling in a
 // metrics or tracing library.
 //
-// It implements the four patterns that are non-obvious from the LeaseObserver
+// It implements the five patterns that are non-obvious from the LeaseObserver
 // interface alone:
 //
 //  1. Per-operation call counting (Acquire / Checkpoint / Renew / Release / ReadCheckpoint).
@@ -14,6 +14,9 @@
 //  4. A dedicated fencing counter via OnFenced, which fires *in addition to* the
 //     operation callback (OnCheckpoint/OnRenew/OnRelease) — so a fencing metric can be
 //     incremented in one place without parsing error values out of every operation.
+//  5. Renewal retry tracking via RenewEvent.Attempt — Attempt > 1 means the v0.5
+//     renewal goroutine retried after a transient non-fencing error (e.g., a Postgres
+//     connection drop); a dedicated counter makes this visible without inspecting errors.
 //
 // The example runs a clean lifecycle and a real fencing scenario (a successor steals
 // an expired lease, fencing the original holder) so every callback fires.
@@ -27,6 +30,7 @@
 //   - opLatency      -> prometheus.HistogramVec{labels: "operation"}      / otel Float64Histogram
 //   - fencedTotal    -> prometheus.Counter                                / otel Int64Counter
 //   - holdDurations  -> prometheus.Histogram (lease_hold_seconds)         / otel Float64Histogram
+//   - renewRetries   -> prometheus.Counter (renew_retry_total)            / otel Int64Counter
 //
 // Replace the in-memory aggregation with .Inc() / .Observe() calls on those instruments;
 // the callback bodies and correlation logic stay identical.
@@ -59,6 +63,9 @@ type metricsObserver struct {
 	// ===== Hold-duration correlation: fencing token -> acquire time =====
 	heldSince     map[uint64]time.Time
 	holdDurations []time.Duration
+
+	// ===== Renewal retry counter =====
+	renewRetries int // incremented for each OnRenew with Attempt > 1; non-zero signals transient errors
 }
 
 func newMetricsObserver() *metricsObserver {
@@ -102,6 +109,9 @@ func (m *metricsObserver) OnRenew(_ context.Context, e worklease.RenewEvent) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	m.record("renew", e.Duration, e.Err)
+	if e.Attempt > 1 {
+		m.renewRetries++ // Attempt > 1 means the renewal goroutine retried after a transient error
+	}
 }
 
 func (m *metricsObserver) OnRelease(_ context.Context, e worklease.ReleaseEvent) {
@@ -147,6 +157,7 @@ func (m *metricsObserver) report() {
 			op, n, m.opErrors[op], m.opLatency[op]/time.Duration(n))
 	}
 	fmt.Printf("%-16s total=%d\n", "fenced", m.fencedTotal)
+	fmt.Printf("%-16s total=%d\n", "renew_retries", m.renewRetries)
 	for i, d := range m.holdDurations {
 		fmt.Printf("%-16s holding[%d]=%s\n", "hold_duration", i, d)
 	}

@@ -41,6 +41,8 @@ This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 - Removed duplicate cross-work-ID fencing-token monotonicity spec from the memory backend test suite — the identical property is asserted by the shared conformance suite (ADR-0015).
 - README and ARCHITECTURE: documented that fencing tokens are monotonic but not contiguous — every `Acquire` attempt, including those that return `ErrLeaseHeld`, advances the underlying sequence; gaps are expected and carry no operational meaning.
 - README: added `StartRenewal` direct-usage prose — call `stopRenewal()` before `Release`, and pass the original `ctx` (not `renewCtx`) to `Release`.
+- Added `examples/renewal-backoff` — two-scenario example demonstrating the `WithWaitForLease` context-cancellation contract (`errors.Is(err, context.DeadlineExceeded)`) and `WithRenewalBackoff` + `ErrLeaseWindowExhausted` via `context.Cause(renewCtx)`.
+- Observability example: `OnRenew` now tracks `e.Attempt` via a `renewRetries` counter incremented when `Attempt > 1`, surfacing the v0.5 renewal retry counter.
 
 ---
 
