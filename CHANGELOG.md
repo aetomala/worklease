@@ -32,6 +32,7 @@ This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 
 - Created ADR-0013 and ADR-0016; amended ADR-0004 (renewal bounded retry) and ADR-0005 (acquire ctx.Err() propagation); synced `docs/ARCHITECTURE.md` and `README.md` to the v0.5 surface (bounded renewal retry, global fencing sequence, single-statement Postgres acquire, ctx-aware acquire cancellation).
 - README quickstart DDL synced to `backend/postgres/schema.sql` — adds the v0.5 `worklease_fencing_seq` sequence, `nextval` default, and `updated_at` index; adds a canonical-source pointer so README and `schema.sql` cannot drift independently.
+- Corrected Go version floor in `README.md` and all five example `go.mod` files from `1.26` to `1.25`, consistent with the library `go.mod` floor and the README badge.
 
 ---
 

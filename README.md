@@ -348,7 +348,7 @@ The gap between these two ends is where `worklease` lives. The only prior art in
 go get github.com/aetomala/worklease
 ```
 
-Requires Go 1.26+. PostgreSQL backend requires PostgreSQL 12+.
+Requires Go 1.25+. PostgreSQL backend requires PostgreSQL 12+.
 
 ---
 
