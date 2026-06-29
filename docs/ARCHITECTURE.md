@@ -1245,7 +1245,7 @@ becomes available. This breaks clean pool shutdown. `pool.New` returns
 - `examples/observability` — stdlib-only `LeaseObserver` reference
 - ADR-0014, ADR-0015
 
-### v0.5 — Released (v0.5.0)
+### v0.5 — Released (v0.5.0, 2026-06-29)
 
 - Renewal goroutine bounded retry — exponential backoff plus additive jitter, bounded strictly by the lease window; `WithRenewalBackoff`, `ErrLeaseWindowExhausted` (via `context.Cause`), `RenewEvent.Attempt`; `StartRenewal` uses `context.WithCancelCause` (ADR-0013)
 - Global fencing sequence on both backends — Postgres `worklease_fencing_seq` and per-instance memory `atomic.Uint64`; tokens strictly increase across all work IDs and survive row deletion (ADR-0016 fencing component)
