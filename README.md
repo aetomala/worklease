@@ -405,51 +405,11 @@ v0.5.0 is the latest release line. The core public API (`Lease`, `Token`, option
 
 ## Examples
 
-### Subscription cancellation with crash recovery and fencing
+Runnable examples covering crash recovery, checkpoint resume, cluster leadership,
+partition processing, observability, and the renewal and acquire lifecycle.
+No infrastructure required — all examples run against the in-memory backend.
 
-Demonstrates the core worklease failure mode: a worker crashes mid-cancellation
-after billing has fired but before resources are deprovisioned. A successor worker
-reads the checkpoint and resumes without double-billing. A zombie fencing scenario
-shows `ErrFenced` rejecting a stale write with both fencing token values visible in
-the output.
-
-No infrastructure required — runs against the in-memory backend.
-
-```bash
-cd examples/subscription-cancellation
-go run .
-```
-
-### Cluster singleton scheduler with standby failover and fencing
-
-Demonstrates the `leader` package: one node acquires leadership and runs a periodic
-scheduler; a standby blocks with `WithWaitForLease` until the leader crashes and its
-lease expires; a third scenario shows how fencing propagates to the work function via
-context cancellation when a stalled leader is superseded.
-
-No infrastructure required — runs against the in-memory backend.
-
-```bash
-cd examples/cluster-singleton-scheduler
-go run .
-```
-
-### Partition processor with checkpoint resume and slot eviction
-
-Demonstrates the `pool` package: a pool acquires a fixed set of named partitions and
-processes them concurrently; `ActiveSlots` provides live observability of partition
-ownership; a second pool resumes from checkpointed offsets on clean handoff; a
-decommissioned partition exits via `PermanentError` while the rest of the pool
-continues running.
-
-No infrastructure required — runs against the in-memory backend.
-
-```bash
-cd examples/partition-processor
-go run .
-```
-
-Source: [`examples/`](examples/)
+See [`examples/`](examples/) for the full list with descriptions and run instructions.
 
 ---
 
