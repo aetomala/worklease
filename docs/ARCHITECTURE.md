@@ -205,6 +205,11 @@ The library owns fencing logic entirely. Callers cannot read or construct fencin
 directly — they receive a `Token` value and pass it back to operations. The library validates
 the token on every write. See [ADR-0002](adr/0002-token-inspectable-via-methods.md).
 
+Tokens are monotonic but not contiguous. Every `Acquire` attempt draws from the sequence
+regardless of outcome — including attempts that find the lease held and return `ErrLeaseHeld`.
+Gaps in the token sequence are expected and carry no operational meaning; callers must not
+assume consecutive token values.
+
 ### Checkpoint
 
 Progress state written atomically with lease renewal in a single backend operation. The
@@ -538,6 +543,12 @@ false — zero rows are updated, the statement returns no row, and the backend m
 a fresh token from the sequence, and `RETURNING` yields the token and expiry in the same
 statement. As of v0.5 this replaces the prior two-step `ExecContext` + read-back `SELECT`,
 closing the read-back race (R8/F4).
+
+**Sequence consumption on failed acquires**: `nextval('worklease_fencing_seq')` in the
+`VALUES` clause is evaluated before conflict resolution. An `Acquire` that returns
+`ErrLeaseHeld` (the `WHERE` clause is false — lease held, not expired) still consumes a
+sequence value. This is the mechanism behind fencing tokens being monotonic but not
+contiguous; see the Fencing Token section in Core Concepts.
 
 **Clock note**: `NOW()` is the PostgreSQL server's clock — not the worker's clock. Expiry
 decisions are made by the database, not by the client. This is intentional; see

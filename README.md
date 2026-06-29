@@ -68,7 +68,7 @@ These are intentional scope boundaries, not gaps.
 
 **Lease** — A time-limited claim on a named unit of work. Expires if not renewed. When it expires, another worker can acquire it.
 
-**Fencing token** — A monotonically incrementing integer issued on every acquisition. A worker's writes to the lease store are rejected if a higher token has been issued — preventing zombie workers from corrupting the checkpoint after their lease expires.
+**Fencing token** — A monotonically incrementing integer issued on every acquisition. A worker's writes to the lease store are rejected if a higher token has been issued — preventing zombie workers from corrupting the checkpoint after their lease expires. Tokens are monotonic but not contiguous — every `Acquire` attempt advances the underlying sequence, including attempts that return `ErrLeaseHeld`; gaps in the token sequence are expected and have no operational significance.
 
 **Checkpoint** — Progress state written atomically with lease renewal. If the worker is making progress, it proves liveness and saves state in one operation. The last checkpoint survives to the next owner. `Checkpoint` and `Renew` are distinct: `Checkpoint` writes state and extends the TTL atomically; `Renew` extends the TTL without updating state.
 
@@ -162,6 +162,33 @@ if state == nil {
     // First acquisition — start from the beginning.
     progress = OnboardingProgress{}
 }
+```
+
+### Managing renewal directly
+
+`StartRenewal` starts a managed renewal goroutine and returns a derived context and a stop
+function. `worker.Runner` and `leader.Elect` handle this lifecycle automatically; use
+`StartRenewal` directly only when you need fine-grained control.
+
+Two requirements apply when calling `StartRenewal` directly:
+
+1. Call `stopRenewal()` **before** `Release` — the goroutine must exit before ownership is
+   surrendered. Register `defer stopRenewal()` immediately as a panic-safety net, then call it
+   explicitly before `Release` (the defer becomes a no-op on the clean path).
+2. Pass the **original** `ctx` to `Release`, not `renewCtx` — `renewCtx` may already be
+   cancelled (by fencing or window exhaustion) when `Release` is called; using it causes
+   `Release` to fail with a context error.
+
+```go
+renewCtx, stopRenewal := lease.StartRenewal(ctx, token)
+defer stopRenewal() // panic-safety net
+
+if err := doWork(renewCtx, ...); err != nil {
+    return err // stopRenewal fires via defer; do not Release if fenced
+}
+
+stopRenewal()             // explicit stop before Release
+lease.Release(ctx, token) // use original ctx, not renewCtx
 ```
 
 ---
