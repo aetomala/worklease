@@ -97,16 +97,6 @@ var _ = Describe("Backend (memory)", func() {
 			Expect(failures).To(Equal(workers - 1))
 		})
 
-		It("global sequence → two different work IDs on the same instance get strictly increasing fencing tokens", func() {
-			rec1, err := b.Acquire(ctx, "work-a", "holder-1", 30*time.Second)
-			Expect(err).NotTo(HaveOccurred())
-			rec2, err := b.Acquire(ctx, "work-b", "holder-1", 30*time.Second)
-			Expect(err).NotTo(HaveOccurred())
-			// The per-instance sequence is shared across all work IDs, so a later
-			// acquire of a distinct work ID yields a strictly greater token.
-			Expect(rec2.FencingToken).To(BeNumerically(">", rec1.FencingToken))
-		})
-
 		It("same work ID reacquired after expiry → strictly greater fencing token from the per-instance sequence", func() {
 			rec1, err := b.Acquire(ctx, "w1", "holder-a", -1*time.Second)
 			Expect(err).NotTo(HaveOccurred())

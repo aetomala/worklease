@@ -38,6 +38,7 @@ This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 
 - Added `build-examples` CI job — iterates `examples/*/` as independent Go modules and runs `go build ./...` in each; a broken example now fails CI.
 - Updated `Prerequisites` line in all five example READMEs from `Go 1.26+` to `Go 1.25+`, consistent with the library floor and `go.mod` directives.
+- Removed duplicate cross-work-ID fencing-token monotonicity spec from the memory backend test suite — the identical property is asserted by the shared conformance suite (ADR-0015).
 
 ---
 
