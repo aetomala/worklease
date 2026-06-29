@@ -12,6 +12,7 @@ This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 ### Breaking
 
 - `Acquire` with `WithWaitForLease` now returns an error wrapping `ctx.Err()` — `fmt.Errorf("worklease: acquire cancelled: %w", ctx.Err())` — when the wait loop is cancelled or its deadline is exceeded, instead of the bare `ErrLeaseHeld` sentinel. The returned error satisfies `errors.Is(err, context.Canceled)` / `errors.Is(err, context.DeadlineExceeded)` and no longer satisfies `errors.Is(err, ErrLeaseHeld)`. This is a runtime break (not compile-detectable); the synchronous no-wait path is unchanged. See `UPGRADING.md`.
+- **Postgres schema migration required** — databases created under v0.4 have `fencing_token BIGINT NOT NULL DEFAULT 1` and no `worklease_fencing_seq` sequence. Deploying v0.5 against a v0.4 schema causes every `Acquire` to fail at runtime with `pq: relation "worklease_fencing_seq" does not exist`. Apply the idempotent migration before deploying v0.5. See `UPGRADING.md`.
 
 ### Added
 
