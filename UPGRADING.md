@@ -1,5 +1,88 @@
 # Upgrading worklease
 
+## v0.4.x → v0.5.0
+
+### Breaking Changes
+
+- **`Acquire` with `WithWaitForLease` returns `ctx.Err()` on cancellation/deadline,
+  not `ErrLeaseHeld`.** Previously, when the wait loop observed `ctx.Done()` it
+  returned the bare `ErrLeaseHeld` sentinel. It now returns an error wrapping
+  `ctx.Err()` — `fmt.Errorf("worklease: acquire cancelled: %w", ctx.Err())` — which
+  satisfies `errors.Is(err, context.Canceled)` or `errors.Is(err, context.DeadlineExceeded)`
+  but **no longer** satisfies `errors.Is(err, worklease.ErrLeaseHeld)`.
+
+  This is a **runtime** break — it is not caught by the compiler. Callers who used
+  `WithWaitForLease` and treated `errors.Is(err, ErrLeaseHeld)` as their sole
+  loop-termination or timeout signal must now also check `context.Canceled` and
+  `context.DeadlineExceeded`:
+
+  ```go
+  _, err := lease.Acquire(ctx, workID, worklease.WithWaitForLease())
+  switch {
+  case err == nil:
+      // acquired
+  case errors.Is(err, context.DeadlineExceeded), errors.Is(err, context.Canceled):
+      // wait was cancelled or timed out — previously surfaced as ErrLeaseHeld
+  default:
+      // other backend error
+  }
+  ```
+
+  The synchronous, no-wait path (without `WithWaitForLease`) is unchanged — it still
+  surfaces the backend `ErrLeaseHeld` directly.
+
+### Breaking — Schema Migration Required
+
+v0.5 sources fencing tokens from a global `worklease_fencing_seq` SEQUENCE. Both
+`Acquire` paths call `nextval('worklease_fencing_seq')` directly — there is no
+fallback. A database created under v0.4 has `fencing_token BIGINT NOT NULL DEFAULT 1`
+and no sequence. The first `Acquire` after deploying v0.5 fails at runtime with:
+
+```
+pq: relation "worklease_fencing_seq" does not exist
+```
+
+Apply the following migration **before** deploying v0.5. All four statements are
+idempotent and safe to run against a live v0.4 database:
+
+```sql
+CREATE SEQUENCE IF NOT EXISTS worklease_fencing_seq;
+SELECT setval('worklease_fencing_seq', (SELECT COALESCE(MAX(fencing_token),0)+1 FROM worklease_leases));
+ALTER TABLE worklease_leases ALTER COLUMN fencing_token SET DEFAULT nextval('worklease_fencing_seq');
+CREATE INDEX IF NOT EXISTS idx_worklease_leases_updated_at ON worklease_leases (updated_at);
+```
+
+The `setval` step seeds the sequence above the highest token already in the table.
+Without it the sequence starts at 1 and can re-issue token values ≤ existing per-row
+tokens, silently defeating fencing for any rows that were active before the migration.
+
+**Verify the migration:** after applying the SQL, run one `Acquire` for any work ID
+and confirm the returned fencing token is strictly greater than the value returned by
+`SELECT MAX(fencing_token) FROM worklease_leases` taken immediately before the
+migration. If the table was empty before the migration, the first token issued will be
+1 — this is correct.
+
+### Behavioral Changes in v0.5.0
+
+- **The renewal goroutine now retries transient errors instead of giving up.**
+  Previously, a single non-fencing error from `Renew` cancelled the renewal context
+  and stopped renewal. The goroutine now retries with exponential backoff (plus
+  additive jitter), bounded strictly by the lease window: it stops retrying once
+  `token.ExpiresAt()` is reached and cancels the renewal context with cause
+  `ErrLeaseWindowExhausted` (inspect via `context.Cause(renewCtx)`). A fencing error
+  is still never retried — it cancels immediately with cause `ErrFenced`. Configure
+  the policy with `WithRenewalBackoff(initial, max, jitter)`; the defaults are
+  100ms / 5s / 0.20.
+
+### New in v0.5.0
+
+- `worklease.WithRenewalBackoff(initial, max time.Duration, jitter float64)` — configures
+  the renewal goroutine's bounded-retry backoff policy.
+- `worklease.ErrLeaseWindowExhausted` — the cancel cause set on the renewal context when
+  the lease window closes before a renewal succeeds; inspect via `context.Cause(renewCtx)`.
+- `RenewEvent.Attempt` — the 1-based attempt counter delivered to `OnRenew`, incremented on
+  each retry within the renewal goroutine. Direct `Renew` calls always report `Attempt: 1`.
+
 ## v0.3.x → v0.4.0
 
 ### Breaking Changes

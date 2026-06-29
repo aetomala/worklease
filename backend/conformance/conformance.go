@@ -76,6 +76,14 @@ func RunSuite(newBackend func() backend.Backend) func() {
 					Expect(rec2.FencingToken).To(BeNumerically(">", rec1.FencingToken))
 				})
 
+				It("issues globally increasing fencing tokens across distinct work IDs on the same backend", func() {
+					r1, err := b.Acquire(ctx, "work-a", "holder-1", time.Minute)
+					Expect(err).NotTo(HaveOccurred())
+					r2, err := b.Acquire(ctx, "work-b", "holder-1", time.Minute)
+					Expect(err).NotTo(HaveOccurred())
+					Expect(r2.FencingToken).To(BeNumerically(">", r1.FencingToken))
+				})
+
 				It("preserves checkpoint bytes from the expired record on reacquisition", func() {
 					rec1, err := b.Acquire(ctx, "w1", "h", expiredTTL)
 					Expect(err).NotTo(HaveOccurred())

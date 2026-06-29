@@ -106,3 +106,21 @@ A stdlib-only `LeaseObserver` that produces real metrics — counts, latency, ho
 cd observability
 go run .
 ```
+
+---
+
+### [Renewal Backoff](renewal-backoff/)
+
+A focused example demonstrating the v0.5 additions to the renewal and acquire lifecycle. Best for:
+- Understanding the `WithWaitForLease` context cancellation contract — a deadline-exceeded wait now returns `context.DeadlineExceeded`, not `ErrLeaseHeld`
+- Understanding bounded renewal retry with `WithRenewalBackoff` and how to detect `ErrLeaseWindowExhausted` via `context.Cause(renewCtx)`
+
+**Features**:
+- Scenario 1: `Acquire` + `WithWaitForLease` with a deadline context — `errors.Is(err, context.DeadlineExceeded)` demonstrates the v0.5 error contract
+- Scenario 2: `StartRenewal` + `WithRenewalBackoff` with a short TTL — `context.Cause(renewCtx) == ErrLeaseWindowExhausted` when the lease window closes before renewal can succeed
+
+**Run**:
+```bash
+cd renewal-backoff
+go run .
+```

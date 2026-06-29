@@ -68,7 +68,7 @@ These are intentional scope boundaries, not gaps.
 
 **Lease** — A time-limited claim on a named unit of work. Expires if not renewed. When it expires, another worker can acquire it.
 
-**Fencing token** — A monotonically incrementing integer issued on every acquisition. A worker's writes to the lease store are rejected if a higher token has been issued — preventing zombie workers from corrupting the checkpoint after their lease expires.
+**Fencing token** — A monotonically incrementing integer issued on every acquisition. A worker's writes to the lease store are rejected if a higher token has been issued — preventing zombie workers from corrupting the checkpoint after their lease expires. Tokens are monotonic but not contiguous — every `Acquire` attempt advances the underlying sequence, including attempts that return `ErrLeaseHeld`; gaps in the token sequence are expected and have no operational significance.
 
 **Checkpoint** — Progress state written atomically with lease renewal. If the worker is making progress, it proves liveness and saves state in one operation. The last checkpoint survives to the next owner. `Checkpoint` and `Renew` are distinct: `Checkpoint` writes state and extends the TTL atomically; `Renew` extends the TTL without updating state.
 
@@ -164,6 +164,33 @@ if state == nil {
 }
 ```
 
+### Managing renewal directly
+
+`StartRenewal` starts a managed renewal goroutine and returns a derived context and a stop
+function. `worker.Runner` and `leader.Elect` handle this lifecycle automatically; use
+`StartRenewal` directly only when you need fine-grained control.
+
+Two requirements apply when calling `StartRenewal` directly:
+
+1. Call `stopRenewal()` **before** `Release` — the goroutine must exit before ownership is
+   surrendered. Register `defer stopRenewal()` immediately as a panic-safety net, then call it
+   explicitly before `Release` (the defer becomes a no-op on the clean path).
+2. Pass the **original** `ctx` to `Release`, not `renewCtx` — `renewCtx` may already be
+   cancelled (by fencing or window exhaustion) when `Release` is called; using it causes
+   `Release` to fail with a context error.
+
+```go
+renewCtx, stopRenewal := lease.StartRenewal(ctx, token)
+defer stopRenewal() // panic-safety net
+
+if err := doWork(renewCtx, ...); err != nil {
+    return err // stopRenewal fires via defer; do not Release if fenced
+}
+
+stopRenewal()             // explicit stop before Release
+lease.Release(ctx, token) // use original ctx, not renewCtx
+```
+
 ---
 
 ## Error Reference
@@ -179,6 +206,8 @@ if state == nil {
 ---
 
 ## Upgrading
+
+`v0.5.0` changes `Acquire` with `WithWaitForLease`: on context cancellation or deadline while waiting it now returns an error wrapping `ctx.Err()` (satisfying `errors.Is(err, context.Canceled)` / `context.DeadlineExceeded`) instead of bare `ErrLeaseHeld`. This is a runtime break for callers that treated `ErrLeaseHeld` as their sole wait-loop termination signal; the synchronous no-wait path is unchanged. The renewal goroutine also now retries transient errors with backoff bounded by the lease window rather than stopping on the first error (configure with `WithRenewalBackoff`).
 
 `v0.4.0` redesigns `LeaseObserver` from flat parameters to event structs (adds `OnReadCheckpoint`, fires `OnFenced` on the Release path, adds `Duration`), and `pool.New` now returns distinct config sentinels (`ErrNilLease` / `ErrEmptyWorkIDs` / `ErrWithWaitForLeaseProhibited`, all wrapping `ErrConfigInvalid`) while `pool.Pool.Run` returns `ErrAllSlotsDead` when every slot dies permanently.
 
@@ -271,19 +300,25 @@ lease, _ := worklease.New(backend, worklease.Config{
 })
 ```
 
-Run the migration before first use:
+Run the migration before first use (canonical source: [`backend/postgres/schema.sql`](backend/postgres/schema.sql)):
 
 ```sql
-CREATE TABLE worklease_leases (
+-- canonical: backend/postgres/schema.sql
+CREATE SEQUENCE IF NOT EXISTS worklease_fencing_seq;
+
+CREATE TABLE IF NOT EXISTS worklease_leases (
     work_id         TEXT PRIMARY KEY,
-    holder_id       TEXT NOT NULL,
-    fencing_token   BIGINT NOT NULL DEFAULT 1,
+    holder_id       TEXT        NOT NULL,
+    fencing_token   BIGINT      NOT NULL DEFAULT nextval('worklease_fencing_seq'),
     expires_at      TIMESTAMPTZ NOT NULL,
     checkpoint      BYTEA,
-    clean_handoff   BOOLEAN NOT NULL DEFAULT FALSE,
+    clean_handoff   BOOLEAN     NOT NULL DEFAULT FALSE,
     acquired_at     TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     updated_at      TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
+
+CREATE INDEX IF NOT EXISTS idx_worklease_leases_updated_at
+    ON worklease_leases (updated_at);
 ```
 
 The atomic checkpoint operation is a single `UPDATE ... WHERE fencing_token = $n`. Zero rows updated means the token is stale. There is no Lua script, no optimistic retry loop, no distributed clock dependency.
@@ -340,13 +375,13 @@ The gap between these two ends is where `worklease` lives. The only prior art in
 go get github.com/aetomala/worklease
 ```
 
-Requires Go 1.26+. PostgreSQL backend requires PostgreSQL 12+.
+Requires Go 1.25+. PostgreSQL backend requires PostgreSQL 12+.
 
 ---
 
 ## Status
 
-v0.4.0 is the latest tagged release. The core public API (`Lease`, `Token`, options, sentinels) is stable.
+v0.5.0 is the latest release line. The core public API (`Lease`, `Token`, options, sentinels) is stable. v0.5 adds bounded renewal retry (`WithRenewalBackoff`, `ErrLeaseWindowExhausted`, `RenewEvent.Attempt`), a global fencing sequence on both backends, a single-statement Postgres `Acquire` with `RETURNING`, and ctx-aware `Acquire` cancellation under `WithWaitForLease` (a runtime break — see `UPGRADING.md`).
 
 ---
 
@@ -358,10 +393,10 @@ v0.4.0 is the latest tagged release. The core public API (`Lease`, `Token`, opti
 - **v0.2.0** — `worker.Runner`, `checkpoint.Codec`, `LeaseObserver`, `memory.Clock`, examples
 - **v0.3.0** — `leader.Elect`, `pool.Pool`, `HasWaitForLease`, `checkpoint.Codec` method rename (breaking — see `UPGRADING.md`)
 - **v0.4.0** — `LeaseObserver` event-struct redesign (breaking), `backend/conformance` suite, `pool.Observer`/`Permanent`/`ErrAllSlotsDead`, `leader` lifecycle callbacks, memory slice-ownership fix
+- **v0.5.0** — bounded renewal retry (`WithRenewalBackoff`, `ErrLeaseWindowExhausted`, `RenewEvent.Attempt`); global fencing sequence on both backends; single-statement `Acquire` with `RETURNING`; ctx-aware `Acquire` cancellation under `WithWaitForLease` (breaking — see `UPGRADING.md`)
 
 ### Future
 
-- **v0.5** — renewal retry policy with backoff; single-statement `Acquire` with `RETURNING` + global fencing sequence
 - **v0.6** — caller-governed row lifecycle (`Forget` / `Vacuum.Sweep`)
 - Redis backend, etcd backend (unscheduled, post-1.0)
 - `Token` test constructor — unblocks table-driven tests that construct tokens directly
@@ -370,51 +405,11 @@ v0.4.0 is the latest tagged release. The core public API (`Lease`, `Token`, opti
 
 ## Examples
 
-### Subscription cancellation with crash recovery and fencing
+Runnable examples covering crash recovery, checkpoint resume, cluster leadership,
+partition processing, observability, and the renewal and acquire lifecycle.
+No infrastructure required — all examples run against the in-memory backend.
 
-Demonstrates the core worklease failure mode: a worker crashes mid-cancellation
-after billing has fired but before resources are deprovisioned. A successor worker
-reads the checkpoint and resumes without double-billing. A zombie fencing scenario
-shows `ErrFenced` rejecting a stale write with both fencing token values visible in
-the output.
-
-No infrastructure required — runs against the in-memory backend.
-
-```bash
-cd examples/subscription-cancellation
-go run .
-```
-
-### Cluster singleton scheduler with standby failover and fencing
-
-Demonstrates the `leader` package: one node acquires leadership and runs a periodic
-scheduler; a standby blocks with `WithWaitForLease` until the leader crashes and its
-lease expires; a third scenario shows how fencing propagates to the work function via
-context cancellation when a stalled leader is superseded.
-
-No infrastructure required — runs against the in-memory backend.
-
-```bash
-cd examples/cluster-singleton-scheduler
-go run .
-```
-
-### Partition processor with checkpoint resume and slot eviction
-
-Demonstrates the `pool` package: a pool acquires a fixed set of named partitions and
-processes them concurrently; `ActiveSlots` provides live observability of partition
-ownership; a second pool resumes from checkpointed offsets on clean handoff; a
-decommissioned partition exits via `PermanentError` while the rest of the pool
-continues running.
-
-No infrastructure required — runs against the in-memory backend.
-
-```bash
-cd examples/partition-processor
-go run .
-```
-
-Source: [`examples/`](examples/)
+See [`examples/`](examples/) for the full list with descriptions and run instructions.
 
 ---
 

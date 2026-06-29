@@ -16,20 +16,16 @@ import (
 const (
 	queryAcquire = `
 INSERT INTO worklease_leases (work_id, holder_id, fencing_token, expires_at, checkpoint, clean_handoff)
-VALUES ($1, $2, 1, NOW() + $3, NULL, FALSE)
+VALUES ($1, $2, nextval('worklease_fencing_seq'), NOW() + $3, NULL, FALSE)
 ON CONFLICT (work_id) DO UPDATE
 SET holder_id     = EXCLUDED.holder_id,
-    fencing_token = worklease_leases.fencing_token + 1,
+    fencing_token = nextval('worklease_fencing_seq'),
     expires_at    = EXCLUDED.expires_at,
     checkpoint    = worklease_leases.checkpoint,
     clean_handoff = worklease_leases.clean_handoff,
     updated_at    = NOW()
-WHERE worklease_leases.expires_at < NOW()`
-
-	queryAcquireRead = `
-SELECT fencing_token, expires_at
-FROM worklease_leases
-WHERE work_id = $1`
+WHERE worklease_leases.expires_at < NOW()
+RETURNING fencing_token, expires_at`
 
 	queryCheckpoint = `
 UPDATE worklease_leases
@@ -95,32 +91,20 @@ func New(db *sql.DB) (backend.Backend, error) {
 // if a lease already exists for this workID. Returns a LeaseRecord with the newly
 // acquired lease details on success.
 func (p *postgresBackend) Acquire(ctx context.Context, workID, holderID string, ttl time.Duration) (backend.LeaseRecord, error) {
-	// ===== STEP 1: Execute INSERT/UPDATE =====
+	// ===== STEP 1: Execute INSERT/UPDATE with RETURNING =====
 	ttlStr := fmt.Sprintf("%.6f seconds", ttl.Seconds())
-	result, err := p.db.ExecContext(ctx, queryAcquire, workID, holderID, ttlStr)
+	var fencingToken uint64
+	var expiresAt time.Time
+	err := p.db.QueryRowContext(ctx, queryAcquire, workID, holderID, ttlStr).Scan(&fencingToken, &expiresAt)
+	if errors.Is(err, sql.ErrNoRows) {
+		// No row returned — the lease is held by another, unexpired holder.
+		return backend.LeaseRecord{}, worklease.ErrLeaseHeld
+	}
 	if err != nil {
 		return backend.LeaseRecord{}, fmt.Errorf("postgres: Acquire: exec failed: %w", err)
 	}
 
-	// ===== STEP 2: Check Rows Affected =====
-	// If no rows were affected, the lease is held by another (non-expired) holder
-	n, err := result.RowsAffected()
-	if err != nil {
-		return backend.LeaseRecord{}, fmt.Errorf("postgres: Acquire: %w", err)
-	}
-	if n == 0 {
-		return backend.LeaseRecord{}, worklease.ErrLeaseHeld
-	}
-
-	// ===== STEP 3: Read Back the Newly Acquired Lease =====
-	var fencingToken uint64
-	var expiresAt time.Time
-	err = p.db.QueryRowContext(ctx, queryAcquireRead, workID).Scan(&fencingToken, &expiresAt)
-	if err != nil {
-		return backend.LeaseRecord{}, fmt.Errorf("postgres: Acquire: read failed: %w", err)
-	}
-
-	// ===== STEP 4: Return LeaseRecord =====
+	// ===== STEP 2: Return LeaseRecord =====
 	return backend.LeaseRecord{
 		WorkID:       workID,
 		HolderID:     holderID,

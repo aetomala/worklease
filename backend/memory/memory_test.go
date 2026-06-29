@@ -96,6 +96,27 @@ var _ = Describe("Backend (memory)", func() {
 			Expect(successes).To(Equal(1))
 			Expect(failures).To(Equal(workers - 1))
 		})
+
+		It("same work ID reacquired after expiry → strictly greater fencing token from the per-instance sequence", func() {
+			rec1, err := b.Acquire(ctx, "w1", "holder-a", -1*time.Second)
+			Expect(err).NotTo(HaveOccurred())
+			rec2, err := b.Acquire(ctx, "w1", "holder-b", 30*time.Second)
+			Expect(err).NotTo(HaveOccurred())
+			Expect(rec2.FencingToken).To(BeNumerically(">", rec1.FencingToken))
+		})
+
+		It("per-instance counter → two independent New() instances issue from independent counters", func() {
+			b1 := memory.New()
+			b2 := memory.New()
+			r1, err := b1.Acquire(ctx, "w1", "holder-1", 30*time.Second)
+			Expect(err).NotTo(HaveOccurred())
+			r2, err := b2.Acquire(ctx, "w1", "holder-1", 30*time.Second)
+			Expect(err).NotTo(HaveOccurred())
+			// Each instance issues a positive token from its own counter; no ordering
+			// relationship is required across independent instances.
+			Expect(r1.FencingToken).To(BeNumerically(">", 0))
+			Expect(r2.FencingToken).To(BeNumerically(">", 0))
+		})
 	})
 
 	// ===== PHASE 2: Checkpoint =====

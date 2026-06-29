@@ -1,4 +1,4 @@
-module github.com/aetomala/worklease/examples/subscription-cancellation
+module github.com/aetomala/worklease/examples/renewal-backoff
 
 go 1.25.0
 

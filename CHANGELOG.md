@@ -7,7 +7,42 @@ This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 
 ---
 
-## [Unreleased]
+## [v0.5.0] — 2026-06-29
+
+### Breaking
+
+- `Acquire` with `WithWaitForLease` now returns an error wrapping `ctx.Err()` — `fmt.Errorf("worklease: acquire cancelled: %w", ctx.Err())` — when the wait loop is cancelled or its deadline is exceeded, instead of the bare `ErrLeaseHeld` sentinel. The returned error satisfies `errors.Is(err, context.Canceled)` / `errors.Is(err, context.DeadlineExceeded)` and no longer satisfies `errors.Is(err, ErrLeaseHeld)`. This is a runtime break (not compile-detectable); the synchronous no-wait path is unchanged. See `UPGRADING.md`.
+- **Postgres schema migration required** — databases created under v0.4 have `fencing_token BIGINT NOT NULL DEFAULT 1` and no `worklease_fencing_seq` sequence. Deploying v0.5 against a v0.4 schema causes every `Acquire` to fail at runtime with `pq: relation "worklease_fencing_seq" does not exist`. Apply the idempotent migration before deploying v0.5. See `UPGRADING.md`.
+
+### Added
+
+- `WithRenewalBackoff(initial, max time.Duration, jitter float64)` — configures the renewal goroutine's bounded-retry backoff policy (defaults 100ms / 5s / 0.20, clamped).
+- `ErrLeaseWindowExhausted` — set as the cancel cause of the renewal context when the lease window closes before a renewal succeeds; inspect via `context.Cause(renewCtx)`.
+- `RenewEvent.Attempt` — 1-based attempt counter delivered to `OnRenew`, incremented on each retry within the renewal goroutine; direct `Renew` calls always report `Attempt: 1`.
+- Global fencing sequence — fencing tokens now come from a single monotonic source per backend instance: a Postgres `worklease_fencing_seq` SEQUENCE and a per-instance `atomic.Uint64` counter in the memory backend. Tokens are strictly increasing across all work IDs and survive row deletion (ADR-0016). The conformance suite asserts global monotonicity across distinct work IDs on both backends.
+- ADR-0013 (renewal goroutine retry policy) and ADR-0016 (row lifecycle: global fencing sequence) added; ADR-0004 and ADR-0005 amended with v0.5 sections.
+
+### Changed
+
+- The renewal goroutine now retries a non-fencing `Renew` error with exponential backoff plus additive jitter, bounded strictly by the lease window, instead of cancelling on the first error. When the window is exhausted it cancels the renewal context with cause `ErrLeaseWindowExhausted`; a fencing error still cancels immediately with cause `ErrFenced` and is never retried.
+- `StartRenewal` now derives its renewal context via `context.WithCancelCause`; the fencing and window-exhausted causes surface through `context.Cause(renewCtx)`. A normal `stopRenewal()` leaves the context uncancelled (`context.Cause` is `nil`).
+- Postgres `Acquire` is now a single `INSERT … ON CONFLICT … RETURNING` statement sourcing the token from `nextval('worklease_fencing_seq')`, replacing the prior two-step `ExecContext` + read-back `SELECT` and closing the read-back race (R8/F4). The `queryAcquireRead` query was removed; zero returned rows (`sql.ErrNoRows`) map to `ErrLeaseHeld`.
+
+### Documentation
+
+- Created ADR-0013 and ADR-0016; amended ADR-0004 (renewal bounded retry) and ADR-0005 (acquire ctx.Err() propagation); synced `docs/ARCHITECTURE.md` and `README.md` to the v0.5 surface (bounded renewal retry, global fencing sequence, single-statement Postgres acquire, ctx-aware acquire cancellation).
+- README quickstart DDL synced to `backend/postgres/schema.sql` — adds the v0.5 `worklease_fencing_seq` sequence, `nextval` default, and `updated_at` index; adds a canonical-source pointer so README and `schema.sql` cannot drift independently.
+- Corrected Go version floor in `README.md` and all five example `go.mod` files from `1.26` to `1.25`, consistent with the library `go.mod` floor and the README badge.
+
+### Chore
+
+- Added `build-examples` CI job — iterates `examples/*/` as independent Go modules and runs `go build ./...` in each; a broken example now fails CI.
+- Updated `Prerequisites` line in all five example READMEs from `Go 1.26+` to `Go 1.25+`, consistent with the library floor and `go.mod` directives.
+- Removed duplicate cross-work-ID fencing-token monotonicity spec from the memory backend test suite — the identical property is asserted by the shared conformance suite (ADR-0015).
+- README and ARCHITECTURE: documented that fencing tokens are monotonic but not contiguous — every `Acquire` attempt, including those that return `ErrLeaseHeld`, advances the underlying sequence; gaps are expected and carry no operational meaning.
+- README: added `StartRenewal` direct-usage prose — call `stopRenewal()` before `Release`, and pass the original `ctx` (not `renewCtx`) to `Release`.
+- Added `examples/renewal-backoff` — two-scenario example demonstrating the `WithWaitForLease` context-cancellation contract (`errors.Is(err, context.DeadlineExceeded)`) and `WithRenewalBackoff` + `ErrLeaseWindowExhausted` via `context.Cause(renewCtx)`.
+- Observability example: `OnRenew` now tracks `e.Attempt` via a `renewRetries` counter incremented when `Attempt > 1`, surfacing the v0.5 renewal retry counter.
 
 ---
 
