@@ -71,6 +71,13 @@ type Lease interface {
 	// and terminates the renewal loop. The renewal context is cancelled if the underlying
 	// context is cancelled or if the lease is lost.
 	StartRenewal(ctx context.Context, token Token, opts ...RenewalOption) (renewCtx context.Context, stopRenewal func())
+
+	// Forget permanently deletes the lease record for token's workID. Returns
+	// ErrFenced if the fencing token no longer matches the stored lease, or if no
+	// record exists for token's workID. Unlike Release, the record is not left
+	// behind for a future ReadCheckpoint — it is gone. Use only when a work ID is
+	// permanently retired. Forget does not invoke any LeaseObserver method.
+	Forget(ctx context.Context, token Token) error
 }
 
 // Token represents a currently held lease. It is returned by Acquire and Renew

@@ -159,3 +159,22 @@ func (c *leaseClient) ReadCheckpoint(ctx context.Context, token Token) ([]byte, 
 	c.obs.OnReadCheckpoint(ctx, ReadCheckpointEvent{Token: token, Duration: dur, CleanHandoff: cleanHandoff, Size: len(state), Err: err})
 	return state, cleanHandoff, err
 }
+
+// Forget permanently deletes the lease record for token's workID. Returns
+// ErrFenced if the fencing token no longer matches the stored lease, or if no
+// record exists for token's workID. Forget does not invoke any LeaseObserver
+// method — this is a deliberate v0.6 scope boundary, not an oversight.
+func (c *leaseClient) Forget(ctx context.Context, token Token) error {
+	record := toRecord(token)
+	err := c.b.Forget(ctx, record)
+
+	if errors.Is(err, ErrFenced) {
+		return fmt.Errorf("worklease: Forget: workID=%q holderID=%q: %w", token.WorkID(), token.HolderID(), ErrFenced)
+	}
+
+	if err != nil {
+		return fmt.Errorf("worklease: Forget: %w", err)
+	}
+
+	return nil
+}
