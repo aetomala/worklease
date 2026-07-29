@@ -394,10 +394,9 @@ v0.5.0 is the latest release line. The core public API (`Lease`, `Token`, option
 - **v0.3.0** — `leader.Elect`, `pool.Pool`, `HasWaitForLease`, `checkpoint.Codec` method rename (breaking — see `UPGRADING.md`)
 - **v0.4.0** — `LeaseObserver` event-struct redesign (breaking), `backend/conformance` suite, `pool.Observer`/`Permanent`/`ErrAllSlotsDead`, `leader` lifecycle callbacks, memory slice-ownership fix
 - **v0.5.0** — bounded renewal retry (`WithRenewalBackoff`, `ErrLeaseWindowExhausted`, `RenewEvent.Attempt`); global fencing sequence on both backends; single-statement `Acquire` with `RETURNING`; ctx-aware `Acquire` cancellation under `WithWaitForLease` (breaking — see `UPGRADING.md`)
+- **v0.6.0** — caller-governed row lifecycle: `Lease.Forget`, `worklease.Vacuum.Sweep` (breaking — new `Backend`/`Lease` interface methods for custom implementations; see `UPGRADING.md`)
 
 ### Future
-
-- **v0.6** — caller-governed row lifecycle (`Forget` / `Vacuum.Sweep`)
 - Redis backend, etcd backend (unscheduled, post-1.0)
 - `Token` test constructor — unblocks table-driven tests that construct tokens directly
 
