@@ -254,6 +254,80 @@ func RunSuite(newBackend func() backend.Backend) func() {
 					Expect(got).To(Equal([]byte("abc")))
 				})
 			})
+
+			Context("Forget", func() {
+				It("permanently deletes the row so a subsequent Acquire issues a strictly greater fencing token", func() {
+					rec, err := b.Acquire(ctx, "forget-1", "h", normalTTL)
+					Expect(err).NotTo(HaveOccurred())
+
+					Expect(b.Forget(ctx, rec)).To(Succeed())
+
+					rec2, err := b.Acquire(ctx, "forget-1", "h", normalTTL)
+					Expect(err).NotTo(HaveOccurred())
+					Expect(rec2.FencingToken).To(BeNumerically(">", rec.FencingToken))
+				})
+
+				It("returns ErrFenced on a stale fencing token and does not delete the row", func() {
+					rec, err := b.Acquire(ctx, "forget-2", "h", normalTTL)
+					Expect(err).NotTo(HaveOccurred())
+
+					Expect(b.Forget(ctx, stale(rec))).To(MatchError(worklease.ErrFenced))
+
+					Expect(b.Checkpoint(ctx, rec, []byte("still here"), normalTTL)).To(Succeed())
+				})
+
+				It("returns ErrFenced when no record exists for the work ID", func() {
+					Expect(b.Forget(ctx, neverAcquired)).To(MatchError(worklease.ErrFenced))
+				})
+			})
+
+			Context("Vacuum.Sweep (via Backend.Sweep)", func() {
+				It("deletes a cleanly-released row once Retention has elapsed and returns a count of at least 1", func() {
+					rec, err := b.Acquire(ctx, "sweep-1", "h", normalTTL)
+					Expect(err).NotTo(HaveOccurred())
+					Expect(b.Release(ctx, rec)).To(Succeed())
+
+					n, err := b.Sweep(ctx, backend.SweepOptions{Retention: time.Nanosecond, IncludeCrashed: false})
+					Expect(err).NotTo(HaveOccurred())
+					Expect(n).To(BeNumerically(">=", 1))
+
+					rec2, err := b.Acquire(ctx, "sweep-1", "h", normalTTL)
+					Expect(err).NotTo(HaveOccurred())
+					Expect(rec2.FencingToken).To(BeNumerically(">", rec.FencingToken))
+				})
+
+				It("does not delete a row still within the retention window", func() {
+					rec, err := b.Acquire(ctx, "sweep-2", "h", normalTTL)
+					Expect(err).NotTo(HaveOccurred())
+					Expect(b.Release(ctx, rec)).To(Succeed())
+
+					n, err := b.Sweep(ctx, backend.SweepOptions{Retention: time.Hour, IncludeCrashed: false})
+					Expect(err).NotTo(HaveOccurred())
+					Expect(n).To(BeZero())
+				})
+
+				It("does not delete a crashed (non-clean-handoff) row unless IncludeCrashed is true", func() {
+					_, err := b.Acquire(ctx, "sweep-3", "h", expiredTTL)
+					Expect(err).NotTo(HaveOccurred())
+
+					n, err := b.Sweep(ctx, backend.SweepOptions{Retention: time.Nanosecond, IncludeCrashed: false})
+					Expect(err).NotTo(HaveOccurred())
+					Expect(n).To(BeZero())
+
+					n, err = b.Sweep(ctx, backend.SweepOptions{Retention: time.Nanosecond, IncludeCrashed: true})
+					Expect(err).NotTo(HaveOccurred())
+					Expect(n).To(BeNumerically(">=", 1))
+				})
+
+				It("does not delete a row that is currently held (unexpired), regardless of IncludeCrashed", func() {
+					_, err := b.Acquire(ctx, "sweep-4", "h", normalTTL)
+					Expect(err).NotTo(HaveOccurred())
+
+					n, err := b.Sweep(ctx, backend.SweepOptions{Retention: time.Nanosecond, IncludeCrashed: true})
+					Expect(err).NotTo(HaveOccurred())
+					Expect(n).To(BeZero())
+				})
+			})
 		})
 	}
 }

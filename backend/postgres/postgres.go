@@ -68,6 +68,18 @@ WHERE work_id       = $1
 SELECT fencing_token, checkpoint, clean_handoff
 FROM worklease_leases
 WHERE work_id = $1`
+
+	queryForget = `
+DELETE FROM worklease_leases
+WHERE work_id       = $1
+  AND holder_id     = $2
+  AND fencing_token = $3`
+
+	queryVacuumSweep = `
+DELETE FROM worklease_leases
+WHERE updated_at < NOW() - $1::interval
+  AND expires_at < NOW()
+  AND ($2 OR clean_handoff = TRUE)`
 )
 
 // postgresBackend implements the Backend interface using PostgreSQL.
@@ -211,4 +223,42 @@ func (p *postgresBackend) ReadCheckpoint(ctx context.Context, record backend.Lea
 	}
 
 	return state, cleanHandoff, nil
+}
+
+// Forget permanently deletes the row identified by record. Returns ErrFenced
+// if record.FencingToken no longer matches the stored lease's fencing token,
+// or if no row exists for record.WorkID.
+func (p *postgresBackend) Forget(ctx context.Context, record backend.LeaseRecord) error {
+	result, err := p.db.ExecContext(ctx, queryForget, record.WorkID, record.HolderID, record.FencingToken)
+	if err != nil {
+		return fmt.Errorf("postgres: Forget: %w", err)
+	}
+
+	n, err := result.RowsAffected()
+	if err != nil {
+		return fmt.Errorf("postgres: Forget: %w", err)
+	}
+	if n == 0 {
+		return worklease.ErrFenced
+	}
+
+	return nil
+}
+
+// Sweep deletes rows older than opts.Retention that are not currently held,
+// returning the number of rows deleted. Does not validate opts.Retention —
+// callers use worklease.Vacuum.Sweep, which validates before calling this.
+func (p *postgresBackend) Sweep(ctx context.Context, opts backend.SweepOptions) (int64, error) {
+	retentionStr := fmt.Sprintf("%.6f seconds", opts.Retention.Seconds())
+	result, err := p.db.ExecContext(ctx, queryVacuumSweep, retentionStr, opts.IncludeCrashed)
+	if err != nil {
+		return 0, fmt.Errorf("postgres: Sweep: %w", err)
+	}
+
+	n, err := result.RowsAffected()
+	if err != nil {
+		return 0, fmt.Errorf("postgres: Sweep: %w", err)
+	}
+
+	return n, nil
 }

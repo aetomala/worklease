@@ -17,6 +17,7 @@ type record struct {
 	expiresAt    time.Time
 	checkpoint   []byte
 	cleanHandoff bool
+	updatedAt    time.Time
 }
 
 // Clock provides the current time. Exported — allows test packages outside
@@ -116,6 +117,7 @@ func (mb *memoryBackend) Acquire(ctx context.Context, workID, holderID string, t
 		expiresAt:    mb.clock.Now().Add(ttl),
 		checkpoint:   prevCheckpoint,
 		cleanHandoff: prevCleanHandoff,
+		updatedAt:    mb.clock.Now(),
 	}
 
 	// ===== STEP 6: Store and Return =====
@@ -156,6 +158,7 @@ func (mb *memoryBackend) Checkpoint(ctx context.Context, record backend.LeaseRec
 	}
 	r.expiresAt = mb.clock.Now().Add(ttl)
 	r.cleanHandoff = false
+	r.updatedAt = mb.clock.Now()
 
 	return nil
 }
@@ -182,6 +185,7 @@ func (mb *memoryBackend) Renew(ctx context.Context, record backend.LeaseRecord, 
 
 	// ===== STEP 5: Extend Expiration =====
 	r.expiresAt = mb.clock.Now().Add(ttl)
+	r.updatedAt = mb.clock.Now()
 
 	return nil
 }
@@ -207,6 +211,7 @@ func (mb *memoryBackend) Release(ctx context.Context, record backend.LeaseRecord
 	// by a successor — the TTL governs crash detection, not clean-handoff latency.
 	r.cleanHandoff = true
 	r.expiresAt = mb.clock.Now().Add(releaseGracePeriod)
+	r.updatedAt = mb.clock.Now()
 
 	return nil
 }
@@ -236,4 +241,46 @@ func (mb *memoryBackend) ReadCheckpoint(ctx context.Context, record backend.Leas
 	out := make([]byte, len(r.checkpoint))
 	copy(out, r.checkpoint)
 	return out, r.cleanHandoff, nil
+}
+
+// Forget permanently deletes the record identified by record.WorkID. Returns
+// ErrFenced if no record exists or the fencing token does not match.
+func (mb *memoryBackend) Forget(ctx context.Context, record backend.LeaseRecord) error {
+	mb.mu.Lock()
+	defer mb.mu.Unlock()
+
+	r, exists := mb.records[record.WorkID]
+	if !exists || r.fencingToken != record.FencingToken {
+		return worklease.ErrFenced
+	}
+
+	delete(mb.records, record.WorkID)
+
+	return nil
+}
+
+// Sweep deletes records older than opts.Retention that are not currently held,
+// returning the number deleted. Does not validate opts.Retention — callers use
+// worklease.Vacuum.Sweep, which validates before calling this.
+func (mb *memoryBackend) Sweep(ctx context.Context, opts backend.SweepOptions) (int64, error) {
+	mb.mu.Lock()
+	defer mb.mu.Unlock()
+
+	now := mb.clock.Now()
+	var deleted int64
+	for workID, r := range mb.records {
+		if now.Sub(r.updatedAt) < opts.Retention {
+			continue
+		}
+		if !now.After(r.expiresAt) {
+			continue
+		}
+		if !opts.IncludeCrashed && !r.cleanHandoff {
+			continue
+		}
+		delete(mb.records, workID)
+		deleted++
+	}
+
+	return deleted, nil
 }

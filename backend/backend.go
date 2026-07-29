@@ -34,6 +34,16 @@ type Backend interface {
 	// given lease. The caller must pass a valid LeaseRecord. Returns ErrFenced if
 	// the record's fencing token no longer matches the stored lease.
 	ReadCheckpoint(ctx context.Context, record LeaseRecord) (state []byte, cleanHandoff bool, err error)
+
+	// Forget permanently deletes the row identified by record. Returns ErrFenced
+	// if record.FencingToken no longer matches the stored lease's fencing token,
+	// or if no row exists for record.WorkID.
+	Forget(ctx context.Context, record LeaseRecord) error
+
+	// Sweep deletes rows older than opts.Retention that are not currently held,
+	// returning the number of rows deleted. Does not validate opts.Retention —
+	// worklease.Vacuum.Sweep validates before calling this.
+	Sweep(ctx context.Context, opts SweepOptions) (int64, error)
 }
 
 // LeaseRecord represents a currently held lease. It is returned by Acquire and
@@ -52,4 +62,26 @@ type LeaseRecord struct {
 
 	// ExpiresAt is the wall-clock time at which the lease expires.
 	ExpiresAt time.Time
+}
+
+// SweepOptions configures a Sweep call. The canonical definition lives here in
+// package backend. Package worklease re-exports it as a type alias
+// (worklease.SweepOptions) so callers never need to import package backend
+// directly for this type. It lives here rather than in worklease because
+// package backend cannot import package worklease (worklease already imports
+// backend) — defining it in worklease and having backend reference it would be
+// an import cycle.
+type SweepOptions struct {
+	// Retention is the minimum age since a lease row was last updated before
+	// it becomes eligible for deletion. Backend.Sweep does not validate this —
+	// worklease.Vacuum.Sweep validates Retention > 0 before calling Backend.Sweep.
+	// Retention must exceed the maximum TTL configured across all Lease clients
+	// sharing this backend — this is a caller responsibility, not enforced here.
+	Retention time.Duration
+
+	// IncludeCrashed, if true, also sweeps rows where the previous holder's
+	// lease expired without an explicit Release (clean handoff false). Default
+	// false — only cleanly-released rows are swept. Enabling this permanently
+	// discards crash-recovery checkpoint data for swept rows.
+	IncludeCrashed bool
 }
