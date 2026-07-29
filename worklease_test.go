@@ -392,6 +392,73 @@ var _ = Describe("worklease", func() {
 		})
 	})
 
+	Describe("leaseClient.Forget", func() {
+		var spy *spyObserver
+
+		BeforeEach(func() {
+			spy = &spyObserver{}
+			cfg.Observer = spy
+		})
+
+		Context("when the backend delete succeeds", func() {
+			It("returns nil and does not call any LeaseObserver method", func() {
+				lease, _ := worklease.New(mockB, cfg)
+				record := backend.LeaseRecord{WorkID: "w1", HolderID: "test-worker", FencingToken: 1, ExpiresAt: time.Now().Add(30 * time.Second)}
+				mockB.EXPECT().Acquire(gomock.Any(), "w1", "test-worker", 30*time.Second).Return(record, nil)
+				token, _ := lease.Acquire(ctx, "w1")
+
+				spy.mu.Lock()
+				ordersBefore := len(spy.order)
+				spy.mu.Unlock()
+
+				mockB.EXPECT().Forget(gomock.Any(), record).Return(nil)
+				err := lease.Forget(ctx, token)
+				Expect(err).To(BeNil())
+
+				spy.mu.Lock()
+				defer spy.mu.Unlock()
+				Expect(len(spy.order)).To(Equal(ordersBefore))
+			})
+		})
+
+		Context("when the backend returns ErrFenced", func() {
+			It("wraps ErrFenced with workID and holderID context and does not call any LeaseObserver method", func() {
+				lease, _ := worklease.New(mockB, cfg)
+				record := backend.LeaseRecord{WorkID: "w1", HolderID: "test-worker", FencingToken: 1, ExpiresAt: time.Now().Add(30 * time.Second)}
+				mockB.EXPECT().Acquire(gomock.Any(), "w1", "test-worker", 30*time.Second).Return(record, nil)
+				token, _ := lease.Acquire(ctx, "w1")
+
+				spy.mu.Lock()
+				ordersBefore := len(spy.order)
+				spy.mu.Unlock()
+
+				mockB.EXPECT().Forget(gomock.Any(), record).Return(worklease.ErrFenced)
+				err := lease.Forget(ctx, token)
+				Expect(errors.Is(err, worklease.ErrFenced)).To(BeTrue())
+				Expect(err.Error()).To(ContainSubstring("workID"))
+				Expect(err.Error()).To(ContainSubstring("holderID"))
+
+				spy.mu.Lock()
+				defer spy.mu.Unlock()
+				Expect(len(spy.order)).To(Equal(ordersBefore))
+			})
+		})
+
+		Context("when the backend returns a non-fenced, non-nil error", func() {
+			It("wraps the error with the worklease: Forget: prefix", func() {
+				lease, _ := worklease.New(mockB, cfg)
+				record := backend.LeaseRecord{WorkID: "w1", HolderID: "test-worker", FencingToken: 1, ExpiresAt: time.Now().Add(30 * time.Second)}
+				mockB.EXPECT().Acquire(gomock.Any(), "w1", "test-worker", 30*time.Second).Return(record, nil)
+				token, _ := lease.Acquire(ctx, "w1")
+
+				mockB.EXPECT().Forget(gomock.Any(), record).Return(errors.New("connection lost"))
+				err := lease.Forget(ctx, token)
+				Expect(err).To(HaveOccurred())
+				Expect(err.Error()).To(ContainSubstring("worklease: Forget:"))
+			})
+		})
+	})
+
 	// ===== PHASE 5: Concurrency / Goroutine lifecycle =====
 	Describe("StartRenewal", func() {
 		It("normal stop → non-nil renewCtx, non-nil stopRenewal; renewCtx NOT cancelled on stopRenewal", func() {
@@ -1044,6 +1111,47 @@ var _ = Describe("worklease", func() {
 					worklease.WithPollInterval(500 * time.Millisecond),
 				}
 				Expect(worklease.HasWaitForLease(opts)).To(BeTrue())
+			})
+		})
+	})
+
+	Describe("Vacuum.Sweep", func() {
+		Context("when opts.Retention is zero", func() {
+			It("returns 0 and ErrRetentionRequired without calling the backend", func() {
+				v := worklease.NewVacuum(mockB)
+				n, err := v.Sweep(ctx, worklease.SweepOptions{Retention: 0})
+				Expect(n).To(BeZero())
+				Expect(errors.Is(err, worklease.ErrRetentionRequired)).To(BeTrue())
+			})
+		})
+
+		Context("when opts.Retention is negative", func() {
+			It("returns 0 and ErrRetentionRequired without calling the backend", func() {
+				v := worklease.NewVacuum(mockB)
+				n, err := v.Sweep(ctx, worklease.SweepOptions{Retention: -time.Second})
+				Expect(n).To(BeZero())
+				Expect(errors.Is(err, worklease.ErrRetentionRequired)).To(BeTrue())
+			})
+		})
+
+		Context("when opts.Retention is positive", func() {
+			It("delegates to Backend.Sweep and returns its result unchanged, success case", func() {
+				v := worklease.NewVacuum(mockB)
+				opts := worklease.SweepOptions{Retention: time.Hour, IncludeCrashed: true}
+				mockB.EXPECT().Sweep(gomock.Any(), opts).Return(int64(3), nil)
+				n, err := v.Sweep(ctx, opts)
+				Expect(err).To(BeNil())
+				Expect(n).To(Equal(int64(3)))
+			})
+
+			It("delegates to Backend.Sweep and returns its error unchanged, failure case", func() {
+				v := worklease.NewVacuum(mockB)
+				opts := worklease.SweepOptions{Retention: time.Hour}
+				backendErr := errors.New("sweep failed")
+				mockB.EXPECT().Sweep(gomock.Any(), opts).Return(int64(0), backendErr)
+				n, err := v.Sweep(ctx, opts)
+				Expect(n).To(BeZero())
+				Expect(err).To(Equal(backendErr))
 			})
 		})
 	})

@@ -1,5 +1,34 @@
 # Upgrading worklease
 
+## v0.5.x → v0.6.0
+
+### Breaking Changes
+
+- **`Lease` interface gains `Forget`.** Any custom implementation of `worklease.Lease` (rare — the library's own `New()` is the only implementation most callers need) must add:
+
+  ```go
+  Forget(ctx context.Context, token Token) error
+  ```
+
+- **`backend.Backend` interface gains `Forget` and `Sweep`.** Any custom `backend.Backend` implementation (e.g. a third-party Redis or etcd backend) must add:
+
+  ```go
+  Forget(ctx context.Context, record LeaseRecord) error
+  Sweep(ctx context.Context, opts SweepOptions) (int64, error)
+  ```
+
+  Callers who only use the shipped PostgreSQL or in-memory backends through `worklease.New` are unaffected — no schema change, no runtime behavior change to existing methods.
+
+### New in v0.6.0
+
+- `Lease.Forget(ctx, token) error` — permanently deletes a lease row. Returns `ErrFenced` if the token no longer matches the stored lease. Unlike `Release`, the row is not left behind for a future `ReadCheckpoint`.
+- `worklease.Vacuum` and `worklease.SweepOptions` — age-based bulk cleanup. `NewVacuum(b backend.Backend) *Vacuum`, then `v.Sweep(ctx, SweepOptions{Retention: ..., IncludeCrashed: ...})` deletes rows older than `Retention` that are not currently held. `Retention` must exceed the maximum TTL configured across all `Lease` clients sharing the backend — `Sweep` returns `ErrRetentionRequired` if `Retention <= 0`.
+- `ErrRetentionRequired` — new sentinel, returned by `Vacuum.Sweep`.
+- ADR-0016's retention component (`Forget` / `Vacuum.Sweep`) is now Accepted.
+- ADR-0017 — schema migration remains caller-owned; ships as of this release.
+
+Neither `Forget` nor `Sweep` invoke `LeaseObserver` — the observer's method set is unchanged in v0.6.0.
+
 ## v0.4.x → v0.5.0
 
 ### Breaking Changes

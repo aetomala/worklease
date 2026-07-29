@@ -7,6 +7,27 @@ This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 
 ---
 
+## [v0.6.0] — YYYY-MM-DD
+
+### Breaking
+
+- `backend.Backend` interface gains `Forget` and `Sweep` — any custom `Backend` implementation must add both methods. No impact on callers using only the shipped PostgreSQL or in-memory backends. See `UPGRADING.md`.
+- `worklease.Lease` interface gains `Forget` — any custom `Lease` implementation must add the method. See `UPGRADING.md`.
+
+### Added
+
+- `Lease.Forget(ctx, token) error` — fencing-checked permanent deletion of a lease row.
+- `worklease.Vacuum` / `worklease.SweepOptions` / `NewVacuum` — age-based bulk cleanup of terminal lease rows via `Vacuum.Sweep`.
+- `ErrRetentionRequired` — returned by `Vacuum.Sweep` when `SweepOptions.Retention <= 0`.
+- `backend.SweepOptions` — canonical definition backing `worklease.SweepOptions` (type alias).
+
+### Documentation
+
+- ADR-0016 retention component flipped from Proposed to Accepted.
+- ADR-0017 added — schema migration remains caller-owned.
+
+---
+
 ## [v0.5.0] — 2026-06-29
 
 ### Breaking
