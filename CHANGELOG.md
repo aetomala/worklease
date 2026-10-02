@@ -34,6 +34,10 @@ This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 - `Lease.ReadCheckpoint` wraps backend errors like the other `Lease` methods: `worklease: ReadCheckpoint: workID=… holderID=…: …` for `ErrFenced`, and `worklease: ReadCheckpoint: …` otherwise. Use `errors.Is`; a direct `err == worklease.ErrFenced` comparison no longer matches.
 - `checkpoint.Decode` returns the zero value of `T` on a codec error instead of a partially decoded value. `Encode` and `Decode` wrap codec errors with `checkpoint: Encode:` and `checkpoint: Decode:` prefixes.
 
+### Security
+
+- `golang.org/x/text` bumped to v0.39.0 (GO-2026-5970) and `golang.org/x/net` to v0.56.0 (GO-2026-5942). Neither is reachable from worklease code. Both reach the module graph through `backend/conformance`, an exported package that third-party backends import, so those modules would otherwise inherit the vulnerable versions. `go mod tidy` also raises the indirect `golang.org/x/sys` to v0.46.0 and `golang.org/x/tools` to v0.47.0. The `go 1.25.0` floor and the `go1.26.8` toolchain are unchanged.
+
 ### Documentation
 
 - Godoc drift corrected: `Token`, `Checkpoint`, and `LeaseRecord` no longer claim a token or record comes from `Renew`, and `Forget` is listed among the operations that take one; `Acquire` docs on `Lease`, `Backend`, and the PostgreSQL backend state that `ErrLeaseHeld` means held *and unexpired*; `OnAcquire`/`AcquireEvent` document one event per poll under `WithWaitForLease`; `Token.ExpiresAt` documents that it is the acquisition-time expiry from the backend clock; `OnFenced` notes it does not fire for `ReadCheckpoint` or `Forget`; the `doc.go` `Backend` link resolves.
