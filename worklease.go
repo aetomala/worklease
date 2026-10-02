@@ -11,7 +11,7 @@ import (
 
 // Config holds configuration for a Lease instance.
 type Config struct {
-	// TTL is the time-to-live for acquired leases. Required; zero returns an error.
+	// TTL is the time-to-live for acquired leases. Required; zero or negative returns an error.
 	TTL time.Duration
 
 	// HolderID is the identifier of the entity that will hold leases. Required; empty returns an error.
@@ -31,7 +31,7 @@ type leaseClient struct {
 }
 
 // New returns a new Lease instance backed by the provided Backend. Returns an error
-// if the backend is nil, TTL is zero, or HolderID is empty.
+// if the backend is nil, TTL is zero or negative, or HolderID is empty.
 func New(b backend.Backend, cfg Config) (Lease, error) {
 	// ===== STEP 1: Validate Required Fields =====
 	if b == nil {
@@ -46,7 +46,12 @@ func New(b backend.Backend, cfg Config) (Lease, error) {
 		return nil, fmt.Errorf("worklease: New: HolderID is required")
 	}
 
-	// ===== STEP 2: Initialize and Return =====
+	// ===== STEP 2: Reject Invalid Values =====
+	if cfg.TTL < 0 {
+		return nil, fmt.Errorf("worklease: New: TTL must be positive, got %v", cfg.TTL)
+	}
+
+	// ===== STEP 3: Initialize and Return =====
 	if cfg.Observer == nil {
 		cfg.Observer = noopObserver{}
 	}

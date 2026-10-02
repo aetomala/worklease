@@ -109,6 +109,14 @@ var _ = Describe("worklease", func() {
 			Expect(lease).To(BeNil())
 		})
 
+		It("TTL negative → non-nil error, no Lease returned", func() {
+			badCfg := cfg
+			badCfg.TTL = -time.Second
+			lease, err := worklease.New(mockB, badCfg)
+			Expect(err).NotTo(BeNil())
+			Expect(lease).To(BeNil())
+		})
+
 		It("HolderID empty → non-nil error, no Lease returned", func() {
 			badCfg := cfg
 			badCfg.HolderID = ""

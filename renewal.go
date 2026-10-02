@@ -35,7 +35,7 @@ import (
 func (c *leaseClient) StartRenewal(ctx context.Context, token Token, opts ...RenewalOption) (context.Context, func()) {
 	// ===== STEP 1: Resolve options =====
 	rcfg := renewalConfig{
-		renewalInterval: c.cfg.TTL / 2,
+		renewalInterval: defaultRenewalInterval(c.cfg.TTL),
 		backoffInitial:  defaultBackoffInitial,
 		backoffMax:      defaultBackoffMax,
 		backoffJitter:   defaultBackoffJitter,
@@ -139,6 +139,12 @@ func (c *leaseClient) renewCycle(ctx context.Context, token Token, rcfg renewalC
 		base = nextBackoff(base, rcfg.backoffMax)
 		attempt++
 	}
+}
+
+// defaultRenewalInterval returns TTL/2, floored at one nanosecond so that
+// time.NewTicker never receives a non-positive interval.
+func defaultRenewalInterval(ttl time.Duration) time.Duration {
+	return max(ttl/2, time.Nanosecond)
 }
 
 // backoffWait returns base plus additive jitter drawn from [0, jitter*base).
