@@ -30,6 +30,7 @@ This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 - Holder-ID fencing parity: the memory backend now rejects `Checkpoint`, `Renew`, `Release`, and `Forget` with `ErrFenced` when the record's holder ID does not match the stored lease, as the PostgreSQL backend and ADR-0016 already specify. The PostgreSQL `Renew` no longer misreports a holder mismatch as `ErrLeaseExpired`. A new conformance spec pins the behavior.
 - Memory backend boundary parity with PostgreSQL: `Renew` returns `ErrLeaseExpired` when the clock equals `expiresAt` (postgres: `expires_at > NOW()`), and `Sweep` deletes only rows strictly older than `Retention` (postgres: `updated_at < NOW() - retention`).
 - Memory backend honors context cancellation: every method returns the context error without side effects when `ctx` is already done, as `database/sql` does for the PostgreSQL backend. Previously a cancelled `Acquire` still acquired the lease in memory, which hid cancellation-path behavior that differs on PostgreSQL. A new conformance spec pins the behavior.
+- `leader.Config.OnLost` no longer fires when the parent context passed to `Elect` is cancelled. As documented, it fires only when the renewal context is cancelled by fencing or renewal failure.
 
 ### Documentation
 
