@@ -56,14 +56,17 @@ func scenario2RenewalWindowExhaustion(ctx context.Context) {
 	log.Printf("  worker-C: lease acquired (expires in 200ms, fencing token %d)", token.FencingToken())
 
 	// Set the renewal interval longer than the TTL so the first renewal fires after
-	// the lease has already expired. The renewal goroutine receives ErrLeaseExpired
-	// (a non-fencing error) and enters the backoff-retry path.
+	// the lease has already expired. This is a deliberate misconfiguration that
+	// forces the window-exhausted path; in production keep the interval below the
+	// TTL (the default is TTL/2). The first Renew returns ErrLeaseExpired, which the
+	// goroutine treats as a non-fencing error.
 	//
 	// WithRenewalBackoff configures the retry policy for non-fencing errors (e.g.,
 	// Postgres connection drops in production). initial=50ms, max=200ms, no jitter.
 	//
-	// Since the lease window (token.ExpiresAt) is already past when the error fires,
-	// the window check triggers ErrLeaseWindowExhausted immediately.
+	// Because the lease window has already closed when that error arrives, no
+	// backoff retry runs: the window check cancels renewCtx with
+	// ErrLeaseWindowExhausted immediately.
 	renewCtx, stopRenewal := lease.StartRenewal(ctx, token,
 		worklease.WithRenewalInterval(400*time.Millisecond),
 		worklease.WithRenewalBackoff(50*time.Millisecond, 200*time.Millisecond, 0),

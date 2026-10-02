@@ -38,6 +38,7 @@ This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 
 - Godoc drift corrected: `Token`, `Checkpoint`, and `LeaseRecord` no longer claim a token or record comes from `Renew`, and `Forget` is listed among the operations that take one; `Acquire` docs on `Lease`, `Backend`, and the PostgreSQL backend state that `ErrLeaseHeld` means held *and unexpired*; `OnAcquire`/`AcquireEvent` document one event per poll under `WithWaitForLease`; `Token.ExpiresAt` documents that it is the acquisition-time expiry from the backend clock; `OnFenced` notes it does not fire for `ReadCheckpoint` or `Forget`; the `doc.go` `Backend` link resolves.
 - `docs/ARCHITECTURE.md` roadmap and ADR index updated for v0.6 (ADR-0016 retention Accepted, ADR-0017 listed); `UPGRADING.md` notes that `Forget` also returns `ErrFenced` when no row exists.
+- Examples: `partition-processor` no longer waits out the TTL after a clean `Release`; the stale comment predated ADR-0012. The `renewal-backoff` scenario 2 comment now explains that the window-exhausted path fires without any backoff retry.
 - ADR-0016 retention component flipped from Proposed to Accepted.
 - ADR-0017 added — schema migration remains caller-owned.
 
