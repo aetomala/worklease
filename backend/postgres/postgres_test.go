@@ -164,15 +164,16 @@ var _ = Describe("Backend (postgres)", func() {
 			err = b.Release(ctx, record)
 			Expect(err).NotTo(HaveOccurred())
 
-			// Verify clean_handoff was set and expires_at is in the past.
-			var cleanHandoff bool
-			var expiresAt time.Time
+			// Verify clean_handoff was set and expires_at is in the past. The expiry
+			// comparison uses the database clock — comparing against the local clock
+			// fails whenever the database runs more than 1ms ahead of the test host.
+			var cleanHandoff, expired bool
 			err = db.QueryRowContext(ctx,
-				"SELECT clean_handoff, expires_at FROM worklease_leases WHERE work_id = $1", "w8",
-			).Scan(&cleanHandoff, &expiresAt)
+				"SELECT clean_handoff, expires_at < NOW() FROM worklease_leases WHERE work_id = $1", "w8",
+			).Scan(&cleanHandoff, &expired)
 			Expect(err).NotTo(HaveOccurred())
 			Expect(cleanHandoff).To(BeTrue())
-			Expect(expiresAt).To(BeTemporally("<", time.Now()))
+			Expect(expired).To(BeTrue())
 		})
 
 		It("fencing token stale → returns ErrFenced", func() {
