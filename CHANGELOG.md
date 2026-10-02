@@ -28,6 +28,7 @@ This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 - `worker.Runner.Run` stops lease renewal when the `WorkFn` panics. Previously the renewal goroutine kept renewing after a recovered panic, holding the lease indefinitely.
 - `worker.ErrLeaseRequired` and `worker.ErrWorkFnRequired` messages now carry the `worker:` prefix used by every other package's sentinels. Match with `errors.Is`, not the message text.
 - Holder-ID fencing parity: the memory backend now rejects `Checkpoint`, `Renew`, `Release`, and `Forget` with `ErrFenced` when the record's holder ID does not match the stored lease, as the PostgreSQL backend and ADR-0016 already specify. The PostgreSQL `Renew` no longer misreports a holder mismatch as `ErrLeaseExpired`. A new conformance spec pins the behavior.
+- Memory backend boundary parity with PostgreSQL: `Renew` returns `ErrLeaseExpired` when the clock equals `expiresAt` (postgres: `expires_at > NOW()`), and `Sweep` deletes only rows strictly older than `Retention` (postgres: `updated_at < NOW() - retention`).
 
 ### Documentation
 

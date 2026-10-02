@@ -416,6 +416,33 @@ var _ = Describe("Backend (memory)", func() {
 					Expect(errors.Is(err, worklease.ErrFenced)).To(BeTrue())
 				})
 			})
+
+			Context("when the injected clock equals the lease expiry exactly", func() {
+				It("returns ErrLeaseExpired — matches postgres expires_at > NOW()", func() {
+					rec, _ := b.Acquire(ctx, "w1", "h1", 5*time.Second)
+					fc.Advance(5 * time.Second)
+					err := b.Renew(ctx, rec, 5*time.Second)
+					Expect(errors.Is(err, worklease.ErrLeaseExpired)).To(BeTrue())
+				})
+			})
+		})
+
+		Describe("Backend.Sweep", func() {
+			Context("when a released row's age equals Retention exactly", func() {
+				It("keeps the row — matches postgres updated_at < NOW() - retention", func() {
+					rec, _ := b.Acquire(ctx, "w1", "h1", 5*time.Second)
+					Expect(b.Release(ctx, rec)).To(Succeed())
+					fc.Advance(time.Hour)
+					n, err := b.Sweep(ctx, backend.SweepOptions{Retention: time.Hour})
+					Expect(err).NotTo(HaveOccurred())
+					Expect(n).To(BeZero())
+
+					fc.Advance(time.Nanosecond)
+					n, err = b.Sweep(ctx, backend.SweepOptions{Retention: time.Hour})
+					Expect(err).NotTo(HaveOccurred())
+					Expect(n).To(Equal(int64(1)))
+				})
+			})
 		})
 
 		Describe("Backend.Release", func() {

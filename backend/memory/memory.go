@@ -185,7 +185,9 @@ func (mb *memoryBackend) Renew(ctx context.Context, record backend.LeaseRecord, 
 	}
 
 	// ===== STEP 4: Check Expiry =====
-	if mb.clock.Now().After(r.expiresAt) {
+	// A lease is renewable only while now < expiresAt — mirrors postgres
+	// expires_at > NOW(), so both backends refuse renewal at the boundary.
+	if !mb.clock.Now().Before(r.expiresAt) {
 		return worklease.ErrLeaseExpired
 	}
 
@@ -275,7 +277,8 @@ func (mb *memoryBackend) Sweep(ctx context.Context, opts backend.SweepOptions) (
 	now := mb.clock.Now()
 	var deleted int64
 	for workID, r := range mb.records {
-		if now.Sub(r.updatedAt) < opts.Retention {
+		// Strictly older than Retention — mirrors postgres updated_at < NOW() - retention.
+		if now.Sub(r.updatedAt) <= opts.Retention {
 			continue
 		}
 		if !now.After(r.expiresAt) {
