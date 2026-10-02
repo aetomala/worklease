@@ -65,6 +65,11 @@ var _ = Describe("Runner", func() {
 			Expect(errors.Is(err, worker.ErrWorkFnRequired)).To(BeTrue())
 		})
 
+		It("sentinel messages carry the worker: package prefix", func() {
+			Expect(worker.ErrLeaseRequired.Error()).To(HavePrefix("worker: "))
+			Expect(worker.ErrWorkFnRequired.Error()).To(HavePrefix("worker: "))
+		})
+
 		It("valid config → returns non-nil Runner", func() {
 			r, err := worker.NewRunner(worker.RunnerConfig{
 				Lease: lease,

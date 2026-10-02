@@ -10,8 +10,8 @@ import (
 
 // Sentinel errors for Runner operations.
 var (
-	ErrLeaseRequired  = errors.New("lease is required")
-	ErrWorkFnRequired = errors.New("work function is required")
+	ErrLeaseRequired  = errors.New("worker: lease is required")
+	ErrWorkFnRequired = errors.New("worker: work function is required")
 )
 
 // WorkFn is the work function signature accepted by Runner.Run.
