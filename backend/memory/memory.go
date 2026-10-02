@@ -20,6 +20,12 @@ type record struct {
 	updatedAt    time.Time
 }
 
+// heldBy reports whether rec identifies the stored lease — both the holder ID
+// and the fencing token match. Mirrors the postgres WHERE clause on writes.
+func (r *record) heldBy(rec backend.LeaseRecord) bool {
+	return r.holderID == rec.HolderID && r.fencingToken == rec.FencingToken
+}
+
 // Clock provides the current time. Exported — allows test packages outside
 // backend/memory to implement fake clocks.
 type Clock interface {
@@ -131,8 +137,8 @@ func (mb *memoryBackend) Acquire(ctx context.Context, workID, holderID string, t
 	}, nil
 }
 
-// Checkpoint persists state associated with the current lease. If the fencing
-// token does not match, ErrFenced is returned without modification.
+// Checkpoint persists state associated with the current lease. If the holder ID
+// or fencing token does not match, ErrFenced is returned without modification.
 func (mb *memoryBackend) Checkpoint(ctx context.Context, record backend.LeaseRecord, state []byte, ttl time.Duration) error {
 	// ===== STEP 1: Acquire Lock =====
 	mb.mu.Lock()
@@ -142,7 +148,7 @@ func (mb *memoryBackend) Checkpoint(ctx context.Context, record backend.LeaseRec
 	r, exists := mb.records[record.WorkID]
 
 	// ===== STEP 3: Check Fencing Token =====
-	if !exists || r.fencingToken != record.FencingToken {
+	if !exists || !r.heldBy(record) {
 		return worklease.ErrFenced
 	}
 
@@ -163,8 +169,8 @@ func (mb *memoryBackend) Checkpoint(ctx context.Context, record backend.LeaseRec
 	return nil
 }
 
-// Renew extends the lease expiration time. If the fencing token does not match,
-// ErrFenced is returned. If the lease has already expired, ErrLeaseExpired is returned.
+// Renew extends the lease expiration time. If the holder ID or fencing token does
+// not match, ErrFenced is returned. If the lease has already expired, ErrLeaseExpired is returned.
 func (mb *memoryBackend) Renew(ctx context.Context, record backend.LeaseRecord, ttl time.Duration) error {
 	// ===== STEP 1: Acquire Lock =====
 	mb.mu.Lock()
@@ -174,7 +180,7 @@ func (mb *memoryBackend) Renew(ctx context.Context, record backend.LeaseRecord, 
 	r, exists := mb.records[record.WorkID]
 
 	// ===== STEP 3: Check Fencing Token =====
-	if !exists || r.fencingToken != record.FencingToken {
+	if !exists || !r.heldBy(record) {
 		return worklease.ErrFenced
 	}
 
@@ -191,8 +197,8 @@ func (mb *memoryBackend) Renew(ctx context.Context, record backend.LeaseRecord, 
 }
 
 // Release surrenders the lease and expires it immediately by setting expiresAt to
-// the past, so a successor can acquire without waiting for the TTL. If the fencing
-// token does not match, ErrFenced is returned without modification.
+// the past, so a successor can acquire without waiting for the TTL. If the holder
+// ID or fencing token does not match, ErrFenced is returned without modification.
 func (mb *memoryBackend) Release(ctx context.Context, record backend.LeaseRecord) error {
 	// ===== STEP 1: Acquire Lock =====
 	mb.mu.Lock()
@@ -202,7 +208,7 @@ func (mb *memoryBackend) Release(ctx context.Context, record backend.LeaseRecord
 	r, exists := mb.records[record.WorkID]
 
 	// ===== STEP 3: Check Fencing Token =====
-	if !exists || r.fencingToken != record.FencingToken {
+	if !exists || !r.heldBy(record) {
 		return worklease.ErrFenced
 	}
 
@@ -244,13 +250,13 @@ func (mb *memoryBackend) ReadCheckpoint(ctx context.Context, record backend.Leas
 }
 
 // Forget permanently deletes the record identified by record.WorkID. Returns
-// ErrFenced if no record exists or the fencing token does not match.
+// ErrFenced if no record exists or the holder ID or fencing token does not match.
 func (mb *memoryBackend) Forget(ctx context.Context, record backend.LeaseRecord) error {
 	mb.mu.Lock()
 	defer mb.mu.Unlock()
 
 	r, exists := mb.records[record.WorkID]
-	if !exists || r.fencingToken != record.FencingToken {
+	if !exists || !r.heldBy(record) {
 		return worklease.ErrFenced
 	}
 

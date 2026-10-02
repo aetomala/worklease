@@ -230,6 +230,26 @@ func RunSuite(newBackend func() backend.Backend) func() {
 				})
 			})
 
+			Context("holder mismatch", func() {
+				It("returns ErrFenced from Checkpoint, Renew, Release, and Forget when HolderID does not match the stored lease", func() {
+					rec, err := b.Acquire(ctx, "w1", "h", normalTTL)
+					Expect(err).NotTo(HaveOccurred())
+					other := rec
+					other.HolderID = "h-other"
+
+					Expect(b.Checkpoint(ctx, other, []byte("x"), normalTTL)).To(MatchError(worklease.ErrFenced))
+					Expect(b.Renew(ctx, other, normalTTL)).To(MatchError(worklease.ErrFenced))
+					Expect(b.Release(ctx, other)).To(MatchError(worklease.ErrFenced))
+					Expect(b.Forget(ctx, other)).To(MatchError(worklease.ErrFenced))
+
+					// The rightful holder's lease is untouched.
+					_, cleanHandoff, err := b.ReadCheckpoint(ctx, rec)
+					Expect(err).NotTo(HaveOccurred())
+					Expect(cleanHandoff).To(BeFalse())
+					Expect(b.Renew(ctx, rec, normalTTL)).To(Succeed())
+				})
+			})
+
 			Context("slice aliasing invariants", func() {
 				It("does not expose stored state via ReadCheckpoint — mutation of returned slice does not affect storage", func() {
 					rec, err := b.Acquire(ctx, "w1", "h", normalTTL)
