@@ -81,10 +81,8 @@ func scenario2CheckpointResume(ctx context.Context, b backend.Backend) {
 	poolA.Run(ctx) // blocks until all 3 slots exit via PermanentError
 
 	// The Runner calls Release before returning the PermanentError, setting
-	// cleanHandoff=true. However, the TTL clock started at acquisition time, so pool-B
-	// must wait for the 1s TTL to elapse before it can acquire the leases.
-	log.Println("  [waiting 1s for pool-A leases to expire...]")
-	time.Sleep(1100 * time.Millisecond)
+	// cleanHandoff=true. Release expires the lease immediately (ADR-0012), so
+	// pool-B can acquire the leases without waiting for the TTL.
 
 	leaseB, _ := worklease.New(b, worklease.Config{TTL: 30 * time.Second, HolderID: "pool-B"})
 

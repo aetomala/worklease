@@ -41,12 +41,12 @@ const (
 // storage, fencing, and expiration logic. All methods are safe for concurrent use.
 type Lease interface {
 	// Acquire attempts to acquire a lease for the given workID. Returns ErrLeaseHeld
-	// if a lease already exists for this workID. If WithWaitForLease is set, blocks
-	// until the lease is available, polling at the configured interval.
+	// if the lease for this workID is held and has not expired. If WithWaitForLease
+	// is set, blocks until the lease is available, polling at the configured interval.
 	Acquire(ctx context.Context, workID string, opts ...AcquireOption) (Token, error)
 
 	// Checkpoint persists state associated with the current lease. The caller must
-	// pass a valid Token obtained from Acquire or Renew. Returns ErrFenced if the
+	// pass a valid Token obtained from Acquire. Returns ErrFenced if the
 	// token's fencing token no longer matches the stored lease.
 	Checkpoint(ctx context.Context, token Token, state []byte) error
 
@@ -80,14 +80,17 @@ type Lease interface {
 	Forget(ctx context.Context, token Token) error
 }
 
-// Token represents a currently held lease. It is returned by Acquire and Renew
-// and must be passed back to Checkpoint, Renew, Release, ReadCheckpoint, and
-// StartRenewal. All fields are unexported; use accessor methods to read them.
+// Token represents a currently held lease. It is returned by Acquire and must be
+// passed back to Checkpoint, Renew, Release, ReadCheckpoint, Forget, and
+// StartRenewal. Renew and Checkpoint do not return a new Token — the same Token
+// stays valid for the life of the lease. All fields are unexported; use accessor
+// methods to read them.
 type Token struct {
 	workID       string
 	holderID     string
 	fencingToken uint64
 	expiresAt    time.Time
+	deadline     time.Time // Local monotonic bound — Acquire start plus TTL; zero if unknown
 }
 
 // WorkID returns the identifier for the unit of work being leased.
@@ -106,7 +109,8 @@ func (t Token) FencingToken() uint64 {
 	return t.fencingToken
 }
 
-// ExpiresAt returns the wall-clock time at which the lease expires.
+// ExpiresAt returns the lease expiry recorded at acquisition, as reported by the
+// backend's clock. It is not updated by Renew or Checkpoint.
 func (t Token) ExpiresAt() time.Time {
 	return t.expiresAt
 }
@@ -216,8 +220,9 @@ func WithRenewalBackoff(initial, maxInterval time.Duration, jitter float64) Rene
 // All methods are called synchronously. Implementations must not block or panic.
 // The zero value of Config.Observer is nil; the library substitutes a no-op observer.
 type LeaseObserver interface {
-	// OnAcquire is called after every Acquire attempt, successful or not.
-	// e.Duration is the duration of the final backend call only — not the wait loop.
+	// OnAcquire is called after every backend acquire attempt, successful or not —
+	// once per poll when WithWaitForLease is set. e.Duration is the duration of
+	// that attempt's backend call only — not the wait loop.
 	// e.Token is the zero value of Token if e.Err is non-nil.
 	OnAcquire(ctx context.Context, e AcquireEvent)
 
@@ -237,8 +242,9 @@ type LeaseObserver interface {
 	// OnFenced is NOT called on ReadCheckpoint — ErrFenced surfaces via e.Err only.
 	OnReadCheckpoint(ctx context.Context, e ReadCheckpointEvent)
 
-	// OnFenced is called when Checkpoint, Renew, or Release returns ErrFenced.
-	// Called in addition to the operation-specific callback — not instead of.
+	// OnFenced is called when Checkpoint, Renew, or Release returns ErrFenced —
+	// not for ReadCheckpoint or Forget. Called in addition to the
+	// operation-specific callback — not instead of.
 	// e.Operation identifies which operation triggered the fencing event.
 	OnFenced(ctx context.Context, e FencedEvent)
 }
@@ -253,8 +259,8 @@ const (
 	OperationRelease
 )
 
-// AcquireEvent carries the result of an Acquire call.
-// Duration is the duration of the final backend call only — not the wait loop.
+// AcquireEvent carries the result of one backend acquire attempt.
+// Duration is the duration of that backend call only — not the wait loop.
 // Token is the zero value of Token if Err is non-nil.
 type AcquireEvent struct {
 	WorkID   string

@@ -42,6 +42,15 @@ vendor/
 
 # Local Claude context (symlinked from dotfiles)
 CLAUDE.local.md
+.claude/settings.local.json
+
+# Example binaries produced by `go build` inside an example module
+/examples/cluster-singleton-scheduler/cluster-singleton-scheduler
+/examples/cross-tenant-migration/cross-tenant-migration
+/examples/observability/observability
+/examples/partition-processor/partition-processor
+/examples/renewal-backoff/renewal-backoff
+/examples/subscription-cancellation/subscription-cancellation
 
 ### macOS ###
 # General

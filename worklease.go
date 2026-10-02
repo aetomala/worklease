@@ -11,7 +11,7 @@ import (
 
 // Config holds configuration for a Lease instance.
 type Config struct {
-	// TTL is the time-to-live for acquired leases. Required; zero returns an error.
+	// TTL is the time-to-live for acquired leases. Required; zero or negative returns an error.
 	TTL time.Duration
 
 	// HolderID is the identifier of the entity that will hold leases. Required; empty returns an error.
@@ -31,7 +31,7 @@ type leaseClient struct {
 }
 
 // New returns a new Lease instance backed by the provided Backend. Returns an error
-// if the backend is nil, TTL is zero, or HolderID is empty.
+// if the backend is nil, TTL is zero or negative, or HolderID is empty.
 func New(b backend.Backend, cfg Config) (Lease, error) {
 	// ===== STEP 1: Validate Required Fields =====
 	if b == nil {
@@ -46,20 +46,28 @@ func New(b backend.Backend, cfg Config) (Lease, error) {
 		return nil, fmt.Errorf("worklease: New: HolderID is required")
 	}
 
-	// ===== STEP 2: Initialize and Return =====
+	// ===== STEP 2: Reject Invalid Values =====
+	if cfg.TTL < 0 {
+		return nil, fmt.Errorf("worklease: New: TTL must be positive, got %v", cfg.TTL)
+	}
+
+	// ===== STEP 3: Initialize and Return =====
 	if cfg.Observer == nil {
 		cfg.Observer = noopObserver{}
 	}
 	return &leaseClient{b: b, cfg: cfg, obs: cfg.Observer}, nil
 }
 
-// newToken converts a backend LeaseRecord to an exported Token.
-func newToken(r backend.LeaseRecord) Token {
+// newToken converts a backend LeaseRecord to an exported Token. The deadline is
+// the local monotonic bound on the lease window — the time the acquiring backend
+// call started plus TTL — which never exceeds the true expiry.
+func newToken(r backend.LeaseRecord, deadline time.Time) Token {
 	return Token{
 		workID:       r.WorkID,
 		holderID:     r.HolderID,
 		fencingToken: r.FencingToken,
 		expiresAt:    r.ExpiresAt,
+		deadline:     deadline,
 	}
 }
 
@@ -74,7 +82,7 @@ func toRecord(t Token) backend.LeaseRecord {
 }
 
 // Checkpoint persists state associated with the current lease. The caller must
-// pass a valid Token obtained from Acquire or Renew. Returns ErrFenced if the
+// pass a valid Token obtained from Acquire. Returns ErrFenced if the
 // token's fencing token no longer matches the stored lease.
 func (c *leaseClient) Checkpoint(ctx context.Context, token Token, state []byte) error {
 	// ===== Validate and Delegate =====
@@ -157,7 +165,16 @@ func (c *leaseClient) ReadCheckpoint(ctx context.Context, token Token) ([]byte, 
 	state, cleanHandoff, err := c.b.ReadCheckpoint(ctx, record)
 	dur := time.Since(start)
 	c.obs.OnReadCheckpoint(ctx, ReadCheckpointEvent{Token: token, Duration: dur, CleanHandoff: cleanHandoff, Size: len(state), Err: err})
-	return state, cleanHandoff, err
+
+	if errors.Is(err, ErrFenced) {
+		return nil, false, fmt.Errorf("worklease: ReadCheckpoint: workID=%q holderID=%q: %w", token.WorkID(), token.HolderID(), ErrFenced)
+	}
+
+	if err != nil {
+		return nil, false, fmt.Errorf("worklease: ReadCheckpoint: %w", err)
+	}
+
+	return state, cleanHandoff, nil
 }
 
 // Forget permanently deletes the lease record for token's workID. Returns

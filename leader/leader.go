@@ -93,7 +93,9 @@ func Elect(ctx context.Context, lease worklease.Lease, workID string, cfg Config
 	fnErr := fn(renewCtx)
 
 	// ===== STEP 7: OnLost if renewal context was cancelled before fn returned =====
-	if renewCtx.Err() != nil && cfg.OnLost != nil {
+	// Only the renewal goroutine cancels renewCtx while ctx is still live, so a
+	// cancelled parent — caller shutdown — is not reported as a lost lease.
+	if renewCtx.Err() != nil && ctx.Err() == nil && cfg.OnLost != nil {
 		cfg.OnLost(ctx, token)
 	}
 

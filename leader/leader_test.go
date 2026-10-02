@@ -282,6 +282,23 @@ var _ = Describe("leader", func() {
 				Expect(err).NotTo(HaveOccurred())
 				Expect(lost).To(BeTrue())
 			})
+			It("does not call OnLost when the parent context is cancelled", func() {
+				parentCtx, parentCancel := context.WithCancel(ctx)
+				renewCtx, renewCancel := context.WithCancel(parentCtx)
+				defer renewCancel()
+				mockLease.EXPECT().Acquire(gomock.Any(), "work-1").Return(worklease.Token{}, nil)
+				mockLease.EXPECT().StartRenewal(gomock.Any(), worklease.Token{}).Return(renewCtx, func() {})
+				mockLease.EXPECT().Release(gomock.Any(), worklease.Token{}).Return(nil)
+
+				lost := false
+				cfg := leader.Config{OnLost: func(_ context.Context, _ worklease.Token) { lost = true }}
+				_ = leader.Elect(parentCtx, mockLease, "work-1", cfg, func(c context.Context) error {
+					parentCancel() // caller shutdown — the lease was not lost
+					<-c.Done()
+					return c.Err()
+				})
+				Expect(lost).To(BeFalse())
+			})
 			It("does not call OnLost on a clean fn return", func() {
 				stopFn := func() {}
 				renewCtx, renewCancel := context.WithCancel(ctx)

@@ -50,7 +50,8 @@ WHERE work_id       = $2
 SELECT expires_at
 FROM worklease_leases
 WHERE work_id       = $1
-  AND fencing_token = $2`
+  AND holder_id     = $2
+  AND fencing_token = $3`
 
 	queryRelease = `
 UPDATE worklease_leases
@@ -100,7 +101,7 @@ func New(db *sql.DB) (backend.Backend, error) {
 }
 
 // Acquire attempts to acquire a lease for the given work. Returns ErrLeaseHeld
-// if a lease already exists for this workID. Returns a LeaseRecord with the newly
+// if the lease for this workID is held and has not expired. Returns a LeaseRecord with the newly
 // acquired lease details on success.
 func (p *postgresBackend) Acquire(ctx context.Context, workID, holderID string, ttl time.Duration) (backend.LeaseRecord, error) {
 	// ===== STEP 1: Execute INSERT/UPDATE with RETURNING =====
@@ -126,7 +127,7 @@ func (p *postgresBackend) Acquire(ctx context.Context, workID, holderID string, 
 }
 
 // Checkpoint persists state associated with the current lease. Returns ErrFenced
-// if the record's fencing token no longer matches the stored lease.
+// if the record's holder ID or fencing token no longer matches the stored lease.
 func (p *postgresBackend) Checkpoint(ctx context.Context, record backend.LeaseRecord, state []byte, ttl time.Duration) error {
 	// ===== STEP 1: Execute UPDATE =====
 	ttlStr := fmt.Sprintf("%.6f seconds", ttl.Seconds())
@@ -148,7 +149,7 @@ func (p *postgresBackend) Checkpoint(ctx context.Context, record backend.LeaseRe
 }
 
 // Renew extends the lease expiration time. Returns ErrFenced if the record's
-// fencing token no longer matches the stored lease. Returns ErrLeaseExpired if
+// holder ID or fencing token no longer matches the stored lease. Returns ErrLeaseExpired if
 // the lease has already expired.
 func (p *postgresBackend) Renew(ctx context.Context, record backend.LeaseRecord, ttl time.Duration) error {
 	// ===== STEP 1: Execute UPDATE =====
@@ -166,7 +167,7 @@ func (p *postgresBackend) Renew(ctx context.Context, record backend.LeaseRecord,
 	if n == 0 {
 		// ===== STEP 3: Distinguish Fenced vs Expired =====
 		var expiresAt time.Time
-		err := p.db.QueryRowContext(ctx, queryRenewCheck, record.WorkID, record.FencingToken).Scan(&expiresAt)
+		err := p.db.QueryRowContext(ctx, queryRenewCheck, record.WorkID, record.HolderID, record.FencingToken).Scan(&expiresAt)
 		if err != nil {
 			if errors.Is(err, sql.ErrNoRows) {
 				return worklease.ErrFenced
@@ -181,7 +182,7 @@ func (p *postgresBackend) Renew(ctx context.Context, record backend.LeaseRecord,
 
 // Release surrenders the lease and expires it immediately by setting expires_at to
 // the past, so a successor can acquire without waiting for the TTL. Returns ErrFenced
-// if the record's fencing token no longer matches the stored lease.
+// if the record's holder ID or fencing token no longer matches the stored lease.
 func (p *postgresBackend) Release(ctx context.Context, record backend.LeaseRecord) error {
 	// ===== STEP 1: Execute UPDATE =====
 	result, err := p.db.ExecContext(ctx, queryRelease, record.WorkID, record.HolderID, record.FencingToken)
@@ -226,8 +227,8 @@ func (p *postgresBackend) ReadCheckpoint(ctx context.Context, record backend.Lea
 }
 
 // Forget permanently deletes the row identified by record. Returns ErrFenced
-// if record.FencingToken no longer matches the stored lease's fencing token,
-// or if no row exists for record.WorkID.
+// if record.HolderID or record.FencingToken no longer matches the stored
+// lease, or if no row exists for record.WorkID.
 func (p *postgresBackend) Forget(ctx context.Context, record backend.LeaseRecord) error {
 	result, err := p.db.ExecContext(ctx, queryForget, record.WorkID, record.HolderID, record.FencingToken)
 	if err != nil {

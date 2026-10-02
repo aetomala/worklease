@@ -5,6 +5,26 @@ import (
 	"time"
 )
 
+// TestDefaultRenewalInterval verifies that the default renewal interval is TTL/2
+// and never reaches zero — time.NewTicker panics on a non-positive interval,
+// which would crash the process from inside the renewal goroutine.
+func TestDefaultRenewalInterval(t *testing.T) {
+	cases := []struct {
+		ttl  time.Duration
+		want time.Duration
+	}{
+		{30 * time.Second, 15 * time.Second},
+		{2 * time.Nanosecond, time.Nanosecond},
+		{time.Nanosecond, time.Nanosecond},
+	}
+
+	for _, tc := range cases {
+		if got := defaultRenewalInterval(tc.ttl); got != tc.want {
+			t.Errorf("defaultRenewalInterval(%v) = %v, want %v", tc.ttl, got, tc.want)
+		}
+	}
+}
+
 // TestWithRenewalBackoffClamping verifies the clamping rules of WithRenewalBackoff
 // against the unexported renewalConfig. It lives in package worklease (internal)
 // because renewalConfig fields are not visible to the external test package.

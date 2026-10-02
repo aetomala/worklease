@@ -21,10 +21,33 @@ This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 - `ErrRetentionRequired` — returned by `Vacuum.Sweep` when `SweepOptions.Retention <= 0`.
 - `backend.SweepOptions` — canonical definition backing `worklease.SweepOptions` (type alias).
 
+### Fixed
+
+- Renewal goroutine retry window now advances after every successful renewal. Previously it stayed bounded by `token.ExpiresAt()` from `Acquire`, so once one TTL had elapsed the first transient `Renew` error cancelled `renewCtx` with `ErrLeaseWindowExhausted` while the lease was still valid in storage. The first window is also capped by the local acquire time plus TTL (monotonic clock), so a backend clock running ahead of the local clock can no longer extend retries past the true expiry.
+- `New` rejects a negative `Config.TTL`, and the default renewal interval is floored at 1ns. Previously a TTL below 2ns produced a zero `TTL/2` interval, and a negative TTL a negative one; `time.NewTicker` then panicked inside the renewal goroutine and crashed the process.
+- `worker.Runner.Run` stops lease renewal when the `WorkFn` panics. Previously the renewal goroutine kept renewing after a recovered panic, holding the lease indefinitely.
+- `worker.ErrLeaseRequired` and `worker.ErrWorkFnRequired` messages now carry the `worker:` prefix used by every other package's sentinels. Match with `errors.Is`, not the message text.
+- Holder-ID fencing parity: the memory backend now rejects `Checkpoint`, `Renew`, `Release`, and `Forget` with `ErrFenced` when the record's holder ID does not match the stored lease, as the PostgreSQL backend and ADR-0016 already specify. The PostgreSQL `Renew` no longer misreports a holder mismatch as `ErrLeaseExpired`. A new conformance spec pins the behavior.
+- Memory backend boundary parity with PostgreSQL: `Renew` returns `ErrLeaseExpired` when the clock equals `expiresAt` (postgres: `expires_at > NOW()`), and `Sweep` deletes only rows strictly older than `Retention` (postgres: `updated_at < NOW() - retention`).
+- Memory backend honors context cancellation: every method returns the context error without side effects when `ctx` is already done, as `database/sql` does for the PostgreSQL backend. Previously a cancelled `Acquire` still acquired the lease in memory, which hid cancellation-path behavior that differs on PostgreSQL. A new conformance spec pins the behavior.
+- `leader.Config.OnLost` no longer fires when the parent context passed to `Elect` is cancelled. As documented, it fires only when the renewal context is cancelled by fencing or renewal failure.
+- `Lease.ReadCheckpoint` wraps backend errors like the other `Lease` methods: `worklease: ReadCheckpoint: workID=… holderID=…: …` for `ErrFenced`, and `worklease: ReadCheckpoint: …` otherwise. Use `errors.Is`; a direct `err == worklease.ErrFenced` comparison no longer matches.
+- `checkpoint.Decode` returns the zero value of `T` on a codec error instead of a partially decoded value. `Encode` and `Decode` wrap codec errors with `checkpoint: Encode:` and `checkpoint: Decode:` prefixes.
+
 ### Documentation
 
+- Godoc drift corrected: `Token`, `Checkpoint`, and `LeaseRecord` no longer claim a token or record comes from `Renew`, and `Forget` is listed among the operations that take one; `Acquire` docs on `Lease`, `Backend`, and the PostgreSQL backend state that `ErrLeaseHeld` means held *and unexpired*; `OnAcquire`/`AcquireEvent` document one event per poll under `WithWaitForLease`; `Token.ExpiresAt` documents that it is the acquisition-time expiry from the backend clock; `OnFenced` notes it does not fire for `ReadCheckpoint` or `Forget`; the `doc.go` `Backend` link resolves.
+- `docs/ARCHITECTURE.md` roadmap and ADR index updated for v0.6 (ADR-0016 retention Accepted, ADR-0017 listed); `UPGRADING.md` notes that `Forget` also returns `ErrFenced` when no row exists.
+- Examples: `partition-processor` no longer waits out the TTL after a clean `Release`; the stale comment predated ADR-0012. The `renewal-backoff` scenario 2 comment now explains that the window-exhausted path fires without any backoff retry.
 - ADR-0016 retention component flipped from Proposed to Accepted.
 - ADR-0017 added — schema migration remains caller-owned.
+
+### Chore
+
+- Go toolchain directive bumped from go1.26.5 to go1.26.8 for GO-2026-6090 (`crypto/tls`) and GO-2026-5972 (`encoding/asn1`), both reachable standard-library vulnerabilities fixed in go1.26.6. The `go 1.25.0` floor is unchanged.
+- CI fails the test job if the PostgreSQL suite would skip: the job sets `WORKLEASE_REQUIRE_POSTGRES=1`, and the suite fails instead of skipping when that variable is set without `WORKLEASE_TEST_POSTGRES_DSN`.
+- CI vets each example module before building it, and a failing example now fails the loop explicitly.
+- `.gitignore` covers example binaries built in place and `.claude/settings.local.json`.
 
 ---
 

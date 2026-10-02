@@ -9,21 +9,21 @@ import (
 // single-attempt — retry policy is the caller's responsibility.
 type Backend interface {
 	// Acquire attempts to acquire a lease for the given work. Returns ErrLeaseHeld
-	// if a lease already exists for this workID.
+	// if the lease for this workID is held and has not expired.
 	Acquire(ctx context.Context, workID, holderID string, ttl time.Duration) (LeaseRecord, error)
 
 	// Checkpoint persists state associated with the current lease. The caller must
-	// pass a valid LeaseRecord obtained from Acquire or Renew. Returns ErrFenced
-	// if the record's fencing token no longer matches the stored lease.
+	// pass a valid LeaseRecord obtained from Acquire. Returns ErrFenced
+	// if the record's holder ID or fencing token no longer matches the stored lease.
 	Checkpoint(ctx context.Context, record LeaseRecord, state []byte, ttl time.Duration) error
 
 	// Renew extends the lease expiration time. Returns ErrFenced if the record's
-	// fencing token no longer matches the stored lease, or ErrLeaseExpired if the
-	// lease has already expired.
+	// holder ID or fencing token no longer matches the stored lease, or
+	// ErrLeaseExpired if the lease has already expired.
 	Renew(ctx context.Context, record LeaseRecord, ttl time.Duration) error
 
-	// Release surrenders the lease. Returns ErrFenced if the record's fencing
-	// token no longer matches the stored lease.
+	// Release surrenders the lease. Returns ErrFenced if the record's holder ID
+	// or fencing token no longer matches the stored lease.
 	// Implementations must set expires_at to a value strictly less than NOW() so
 	// that a successor's immediately following Acquire call satisfies the expiry
 	// condition. A one-millisecond past offset satisfies this for any backend with
@@ -36,8 +36,8 @@ type Backend interface {
 	ReadCheckpoint(ctx context.Context, record LeaseRecord) (state []byte, cleanHandoff bool, err error)
 
 	// Forget permanently deletes the row identified by record. Returns ErrFenced
-	// if record.FencingToken no longer matches the stored lease's fencing token,
-	// or if no row exists for record.WorkID.
+	// if record.HolderID or record.FencingToken no longer matches the stored
+	// lease, or if no row exists for record.WorkID.
 	Forget(ctx context.Context, record LeaseRecord) error
 
 	// Sweep deletes rows older than opts.Retention that are not currently held,
@@ -47,7 +47,7 @@ type Backend interface {
 }
 
 // LeaseRecord represents a currently held lease. It is returned by Acquire and
-// must be passed back to Checkpoint, Renew, Release, and ReadCheckpoint.
+// must be passed back to Checkpoint, Renew, Release, ReadCheckpoint, and Forget.
 // All fields are read-only.
 type LeaseRecord struct {
 	// WorkID is the identifier for the unit of work being leased. Immutable.

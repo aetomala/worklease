@@ -1253,9 +1253,10 @@ becomes available. This breaks clean pool shutdown. `pool.New` returns
 - `Acquire` with `WithWaitForLease` returns `ctx.Err()` on wait-loop cancellation/deadline (breaking; ADR-0005 amendment, see `UPGRADING.md`)
 - ADR-0013, ADR-0016 (fencing component)
 
-### v0.6 / pre-1.0 — Planned
+### v0.6 — Unreleased
 
-- `Forget` / `Vacuum.Sweep` — caller-governed row lifecycle and retention (ADR-0016 retention component, Proposed)
+- `Lease.Forget` / `Vacuum.Sweep` — caller-governed row lifecycle and retention; `Backend` gains `Forget` and `Sweep` (ADR-0016 retention component, Accepted)
+- ADR-0017 — schema migration remains caller-owned
 
 ### Unscheduled (post-1.0)
 
@@ -1286,12 +1287,13 @@ the decision made, and the consequences — including the alternatives that were
 | [0013](adr/0013-renewal-goroutine-retry-policy.md) | Renewal goroutine retry policy bounded by the lease window | Accepted |
 | [0014](adr/0014-backend-slice-ownership-contract.md) | Backend slice ownership contract — defensive copies required | Accepted |
 | [0015](adr/0015-backend-conformance-suite.md) | Backend conformance suite — RunSuite against all backends | Accepted |
-| [0016](adr/0016-row-lifecycle-global-fencing-sequence.md) | Row lifecycle: global fencing sequence (Accepted); retention (Proposed, v0.6) | Accepted (fencing) |
+| [0016](adr/0016-row-lifecycle-global-fencing-sequence.md) | Row lifecycle: global fencing sequence (v0.5); retention — `Forget` / `Vacuum.Sweep` (v0.6) | Accepted |
+| [0017](adr/0017-schema-migration-caller-owned.md) | Schema migration remains caller-owned | Accepted |
 
 ADR-0007 and ADR-0010 carry v0.4 amendments (observer event-struct redesign; leader lifecycle
 callbacks). ADR-0004 and ADR-0005 carry v0.5 amendments (renewal bounded retry; acquire ctx.Err()
 propagation). ADR-0013 shipped in v0.5; ADR-0016's global-fencing-sequence component shipped in
-v0.5, while its retention component (`Forget` / `Vacuum.Sweep`) remains Proposed for v0.6.
+v0.5, and its retention component (`Forget` / `Vacuum.Sweep`) is Accepted for v0.6.
 
 ---
 

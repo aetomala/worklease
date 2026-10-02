@@ -20,6 +20,11 @@ func TestPostgres(t *testing.T) {
 var _ = BeforeSuite(func() {
 	dsn := os.Getenv("WORKLEASE_TEST_POSTGRES_DSN")
 	if dsn == "" {
+		// CI sets WORKLEASE_REQUIRE_POSTGRES so a missing DSN fails the run
+		// instead of passing with zero specs executed.
+		if os.Getenv("WORKLEASE_REQUIRE_POSTGRES") != "" {
+			Fail("WORKLEASE_REQUIRE_POSTGRES is set but WORKLEASE_TEST_POSTGRES_DSN is not")
+		}
 		Skip("WORKLEASE_TEST_POSTGRES_DSN not set — skipping postgres integration tests")
 	}
 	var err error
