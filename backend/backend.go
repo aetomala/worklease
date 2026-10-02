@@ -9,11 +9,11 @@ import (
 // single-attempt — retry policy is the caller's responsibility.
 type Backend interface {
 	// Acquire attempts to acquire a lease for the given work. Returns ErrLeaseHeld
-	// if a lease already exists for this workID.
+	// if the lease for this workID is held and has not expired.
 	Acquire(ctx context.Context, workID, holderID string, ttl time.Duration) (LeaseRecord, error)
 
 	// Checkpoint persists state associated with the current lease. The caller must
-	// pass a valid LeaseRecord obtained from Acquire or Renew. Returns ErrFenced
+	// pass a valid LeaseRecord obtained from Acquire. Returns ErrFenced
 	// if the record's holder ID or fencing token no longer matches the stored lease.
 	Checkpoint(ctx context.Context, record LeaseRecord, state []byte, ttl time.Duration) error
 
@@ -47,7 +47,7 @@ type Backend interface {
 }
 
 // LeaseRecord represents a currently held lease. It is returned by Acquire and
-// must be passed back to Checkpoint, Renew, Release, and ReadCheckpoint.
+// must be passed back to Checkpoint, Renew, Release, ReadCheckpoint, and Forget.
 // All fields are read-only.
 type LeaseRecord struct {
 	// WorkID is the identifier for the unit of work being leased. Immutable.

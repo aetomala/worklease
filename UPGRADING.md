@@ -21,7 +21,7 @@
 
 ### New in v0.6.0
 
-- `Lease.Forget(ctx, token) error` — permanently deletes a lease row. Returns `ErrFenced` if the token no longer matches the stored lease. Unlike `Release`, the row is not left behind for a future `ReadCheckpoint`.
+- `Lease.Forget(ctx, token) error` — permanently deletes a lease row. Returns `ErrFenced` if the token no longer matches the stored lease or if no row exists for the work ID. Unlike `Release`, the row is not left behind for a future `ReadCheckpoint`.
 - `worklease.Vacuum` and `worklease.SweepOptions` — age-based bulk cleanup. `NewVacuum(b backend.Backend) *Vacuum`, then `v.Sweep(ctx, SweepOptions{Retention: ..., IncludeCrashed: ...})` deletes rows older than `Retention` that are not currently held. `Retention` must exceed the maximum TTL configured across all `Lease` clients sharing the backend — `Sweep` returns `ErrRetentionRequired` if `Retention <= 0`.
 - `ErrRetentionRequired` — new sentinel, returned by `Vacuum.Sweep`.
 - ADR-0016's retention component (`Forget` / `Vacuum.Sweep`) is now Accepted.

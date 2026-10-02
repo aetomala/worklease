@@ -101,7 +101,7 @@ func New(db *sql.DB) (backend.Backend, error) {
 }
 
 // Acquire attempts to acquire a lease for the given work. Returns ErrLeaseHeld
-// if a lease already exists for this workID. Returns a LeaseRecord with the newly
+// if the lease for this workID is held and has not expired. Returns a LeaseRecord with the newly
 // acquired lease details on success.
 func (p *postgresBackend) Acquire(ctx context.Context, workID, holderID string, ttl time.Duration) (backend.LeaseRecord, error) {
 	// ===== STEP 1: Execute INSERT/UPDATE with RETURNING =====

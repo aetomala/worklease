@@ -1171,6 +1171,20 @@ var _ = Describe("worklease", func() {
 				Expect(err).NotTo(HaveOccurred())
 				Expect(spy.acquireCalls[0].Duration).To(BeNumerically(">=", 5*time.Millisecond))
 			})
+
+			It("calls OnAcquire once per poll when WithWaitForLease is set", func() {
+				gomock.InOrder(
+					mockB.EXPECT().Acquire(gomock.Any(), "w1", "test-worker", 30*time.Second).Return(backend.LeaseRecord{}, worklease.ErrLeaseHeld),
+					mockB.EXPECT().Acquire(gomock.Any(), "w1", "test-worker", 30*time.Second).Return(backend.LeaseRecord{}, worklease.ErrLeaseHeld),
+					mockB.EXPECT().Acquire(gomock.Any(), "w1", "test-worker", 30*time.Second).Return(record, nil),
+				)
+				_, err := lease.Acquire(ctx, "w1", worklease.WithWaitForLease(), worklease.WithPollInterval(time.Millisecond))
+				Expect(err).NotTo(HaveOccurred())
+				Expect(spy.acquireCalls).To(HaveLen(3))
+				Expect(spy.acquireCalls[0].Err).To(MatchError(worklease.ErrLeaseHeld))
+				Expect(spy.acquireCalls[1].Err).To(MatchError(worklease.ErrLeaseHeld))
+				Expect(spy.acquireCalls[2].Err).NotTo(HaveOccurred())
+			})
 		})
 	})
 
