@@ -165,7 +165,16 @@ func (c *leaseClient) ReadCheckpoint(ctx context.Context, token Token) ([]byte, 
 	state, cleanHandoff, err := c.b.ReadCheckpoint(ctx, record)
 	dur := time.Since(start)
 	c.obs.OnReadCheckpoint(ctx, ReadCheckpointEvent{Token: token, Duration: dur, CleanHandoff: cleanHandoff, Size: len(state), Err: err})
-	return state, cleanHandoff, err
+
+	if errors.Is(err, ErrFenced) {
+		return nil, false, fmt.Errorf("worklease: ReadCheckpoint: workID=%q holderID=%q: %w", token.WorkID(), token.HolderID(), ErrFenced)
+	}
+
+	if err != nil {
+		return nil, false, fmt.Errorf("worklease: ReadCheckpoint: %w", err)
+	}
+
+	return state, cleanHandoff, nil
 }
 
 // Forget permanently deletes the lease record for token's workID. Returns

@@ -399,6 +399,31 @@ var _ = Describe("worklease", func() {
 			Expect(state).To(Equal(checkpointData))
 			Expect(cleanHandoff).To(BeFalse())
 		})
+
+		It("fencing token stale → ErrFenced; error wraps workID and holderID", func() {
+			lease, _ := worklease.New(mockB, cfg)
+			record := backend.LeaseRecord{WorkID: "w1", HolderID: "test-worker", FencingToken: 1, ExpiresAt: time.Now().Add(30 * time.Second)}
+			mockB.EXPECT().Acquire(gomock.Any(), "w1", "test-worker", 30*time.Second).Return(record, nil)
+			token, _ := lease.Acquire(ctx, "w1")
+
+			mockB.EXPECT().ReadCheckpoint(gomock.Any(), record).Return(nil, false, worklease.ErrFenced)
+			_, _, err := lease.ReadCheckpoint(ctx, token)
+			Expect(errors.Is(err, worklease.ErrFenced)).To(BeTrue())
+			Expect(err.Error()).To(ContainSubstring(`worklease: ReadCheckpoint: workID="w1" holderID="test-worker"`))
+		})
+
+		It("non-fencing backend error → wrapped with the worklease: ReadCheckpoint: prefix", func() {
+			lease, _ := worklease.New(mockB, cfg)
+			record := backend.LeaseRecord{WorkID: "w1", HolderID: "test-worker", FencingToken: 1, ExpiresAt: time.Now().Add(30 * time.Second)}
+			mockB.EXPECT().Acquire(gomock.Any(), "w1", "test-worker", 30*time.Second).Return(record, nil)
+			token, _ := lease.Acquire(ctx, "w1")
+
+			backendErr := errors.New("connection reset")
+			mockB.EXPECT().ReadCheckpoint(gomock.Any(), record).Return(nil, false, backendErr)
+			_, _, err := lease.ReadCheckpoint(ctx, token)
+			Expect(errors.Is(err, backendErr)).To(BeTrue())
+			Expect(err.Error()).To(HavePrefix("worklease: ReadCheckpoint: "))
+		})
 	})
 
 	Describe("leaseClient.Forget", func() {

@@ -31,6 +31,7 @@ This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 - Memory backend boundary parity with PostgreSQL: `Renew` returns `ErrLeaseExpired` when the clock equals `expiresAt` (postgres: `expires_at > NOW()`), and `Sweep` deletes only rows strictly older than `Retention` (postgres: `updated_at < NOW() - retention`).
 - Memory backend honors context cancellation: every method returns the context error without side effects when `ctx` is already done, as `database/sql` does for the PostgreSQL backend. Previously a cancelled `Acquire` still acquired the lease in memory, which hid cancellation-path behavior that differs on PostgreSQL. A new conformance spec pins the behavior.
 - `leader.Config.OnLost` no longer fires when the parent context passed to `Elect` is cancelled. As documented, it fires only when the renewal context is cancelled by fencing or renewal failure.
+- `Lease.ReadCheckpoint` wraps backend errors like the other `Lease` methods: `worklease: ReadCheckpoint: workID=… holderID=…: …` for `ErrFenced`, and `worklease: ReadCheckpoint: …` otherwise. Use `errors.Is`; a direct `err == worklease.ErrFenced` comparison no longer matches.
 
 ### Documentation
 
