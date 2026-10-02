@@ -63,7 +63,9 @@ func NewRunner(cfg RunnerConfig) (*Runner, error) {
 
 // Run acquires the lease for workID, reads prior checkpoint state, starts
 // automatic renewal, calls the WorkFn with the renewal context, checkpoints
-// any returned final state, stops renewal, and releases the lease. Returns
+// any returned final state, stops renewal, and releases the lease. If the
+// WorkFn panics, renewal is stopped, the lease is not released, and the panic
+// propagates — the lease then expires after its TTL. Returns
 // worklease.ErrFenced if the lease is superseded at any point — in that case
 // Release is not called. Returns the WorkFn error on non-fencing work failure
 // after checkpointing any partial state and releasing the lease. Returns
@@ -88,6 +90,7 @@ func (r *Runner) Run(ctx context.Context, workID string) error {
 
 	// ===== STEP 3: Start Renewal =====
 	renewCtx, stopRenewal := r.lease.StartRenewal(ctx, token, r.renewalOptions...)
+	defer stopRenewal() // panic-safety net; stopRenewal is idempotent
 
 	// ===== STEP 4: Call WorkFn =====
 	finalState, workErr := r.fn(renewCtx, token, prior, cleanHandoff)

@@ -25,6 +25,7 @@ This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 
 - Renewal goroutine retry window now advances after every successful renewal. Previously it stayed bounded by `token.ExpiresAt()` from `Acquire`, so once one TTL had elapsed the first transient `Renew` error cancelled `renewCtx` with `ErrLeaseWindowExhausted` while the lease was still valid in storage. The first window is also capped by the local acquire time plus TTL (monotonic clock), so a backend clock running ahead of the local clock can no longer extend retries past the true expiry.
 - `New` rejects a negative `Config.TTL`, and the default renewal interval is floored at 1ns. Previously a TTL below 2ns produced a zero `TTL/2` interval, and a negative TTL a negative one; `time.NewTicker` then panicked inside the renewal goroutine and crashed the process.
+- `worker.Runner.Run` stops lease renewal when the `WorkFn` panics. Previously the renewal goroutine kept renewing after a recovered panic, holding the lease indefinitely.
 
 ### Documentation
 

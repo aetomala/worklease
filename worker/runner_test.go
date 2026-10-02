@@ -261,4 +261,28 @@ var _ = Describe("Runner", func() {
 			Expect(errors.Is(err, readErr)).To(BeTrue())
 		})
 	})
+
+	// ===== PHASE 6: Edge Cases =====
+	Describe("Phase 6: Run — WorkFn Panic", func() {
+		It("WorkFn panics → stopRenewal still called, panic propagates, no Release", func() {
+			mockLease := testutil.NewMockLease(ctrl)
+			token := worklease.Token{}
+			stopped := false
+			mockLease.EXPECT().Acquire(gomock.Any(), "w1").Return(token, nil)
+			mockLease.EXPECT().ReadCheckpoint(gomock.Any(), token).Return(nil, false, nil)
+			mockLease.EXPECT().StartRenewal(gomock.Any(), token).Return(ctx, func() { stopped = true })
+			mockLease.EXPECT().Release(gomock.Any(), gomock.Any()).Times(0)
+
+			r, err := worker.NewRunner(worker.RunnerConfig{
+				Lease: mockLease,
+				WorkFn: func(_ context.Context, _ worklease.Token, _ []byte, _ bool) ([]byte, error) {
+					panic("work function failure")
+				},
+			})
+			Expect(err).NotTo(HaveOccurred())
+
+			Expect(func() { _ = r.Run(ctx, "w1") }).To(PanicWith("work function failure"))
+			Expect(stopped).To(BeTrue())
+		})
+	})
 })
