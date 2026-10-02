@@ -44,6 +44,7 @@ This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 
 ### Chore
 
+- Go toolchain directive bumped from go1.26.5 to go1.26.8 for GO-2026-6090 (`crypto/tls`) and GO-2026-5972 (`encoding/asn1`), both reachable standard-library vulnerabilities fixed in go1.26.6. The `go 1.25.0` floor is unchanged.
 - CI fails the test job if the PostgreSQL suite would skip: the job sets `WORKLEASE_REQUIRE_POSTGRES=1`, and the suite fails instead of skipping when that variable is set without `WORKLEASE_TEST_POSTGRES_DSN`.
 - CI vets each example module before building it, and a failing example now fails the loop explicitly.
 - `.gitignore` covers example binaries built in place and `.claude/settings.local.json`.

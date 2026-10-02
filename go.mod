@@ -2,7 +2,7 @@ module github.com/aetomala/worklease
 
 go 1.25.0
 
-toolchain go1.26.5
+toolchain go1.26.8
 
 require github.com/lib/pq v1.10.9
 
