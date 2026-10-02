@@ -53,13 +53,16 @@ func New(b backend.Backend, cfg Config) (Lease, error) {
 	return &leaseClient{b: b, cfg: cfg, obs: cfg.Observer}, nil
 }
 
-// newToken converts a backend LeaseRecord to an exported Token.
-func newToken(r backend.LeaseRecord) Token {
+// newToken converts a backend LeaseRecord to an exported Token. The deadline is
+// the local monotonic bound on the lease window — the time the acquiring backend
+// call started plus TTL — which never exceeds the true expiry.
+func newToken(r backend.LeaseRecord, deadline time.Time) Token {
 	return Token{
 		workID:       r.WorkID,
 		holderID:     r.HolderID,
 		fencingToken: r.FencingToken,
 		expiresAt:    r.ExpiresAt,
+		deadline:     deadline,
 	}
 }
 

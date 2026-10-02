@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	. "github.com/onsi/ginkgo/v2"
@@ -546,6 +547,64 @@ var _ = Describe("worklease", func() {
 			defer stopRenewal()
 
 			Eventually(renewCtx.Done()).Should(BeClosed())
+			Expect(context.Cause(renewCtx)).To(MatchError(worklease.ErrLeaseWindowExhausted))
+		})
+
+		It("successful renewal → retry window extends past the token's original ExpiresAt", func() {
+			shortCfg := cfg
+			shortCfg.TTL = 200 * time.Millisecond
+			lease, _ := worklease.New(mockB, shortCfg)
+			record := backend.LeaseRecord{
+				WorkID:       "w1",
+				HolderID:     "test-worker",
+				FencingToken: 1,
+				ExpiresAt:    time.Now().Add(200 * time.Millisecond),
+			}
+			mockB.EXPECT().Acquire(gomock.Any(), "w1", "test-worker", 200*time.Millisecond).Return(record, nil)
+			token, _ := lease.Acquire(ctx, "w1")
+
+			// Renewals succeed, except for one transient error injected after the
+			// token's original ExpiresAt — when the lease is still valid in storage.
+			var injected atomic.Bool
+			mockB.EXPECT().Renew(gomock.Any(), record, 200*time.Millisecond).DoAndReturn(
+				func(context.Context, backend.LeaseRecord, time.Duration) error {
+					if time.Now().After(record.ExpiresAt) && injected.CompareAndSwap(false, true) {
+						return errors.New("connection reset")
+					}
+					return nil
+				}).AnyTimes()
+
+			renewCtx, stopRenewal := lease.StartRenewal(ctx, token,
+				worklease.WithRenewalInterval(50*time.Millisecond),
+				worklease.WithRenewalBackoff(5*time.Millisecond, 10*time.Millisecond, 0))
+			defer stopRenewal()
+
+			Eventually(injected.Load).Should(BeTrue())
+			Consistently(func() error { return context.Cause(renewCtx) }, 150*time.Millisecond).Should(BeNil())
+		})
+
+		It("backend clock ahead of local clock → retry window bounded by local acquire time plus TTL", func() {
+			shortCfg := cfg
+			shortCfg.TTL = 150 * time.Millisecond
+			lease, _ := worklease.New(mockB, shortCfg)
+			// ExpiresAt reflects a backend clock running 10s ahead of the local clock.
+			record := backend.LeaseRecord{
+				WorkID:       "w1",
+				HolderID:     "test-worker",
+				FencingToken: 1,
+				ExpiresAt:    time.Now().Add(10*time.Second + 150*time.Millisecond),
+			}
+			mockB.EXPECT().Acquire(gomock.Any(), "w1", "test-worker", 150*time.Millisecond).Return(record, nil)
+			token, _ := lease.Acquire(ctx, "w1")
+
+			mockB.EXPECT().Renew(gomock.Any(), record, 150*time.Millisecond).Return(errors.New("connection lost")).AnyTimes()
+
+			renewCtx, stopRenewal := lease.StartRenewal(ctx, token,
+				worklease.WithRenewalInterval(10*time.Millisecond),
+				worklease.WithRenewalBackoff(1*time.Millisecond, 5*time.Millisecond, 0))
+			defer stopRenewal()
+
+			Eventually(renewCtx.Done(), time.Second).Should(BeClosed())
 			Expect(context.Cause(renewCtx)).To(MatchError(worklease.ErrLeaseWindowExhausted))
 		})
 

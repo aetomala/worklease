@@ -18,8 +18,14 @@ import (
 //   - Fencing: Renew returns ErrFenced. The goroutine cancels renewCtx with cause
 //     ErrFenced and exits, after emitting OnRenew then OnFenced. No retry.
 //   - Lease window exhausted: a non-fencing Renew error is retried with exponential
-//     backoff until time.Now() >= token.ExpiresAt(). The goroutine then cancels
-//     renewCtx with cause ErrLeaseWindowExhausted and exits.
+//     backoff until the lease window closes. The goroutine then cancels renewCtx
+//     with cause ErrLeaseWindowExhausted and exits.
+//
+// The lease window starts as the earlier of token.ExpiresAt() and the local
+// start time of the acquiring backend call plus TTL. After every successful
+// renewal it advances to the local start time of that Renew call plus TTL. The
+// local bounds use the monotonic clock, so they never exceed the true expiry
+// regardless of skew between the local and backend clocks.
 //   - Parent context cancelled: ctx.Done() fires. The goroutine exits; renewCtx
 //     auto-cancels as a child of ctx and the goroutine sets no cause.
 //
@@ -52,6 +58,7 @@ func (c *leaseClient) StartRenewal(ctx context.Context, token Token, opts ...Ren
 		defer wg.Done()
 		ticker := time.NewTicker(rcfg.renewalInterval)
 		defer ticker.Stop()
+		window := initialWindow(token)
 		for {
 			select {
 			case <-stopCh:
@@ -59,7 +66,7 @@ func (c *leaseClient) StartRenewal(ctx context.Context, token Token, opts ...Ren
 			case <-ctx.Done():
 				return // Path 4: parent cancelled — renewCtx auto-cancels
 			case <-ticker.C:
-				if !c.renewCycle(ctx, token, rcfg, cancelCause, stopCh) {
+				if !c.renewCycle(ctx, token, rcfg, cancelCause, stopCh, &window) {
 					return // Path 2 or 3 — cause already set inside renewCycle
 				}
 			}
@@ -75,12 +82,23 @@ func (c *leaseClient) StartRenewal(ctx context.Context, token Token, opts ...Ren
 	return renewCtx, stopRenewal
 }
 
+// initialWindow returns the end of the lease window known at acquisition: the
+// earlier of the backend-reported expiry and the token's local deadline. A zero
+// deadline — a Token not produced by Acquire — falls back to ExpiresAt.
+func initialWindow(token Token) time.Time {
+	if !token.deadline.IsZero() && token.deadline.Before(token.expiresAt) {
+		return token.deadline
+	}
+	return token.expiresAt
+}
+
 // renewCycle runs one renewal cycle: an initial Renew attempt followed, on a
 // non-fencing error, by exponential-backoff retries bounded by the lease window.
 // It returns true when the lease was renewed (await the next tick) and false when
 // the goroutine must exit. On a false return for a fencing or window-exhausted
 // outcome, renewCycle has already called cancelCause; on stop/parent it has not.
-func (c *leaseClient) renewCycle(ctx context.Context, token Token, rcfg renewalConfig, cancelCause context.CancelCauseFunc, stopCh <-chan struct{}) bool {
+// On success, window is advanced to the local start of the Renew call plus TTL.
+func (c *leaseClient) renewCycle(ctx context.Context, token Token, rcfg renewalConfig, cancelCause context.CancelCauseFunc, stopCh <-chan struct{}, window *time.Time) bool {
 	attempt := 1
 	base := rcfg.backoffInitial
 	for {
@@ -95,11 +113,12 @@ func (c *leaseClient) renewCycle(ctx context.Context, token Token, rcfg renewalC
 			cancelCause(ErrFenced) // Path 2
 			return false
 		case err == nil:
+			*window = start.Add(c.cfg.TTL)
 			return true // renewed — await next tick
 		}
 
 		// ===== Non-fencing error: retry with backoff, bounded by the lease window =====
-		if !time.Now().Before(token.ExpiresAt()) {
+		if !time.Now().Before(*window) {
 			cancelCause(ErrLeaseWindowExhausted) // Path 3 (before sleep)
 			return false
 		}
@@ -113,7 +132,7 @@ func (c *leaseClient) renewCycle(ctx context.Context, token Token, rcfg renewalC
 			return false // Path 4
 		case <-timer.C:
 		}
-		if !time.Now().Before(token.ExpiresAt()) {
+		if !time.Now().Before(*window) {
 			cancelCause(ErrLeaseWindowExhausted) // Path 3 (after sleep)
 			return false
 		}

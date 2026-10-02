@@ -88,6 +88,7 @@ type Token struct {
 	holderID     string
 	fencingToken uint64
 	expiresAt    time.Time
+	deadline     time.Time // Local monotonic bound — Acquire start plus TTL; zero if unknown
 }
 
 // WorkID returns the identifier for the unit of work being leased.
@@ -106,7 +107,8 @@ func (t Token) FencingToken() uint64 {
 	return t.fencingToken
 }
 
-// ExpiresAt returns the wall-clock time at which the lease expires.
+// ExpiresAt returns the lease expiry recorded at acquisition, as reported by the
+// backend's clock. It is not updated by Renew or Checkpoint.
 func (t Token) ExpiresAt() time.Time {
 	return t.expiresAt
 }
