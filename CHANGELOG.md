@@ -42,6 +42,12 @@ This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 - ADR-0016 retention component flipped from Proposed to Accepted.
 - ADR-0017 added — schema migration remains caller-owned.
 
+### Chore
+
+- CI fails the test job if the PostgreSQL suite would skip: the job sets `WORKLEASE_REQUIRE_POSTGRES=1`, and the suite fails instead of skipping when that variable is set without `WORKLEASE_TEST_POSTGRES_DSN`.
+- CI vets each example module before building it, and a failing example now fails the loop explicitly.
+- `.gitignore` covers example binaries built in place and `.claude/settings.local.json`.
+
 ---
 
 ## [v0.5.0] — 2026-06-29
