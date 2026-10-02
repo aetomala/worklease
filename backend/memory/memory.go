@@ -2,6 +2,7 @@ package memory
 
 import (
 	"context"
+	"fmt"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -90,6 +91,11 @@ func New(opts ...Option) backend.Backend {
 // the lease has expired, a new lease is created with an incremented fencing token.
 // If a valid lease already exists, ErrLeaseHeld is returned without modification.
 func (mb *memoryBackend) Acquire(ctx context.Context, workID, holderID string, ttl time.Duration) (backend.LeaseRecord, error) {
+	// ===== Check Context =====
+	if err := ctx.Err(); err != nil {
+		return backend.LeaseRecord{}, fmt.Errorf("memory: Acquire: %w", err)
+	}
+
 	// ===== STEP 1: Acquire Lock =====
 	mb.mu.Lock()
 	defer mb.mu.Unlock()
@@ -140,6 +146,11 @@ func (mb *memoryBackend) Acquire(ctx context.Context, workID, holderID string, t
 // Checkpoint persists state associated with the current lease. If the holder ID
 // or fencing token does not match, ErrFenced is returned without modification.
 func (mb *memoryBackend) Checkpoint(ctx context.Context, record backend.LeaseRecord, state []byte, ttl time.Duration) error {
+	// ===== Check Context =====
+	if err := ctx.Err(); err != nil {
+		return fmt.Errorf("memory: Checkpoint: %w", err)
+	}
+
 	// ===== STEP 1: Acquire Lock =====
 	mb.mu.Lock()
 	defer mb.mu.Unlock()
@@ -172,6 +183,11 @@ func (mb *memoryBackend) Checkpoint(ctx context.Context, record backend.LeaseRec
 // Renew extends the lease expiration time. If the holder ID or fencing token does
 // not match, ErrFenced is returned. If the lease has already expired, ErrLeaseExpired is returned.
 func (mb *memoryBackend) Renew(ctx context.Context, record backend.LeaseRecord, ttl time.Duration) error {
+	// ===== Check Context =====
+	if err := ctx.Err(); err != nil {
+		return fmt.Errorf("memory: Renew: %w", err)
+	}
+
 	// ===== STEP 1: Acquire Lock =====
 	mb.mu.Lock()
 	defer mb.mu.Unlock()
@@ -202,6 +218,11 @@ func (mb *memoryBackend) Renew(ctx context.Context, record backend.LeaseRecord, 
 // the past, so a successor can acquire without waiting for the TTL. If the holder
 // ID or fencing token does not match, ErrFenced is returned without modification.
 func (mb *memoryBackend) Release(ctx context.Context, record backend.LeaseRecord) error {
+	// ===== Check Context =====
+	if err := ctx.Err(); err != nil {
+		return fmt.Errorf("memory: Release: %w", err)
+	}
+
 	// ===== STEP 1: Acquire Lock =====
 	mb.mu.Lock()
 	defer mb.mu.Unlock()
@@ -228,6 +249,11 @@ func (mb *memoryBackend) Release(ctx context.Context, record backend.LeaseRecord
 // given lease. If the fencing token does not match, ErrFenced is returned.
 // If the record has no checkpoint, nil and false are returned without error.
 func (mb *memoryBackend) ReadCheckpoint(ctx context.Context, record backend.LeaseRecord) ([]byte, bool, error) {
+	// ===== Check Context =====
+	if err := ctx.Err(); err != nil {
+		return nil, false, fmt.Errorf("memory: ReadCheckpoint: %w", err)
+	}
+
 	// ===== STEP 1: Acquire Lock =====
 	mb.mu.Lock()
 	defer mb.mu.Unlock()
@@ -254,6 +280,11 @@ func (mb *memoryBackend) ReadCheckpoint(ctx context.Context, record backend.Leas
 // Forget permanently deletes the record identified by record.WorkID. Returns
 // ErrFenced if no record exists or the holder ID or fencing token does not match.
 func (mb *memoryBackend) Forget(ctx context.Context, record backend.LeaseRecord) error {
+	// ===== Check Context =====
+	if err := ctx.Err(); err != nil {
+		return fmt.Errorf("memory: Forget: %w", err)
+	}
+
 	mb.mu.Lock()
 	defer mb.mu.Unlock()
 
@@ -271,6 +302,11 @@ func (mb *memoryBackend) Forget(ctx context.Context, record backend.LeaseRecord)
 // returning the number deleted. Does not validate opts.Retention — callers use
 // worklease.Vacuum.Sweep, which validates before calling this.
 func (mb *memoryBackend) Sweep(ctx context.Context, opts backend.SweepOptions) (int64, error) {
+	// ===== Check Context =====
+	if err := ctx.Err(); err != nil {
+		return 0, fmt.Errorf("memory: Sweep: %w", err)
+	}
+
 	mb.mu.Lock()
 	defer mb.mu.Unlock()
 

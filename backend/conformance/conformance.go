@@ -230,6 +230,37 @@ func RunSuite(newBackend func() backend.Backend) func() {
 				})
 			})
 
+			Context("cancelled context", func() {
+				It("returns the context error without side effects from every method", func() {
+					rec, err := b.Acquire(ctx, "w1", "h", normalTTL)
+					Expect(err).NotTo(HaveOccurred())
+					Expect(b.Checkpoint(ctx, rec, []byte("before"), normalTTL)).To(Succeed())
+
+					cancelled, cancel := context.WithCancel(ctx)
+					cancel()
+
+					_, err = b.Acquire(cancelled, "w-new", "h", normalTTL)
+					Expect(err).To(MatchError(context.Canceled))
+					Expect(b.Checkpoint(cancelled, rec, []byte("after"), normalTTL)).To(MatchError(context.Canceled))
+					Expect(b.Renew(cancelled, rec, normalTTL)).To(MatchError(context.Canceled))
+					Expect(b.Release(cancelled, rec)).To(MatchError(context.Canceled))
+					_, _, err = b.ReadCheckpoint(cancelled, rec)
+					Expect(err).To(MatchError(context.Canceled))
+					Expect(b.Forget(cancelled, rec)).To(MatchError(context.Canceled))
+					_, err = b.Sweep(cancelled, backend.SweepOptions{Retention: time.Nanosecond, IncludeCrashed: true})
+					Expect(err).To(MatchError(context.Canceled))
+
+					// Nothing changed: no lease was created for w-new, and w1 is still
+					// held with its original checkpoint and no clean handoff.
+					_, err = b.Acquire(ctx, "w-new", "h2", normalTTL)
+					Expect(err).NotTo(HaveOccurred())
+					state, cleanHandoff, err := b.ReadCheckpoint(ctx, rec)
+					Expect(err).NotTo(HaveOccurred())
+					Expect(state).To(Equal([]byte("before")))
+					Expect(cleanHandoff).To(BeFalse())
+				})
+			})
+
 			Context("holder mismatch", func() {
 				It("returns ErrFenced from Checkpoint, Renew, Release, and Forget when HolderID does not match the stored lease", func() {
 					rec, err := b.Acquire(ctx, "w1", "h", normalTTL)
