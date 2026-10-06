@@ -110,6 +110,14 @@ level of abstraction, not redundant. All three receive the original `ctx`, never
 nil callbacks are no-ops. `OnElected` does not fire if `Acquire` fails; `OnRelinquished` does
 not fire if `fn` or `Release` returns `ErrFenced`.
 
+## Amendment (2026-10-06) — ADR-0018: `OnRelinquished` and release behavior
+
+`Elect` records `fn`'s outcome as an exit mode (ADR-0018): `nil` releases with `ExitFinished`, an error wrapping `worklease.ErrRetire` releases with `ExitRetired` and `Elect` returns `nil`, and any other error releases with `ExitAbandoned`. `Elect` does not release when fenced or when the lease window ran out.
+
+`Config.OnRelinquished` fires only after `Release` succeeds with `ExitFinished` or `ExitRetired`. It no longer fires after `fn` returns an error, because that run released with `ExitAbandoned` and did not hand over leadership cleanly. This narrows the v0.4 amendment's "after a successful Release".
+
+`Release` runs on a context that survives cancellation of the context passed to `Elect`, bounded by the new `Config.CleanupTimeout` (default 5s; #80). When `fn` succeeded (`nil` or `ErrRetire`), a non-fenced `Release` error is returned wrapped as `leader: release: …`; when `fn` failed, `Elect` returns `fn`'s error. `Config.BackoffInterval` applies on every non-fencing return after a successful `Acquire`, including `ExitAbandoned`; an `Acquire` error is returned without the sleep.
+
 ## References
 
 - `leader/leader.go` — `Elect`, `Config` (incl. `OnElected`/`OnLost`/`OnRelinquished`)

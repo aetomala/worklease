@@ -75,14 +75,27 @@ func (mr *MockLeaseMockRecorder) Checkpoint(ctx, token, state any) *gomock.Call 
 	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "Checkpoint", reflect.TypeOf((*MockLease)(nil).Checkpoint), ctx, token, state)
 }
 
+// Forget mocks base method.
+func (m *MockLease) Forget(ctx context.Context, token worklease.Token) error {
+	m.ctrl.T.Helper()
+	ret := m.ctrl.Call(m, "Forget", ctx, token)
+	ret0, _ := ret[0].(error)
+	return ret0
+}
+
+// Forget indicates an expected call of Forget.
+func (mr *MockLeaseMockRecorder) Forget(ctx, token any) *gomock.Call {
+	mr.mock.ctrl.T.Helper()
+	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "Forget", reflect.TypeOf((*MockLease)(nil).Forget), ctx, token)
+}
+
 // ReadCheckpoint mocks base method.
-func (m *MockLease) ReadCheckpoint(ctx context.Context, token worklease.Token) ([]byte, bool, error) {
+func (m *MockLease) ReadCheckpoint(ctx context.Context, token worklease.Token) (worklease.Checkpoint, error) {
 	m.ctrl.T.Helper()
 	ret := m.ctrl.Call(m, "ReadCheckpoint", ctx, token)
-	ret0, _ := ret[0].([]byte)
-	ret1, _ := ret[1].(bool)
-	ret2, _ := ret[2].(error)
-	return ret0, ret1, ret2
+	ret0, _ := ret[0].(worklease.Checkpoint)
+	ret1, _ := ret[1].(error)
+	return ret0, ret1
 }
 
 // ReadCheckpoint indicates an expected call of ReadCheckpoint.
@@ -92,17 +105,17 @@ func (mr *MockLeaseMockRecorder) ReadCheckpoint(ctx, token any) *gomock.Call {
 }
 
 // Release mocks base method.
-func (m *MockLease) Release(ctx context.Context, token worklease.Token) error {
+func (m *MockLease) Release(ctx context.Context, token worklease.Token, mode worklease.ExitMode) error {
 	m.ctrl.T.Helper()
-	ret := m.ctrl.Call(m, "Release", ctx, token)
+	ret := m.ctrl.Call(m, "Release", ctx, token, mode)
 	ret0, _ := ret[0].(error)
 	return ret0
 }
 
 // Release indicates an expected call of Release.
-func (mr *MockLeaseMockRecorder) Release(ctx, token any) *gomock.Call {
+func (mr *MockLeaseMockRecorder) Release(ctx, token, mode any) *gomock.Call {
 	mr.mock.ctrl.T.Helper()
-	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "Release", reflect.TypeOf((*MockLease)(nil).Release), ctx, token)
+	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "Release", reflect.TypeOf((*MockLease)(nil).Release), ctx, token, mode)
 }
 
 // Renew mocks base method.

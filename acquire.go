@@ -8,11 +8,12 @@ import (
 )
 
 // Acquire attempts to acquire a lease for the given workID. Returns ErrLeaseHeld
-// if a lease already exists for this workID. If WithWaitForLease is set, blocks
-// until the lease is available, polling at the configured interval. On context
-// cancellation or deadline while waiting, returns an error wrapping ctx.Err()
-// (satisfying errors.Is(err, context.Canceled) or context.DeadlineExceeded) —
-// not ErrLeaseHeld.
+// if the lease for this workID is held and has not expired. If WithWaitForLease
+// is set, blocks until the lease is available, polling at the configured
+// interval; any backend error other than ErrLeaseHeld ends the wait and is
+// returned immediately. On context cancellation or deadline while waiting,
+// returns an error wrapping ctx.Err() — satisfying errors.Is(err,
+// context.Canceled) or context.DeadlineExceeded — not ErrLeaseHeld.
 func (c *leaseClient) Acquire(ctx context.Context, workID string, opts ...AcquireOption) (Token, error) {
 	// ===== STEP 1: Validate Inputs =====
 	if workID == "" {
@@ -34,13 +35,13 @@ func (c *leaseClient) Acquire(ctx context.Context, workID string, opts ...Acquir
 		dur := time.Since(start)
 		token := Token{}
 		if err == nil {
-			token = newToken(record)
+			token = newToken(record, start.Add(c.cfg.TTL))
 		}
 		c.obs.OnAcquire(ctx, AcquireEvent{WorkID: workID, Token: token, Duration: dur, Err: err})
 		if err != nil {
 			return Token{}, fmt.Errorf("worklease: Acquire: %w", err)
 		}
-		return newToken(record), nil
+		return token, nil
 	}
 
 	// ===== STEP 4: Wait+Retry Loop =====
@@ -50,11 +51,11 @@ func (c *leaseClient) Acquire(ctx context.Context, workID string, opts ...Acquir
 		dur := time.Since(start)
 		token := Token{}
 		if err == nil {
-			token = newToken(record)
+			token = newToken(record, start.Add(c.cfg.TTL))
 		}
 		c.obs.OnAcquire(ctx, AcquireEvent{WorkID: workID, Token: token, Duration: dur, Err: err})
 		if err == nil {
-			return newToken(record), nil
+			return token, nil
 		}
 
 		if !errors.Is(err, ErrLeaseHeld) {

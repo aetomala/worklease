@@ -1,6 +1,6 @@
 # ADR-0016: Fencing tokens come from a single global monotonic sequence
 
-**Status:** Accepted (fencing sequence). Retention component (`Forget` / `Vacuum.Sweep`) Proposed — deferred to v0.6.
+**Status:** Accepted.
 **Date:** 2026-06-25
 
 ## Context
@@ -93,6 +93,31 @@ matters, not density.
   model.
 - Schema gains a sequence and an `updated_at` index; `schema.sql` and the test
   bootstrap must create the sequence before the table's column default can resolve.
+
+## Retention Component Decision (v0.6)
+
+The retention component deferred above is now specified and accepted.
+
+**`Forget`** — added to the `Lease` interface as `Forget(ctx context.Context, token Token) error`, delegating to a new `Backend.Forget(ctx context.Context, record LeaseRecord) error`. Both backends implement it as a fencing-checked `DELETE`: the row is removed only if work ID, holder ID, and fencing token all match the stored lease; zero rows affected (or no row present) returns `ErrFenced`, identical in shape to `Release`'s fencing check.
+
+**`Vacuum.Sweep`** — a new root-package type, `Vacuum`, wraps a `backend.Backend` and exposes `Sweep(ctx context.Context, opts SweepOptions) (int64, error)`. `SweepOptions` is canonically defined in package `backend` to avoid an import cycle, and re-exported as `worklease.SweepOptions` via a type alias. It carries `Retention time.Duration` and `IncludeCrashed bool`. `Vacuum.Sweep` validates `Retention > 0` — returning `ErrRetentionRequired` without calling the backend if not — then delegates to `Backend.Sweep`, which deletes rows where `updated_at` is older than `Retention`, `expires_at` has already passed, and either `IncludeCrashed` is true or the row was cleanly released.
+
+Both operations bypass `LeaseObserver` entirely — no `OnForget` or sweep-related event was added in v0.6. This keeps the observer's six-method surface unchanged; extending observability to retention operations is left for a future version if needed.
+
+Global fencing-sequence monotonicity (the decision above) is the safety property that makes both operations sound: because tokens never reset on deletion, a fresh `Acquire` after a `Forget` or a `Sweep` always draws a strictly greater token than any the deleted row held, so a zombie holding the old token is correctly fenced on its next write.
+
+## Amendment (2026-10-06) — ADR-0018: retention keys on declared exits
+
+The retention component's `Sweep` predicate is replaced. `Backend.Sweep` deletes rows that are expired, last updated more than `Retention` ago, and either:
+
+- were released with `ExitRetired` (always); or
+- have no declared exit, meaning the lease expired, and `SweepOptions.IncludeExpired` is set.
+
+Rows released with `ExitFinished` or `ExitAbandoned` are never deleted. They are the resume points that successors read. `SweepOptions.IncludeCrashed` is renamed `IncludeExpired`; it had not shipped in a tag.
+
+`Retention` is redefined as how long a retired or expired row is kept after its last update. It is not tied to the TTL, and held rows are never eligible whatever `Retention` is. The earlier guidance that `Retention` must exceed the maximum TTL is withdrawn.
+
+`ReadCheckpoint` returns `ErrFenced` when the row is missing, on both backends (#75), so a holder whose row was removed by `Forget` or `Sweep` is told so instead of reading empty state.
 
 ## References
 

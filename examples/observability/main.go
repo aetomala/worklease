@@ -17,6 +17,9 @@
 //  5. Renewal retry tracking via RenewEvent.Attempt — Attempt > 1 means the v0.5
 //     renewal goroutine retried after a transient non-fencing error (e.g., a Postgres
 //     connection drop); a dedicated counter makes this visible without inspecting errors.
+//  6. Exit-mode counts (v0.6, ADR-0018): releases labelled by ReleaseEvent.Mode and
+//     reads labelled by ReadCheckpointEvent.PrevExit. The ratio of abandoned to finished
+//     releases is a failure rate; reads that see "expired" count crashes and lost leases.
 //
 // The example runs a clean lifecycle and a real fencing scenario (a successor steals
 // an expired lease, fencing the original holder) so every callback fires.
@@ -31,6 +34,8 @@
 //   - fencedTotal    -> prometheus.Counter                                / otel Int64Counter
 //   - holdDurations  -> prometheus.Histogram (lease_hold_seconds)         / otel Float64Histogram
 //   - renewRetries   -> prometheus.Counter (renew_retry_total)            / otel Int64Counter
+//   - releasesByMode -> prometheus.CounterVec{labels: "mode"}             / otel Int64Counter
+//   - readsByPrev    -> prometheus.CounterVec{labels: "prev_exit"}        / otel Int64Counter
 //
 // Replace the in-memory aggregation with .Inc() / .Observe() calls on those instruments;
 // the callback bodies and correlation logic stay identical.
@@ -66,6 +71,10 @@ type metricsObserver struct {
 
 	// ===== Renewal retry counter =====
 	renewRetries int // incremented for each OnRenew with Attempt > 1; non-zero signals transient errors
+
+	// ===== Exit-mode counters =====
+	releasesByMode map[string]int // e.Mode.String() -> successful releases
+	readsByPrev    map[string]int // e.PrevExit.String() -> successful reads
 }
 
 func newMetricsObserver() *metricsObserver {
@@ -74,6 +83,9 @@ func newMetricsObserver() *metricsObserver {
 		opErrors:  map[string]int{},
 		opLatency: map[string]time.Duration{},
 		heldSince: map[uint64]time.Time{},
+
+		releasesByMode: map[string]int{},
+		readsByPrev:    map[string]int{},
 	}
 }
 
@@ -118,6 +130,9 @@ func (m *metricsObserver) OnRelease(_ context.Context, e worklease.ReleaseEvent)
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	m.record("release", e.Duration, e.Err)
+	if e.Err == nil {
+		m.releasesByMode[e.Mode.String()]++ // finished / abandoned / retired
+	}
 	// Close the hold-duration timer for this holding. A fenced holder may never
 	// reach a clean Release, so an entry without a matching close is expected and
 	// simply left open (a real backend would expose it as an in-flight gauge).
@@ -132,6 +147,9 @@ func (m *metricsObserver) OnReadCheckpoint(_ context.Context, e worklease.ReadCh
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	m.record("read_checkpoint", e.Duration, e.Err)
+	if e.Err == nil {
+		m.readsByPrev[e.PrevExit.String()]++ // how the previous holder left: none / finished / abandoned / retired / expired
+	}
 }
 
 // OnFenced fires in addition to the operation-specific callback when an operation is
@@ -160,6 +178,12 @@ func (m *metricsObserver) report() {
 	fmt.Printf("%-16s total=%d\n", "renew_retries", m.renewRetries)
 	for i, d := range m.holdDurations {
 		fmt.Printf("%-16s holding[%d]=%s\n", "hold_duration", i, d)
+	}
+	for _, mode := range []string{"finished", "abandoned", "retired"} {
+		fmt.Printf("%-16s mode=%s total=%d\n", "release_by_mode", mode, m.releasesByMode[mode])
+	}
+	for _, prev := range []string{"none", "finished", "abandoned", "retired", "expired"} {
+		fmt.Printf("%-16s prev_exit=%s total=%d\n", "read_by_prev", prev, m.readsByPrev[prev])
 	}
 }
 
@@ -192,7 +216,7 @@ func main() {
 	_ = leaseA.Checkpoint(ctx, tokenA, []byte("page=1"))
 	_ = leaseA.Checkpoint(ctx, tokenA, []byte("page=2"))
 	_ = leaseA.Renew(ctx, tokenA)
-	_, _, _ = leaseA.ReadCheckpoint(ctx, tokenA)
+	_, _ = leaseA.ReadCheckpoint(ctx, tokenA)
 
 	// ===== Fencing scenario =====
 	// Holder A stops renewing and its lease expires; holder B acquires the same work
@@ -206,8 +230,23 @@ func main() {
 		fmt.Printf("holder-A checkpoint correctly fenced: %v\n", err)
 	}
 
-	// Holder B finishes cleanly — completes its hold-duration correlation.
-	_ = leaseB.Release(ctx, tokenB)
+	// Holder B reads how holder A left (expired: A never released), then finishes.
+	_, _ = leaseB.ReadCheckpoint(ctx, tokenB)
+	_ = leaseB.Release(ctx, tokenB, worklease.ExitFinished)
+
+	// ===== Abandoned run =====
+	// Holder C reads B's finished exit, then gives up on its run and releases with
+	// ExitAbandoned so the next holder knows the work did not complete.
+	leaseC, err := worklease.New(b, worklease.Config{TTL: 30 * time.Second, HolderID: "holder-C", Observer: obs})
+	if err != nil {
+		panic(err)
+	}
+	tokenC, err := leaseC.Acquire(ctx, workID)
+	if err != nil {
+		panic(err)
+	}
+	_, _ = leaseC.ReadCheckpoint(ctx, tokenC)
+	_ = leaseC.Release(ctx, tokenC, worklease.ExitAbandoned)
 
 	obs.report()
 }

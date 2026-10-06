@@ -11,7 +11,7 @@ import (
 
 // Config holds configuration for a Lease instance.
 type Config struct {
-	// TTL is the time-to-live for acquired leases. Required; zero returns an error.
+	// TTL is the time-to-live for acquired leases. Required; zero or negative returns an error.
 	TTL time.Duration
 
 	// HolderID is the identifier of the entity that will hold leases. Required; empty returns an error.
@@ -31,7 +31,7 @@ type leaseClient struct {
 }
 
 // New returns a new Lease instance backed by the provided Backend. Returns an error
-// if the backend is nil, TTL is zero, or HolderID is empty.
+// if the backend is nil, TTL is zero or negative, or HolderID is empty.
 func New(b backend.Backend, cfg Config) (Lease, error) {
 	// ===== STEP 1: Validate Required Fields =====
 	if b == nil {
@@ -46,20 +46,28 @@ func New(b backend.Backend, cfg Config) (Lease, error) {
 		return nil, fmt.Errorf("worklease: New: HolderID is required")
 	}
 
-	// ===== STEP 2: Initialize and Return =====
+	// ===== STEP 2: Reject Invalid Values =====
+	if cfg.TTL < 0 {
+		return nil, fmt.Errorf("worklease: New: TTL must be positive, got %v", cfg.TTL)
+	}
+
+	// ===== STEP 3: Initialize and Return =====
 	if cfg.Observer == nil {
 		cfg.Observer = noopObserver{}
 	}
 	return &leaseClient{b: b, cfg: cfg, obs: cfg.Observer}, nil
 }
 
-// newToken converts a backend LeaseRecord to an exported Token.
-func newToken(r backend.LeaseRecord) Token {
+// newToken converts a backend LeaseRecord to an exported Token. The deadline is
+// the local monotonic bound on the lease window — the time the acquiring backend
+// call started plus TTL — which never exceeds the true expiry.
+func newToken(r backend.LeaseRecord, deadline time.Time) Token {
 	return Token{
 		workID:       r.WorkID,
 		holderID:     r.HolderID,
 		fencingToken: r.FencingToken,
 		expiresAt:    r.ExpiresAt,
+		deadline:     deadline,
 	}
 }
 
@@ -74,7 +82,7 @@ func toRecord(t Token) backend.LeaseRecord {
 }
 
 // Checkpoint persists state associated with the current lease. The caller must
-// pass a valid Token obtained from Acquire or Renew. Returns ErrFenced if the
+// pass a valid Token obtained from Acquire. Returns ErrFenced if the
 // token's fencing token no longer matches the stored lease.
 func (c *leaseClient) Checkpoint(ctx context.Context, token Token, state []byte) error {
 	// ===== Validate and Delegate =====
@@ -123,19 +131,30 @@ func (c *leaseClient) Renew(ctx context.Context, token Token) error {
 	return nil
 }
 
-// Release surrenders the lease. Returns ErrFenced if the token's fencing token
-// no longer matches the stored lease.
-func (c *leaseClient) Release(ctx context.Context, token Token) error {
-	// ===== Validate and Delegate =====
+// Release records mode as this holder's exit and expires the lease
+// immediately. Returns ErrInvalidExitMode, without calling the backend or the
+// observer, if mode is not ExitFinished, ExitAbandoned, or ExitRetired.
+// Returns ErrFenced if the lease was acquired by another holder, and
+// ErrLeaseExpired if the lease has expired or an exit was already declared.
+func (c *leaseClient) Release(ctx context.Context, token Token, mode ExitMode) error {
+	// ===== STEP 1: Validate Mode =====
+	if mode != ExitFinished && mode != ExitAbandoned && mode != ExitRetired {
+		return fmt.Errorf("worklease: Release: workID=%q holderID=%q mode=%s: %w", token.WorkID(), token.HolderID(), mode, ErrInvalidExitMode)
+	}
+
+	// ===== STEP 2: Delegate to Backend =====
 	record := toRecord(token)
 	start := time.Now()
-	err := c.b.Release(ctx, record)
+	err := c.b.Release(ctx, record, mode)
 	dur := time.Since(start)
-	c.obs.OnRelease(ctx, ReleaseEvent{Token: token, Duration: dur, Err: err})
+
+	// ===== STEP 3: Observe =====
+	c.obs.OnRelease(ctx, ReleaseEvent{Token: token, Duration: dur, Mode: mode, Err: err})
 	if errors.Is(err, ErrFenced) {
 		c.obs.OnFenced(ctx, FencedEvent{Token: token, Operation: OperationRelease})
 	}
 
+	// ===== STEP 4: Wrap =====
 	if errors.Is(err, ErrFenced) {
 		return fmt.Errorf("worklease: Release: workID=%q holderID=%q: %w", token.WorkID(), token.HolderID(), ErrFenced)
 	}
@@ -147,15 +166,46 @@ func (c *leaseClient) Release(ctx context.Context, token Token) error {
 	return nil
 }
 
-// ReadCheckpoint retrieves persisted state and the clean handoff flag for the
-// given lease. The caller must pass a valid Token. Returns ErrFenced if the
-// token's fencing token no longer matches the stored lease.
-func (c *leaseClient) ReadCheckpoint(ctx context.Context, token Token) ([]byte, bool, error) {
+// ReadCheckpoint returns the last checkpointed state and how the immediately
+// previous holder exited. Returns ErrFenced if the token no longer matches the
+// stored lease or if no row exists for the work ID.
+func (c *leaseClient) ReadCheckpoint(ctx context.Context, token Token) (Checkpoint, error) {
 	// ===== Delegate to Backend =====
 	record := toRecord(token)
 	start := time.Now()
-	state, cleanHandoff, err := c.b.ReadCheckpoint(ctx, record)
+	cp, err := c.b.ReadCheckpoint(ctx, record)
 	dur := time.Since(start)
-	c.obs.OnReadCheckpoint(ctx, ReadCheckpointEvent{Token: token, Duration: dur, CleanHandoff: cleanHandoff, Size: len(state), Err: err})
-	return state, cleanHandoff, err
+	if err != nil {
+		cp = Checkpoint{}
+	}
+	c.obs.OnReadCheckpoint(ctx, ReadCheckpointEvent{Token: token, Duration: dur, PrevExit: cp.PrevExit, PrevHolderID: cp.PrevHolderID, Size: len(cp.State), Err: err})
+
+	if errors.Is(err, ErrFenced) {
+		return Checkpoint{}, fmt.Errorf("worklease: ReadCheckpoint: workID=%q holderID=%q: %w", token.WorkID(), token.HolderID(), ErrFenced)
+	}
+
+	if err != nil {
+		return Checkpoint{}, fmt.Errorf("worklease: ReadCheckpoint: %w", err)
+	}
+
+	return cp, nil
+}
+
+// Forget permanently deletes the lease record for token's workID. Returns
+// ErrFenced if the fencing token no longer matches the stored lease, or if no
+// record exists for token's workID. Forget does not invoke any LeaseObserver
+// method — this is a deliberate v0.6 scope boundary, not an oversight.
+func (c *leaseClient) Forget(ctx context.Context, token Token) error {
+	record := toRecord(token)
+	err := c.b.Forget(ctx, record)
+
+	if errors.Is(err, ErrFenced) {
+		return fmt.Errorf("worklease: Forget: workID=%q holderID=%q: %w", token.WorkID(), token.HolderID(), ErrFenced)
+	}
+
+	if err != nil {
+		return fmt.Errorf("worklease: Forget: %w", err)
+	}
+
+	return nil
 }

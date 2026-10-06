@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	. "github.com/onsi/ginkgo/v2"
@@ -27,6 +28,7 @@ type poolSpy struct {
 	lost     []string
 	backoff  []pool.SlotBackoffEvent
 	dead     []pool.SlotDeadEvent
+	retired  []string
 }
 
 func (s *poolSpy) OnSlotAcquired(_ context.Context, e pool.SlotAcquiredEvent) {
@@ -53,6 +55,12 @@ func (s *poolSpy) OnSlotDead(_ context.Context, e pool.SlotDeadEvent) {
 	s.dead = append(s.dead, e)
 }
 
+func (s *poolSpy) OnSlotRetired(_ context.Context, e pool.SlotRetiredEvent) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.retired = append(s.retired, e.WorkID)
+}
+
 func (s *poolSpy) snapshot() poolSpy {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -61,7 +69,20 @@ func (s *poolSpy) snapshot() poolSpy {
 		lost:     append([]string(nil), s.lost...),
 		backoff:  append([]pool.SlotBackoffEvent(nil), s.backoff...),
 		dead:     append([]pool.SlotDeadEvent(nil), s.dead...),
+		retired:  append([]string(nil), s.retired...),
 	}
+}
+
+// cancelOnDead cancels the caller's context from inside OnSlotDead, so the
+// last slot's death and the caller's cancellation land at the same moment.
+type cancelOnDead struct {
+	*poolSpy
+	cancel context.CancelFunc
+}
+
+func (c cancelOnDead) OnSlotDead(ctx context.Context, e pool.SlotDeadEvent) {
+	c.cancel()
+	c.poolSpy.OnSlotDead(ctx, e)
 }
 
 var (
@@ -86,7 +107,7 @@ var _ = Describe("pool", func() {
 	Describe("New", func() {
 		Context("when lease is nil", func() {
 			It("returns ErrNilLease which satisfies errors.Is(ErrConfigInvalid)", func() {
-				p, err := pool.New(nil, pool.Config{WorkIDs: []string{"w1"}}, func(_ context.Context, _ string, _ worklease.Token, _ []byte, _ bool) ([]byte, error) {
+				p, err := pool.New(nil, pool.Config{WorkIDs: []string{"w1"}}, func(_ context.Context, _ string, _ worklease.Token, _ worklease.Checkpoint) ([]byte, error) {
 					return nil, nil
 				})
 				Expect(errors.Is(err, pool.ErrNilLease)).To(BeTrue())
@@ -96,7 +117,7 @@ var _ = Describe("pool", func() {
 		})
 		Context("when cfg.WorkIDs is empty", func() {
 			It("returns ErrEmptyWorkIDs which satisfies errors.Is(ErrConfigInvalid)", func() {
-				p, err := pool.New(mockLease, pool.Config{WorkIDs: []string{}}, func(_ context.Context, _ string, _ worklease.Token, _ []byte, _ bool) ([]byte, error) {
+				p, err := pool.New(mockLease, pool.Config{WorkIDs: []string{}}, func(_ context.Context, _ string, _ worklease.Token, _ worklease.Checkpoint) ([]byte, error) {
 					return nil, nil
 				})
 				Expect(errors.Is(err, pool.ErrEmptyWorkIDs)).To(BeTrue())
@@ -109,7 +130,7 @@ var _ = Describe("pool", func() {
 				p, err := pool.New(mockLease, pool.Config{
 					WorkIDs:        []string{"w1"},
 					AcquireOptions: []worklease.AcquireOption{worklease.WithWaitForLease()},
-				}, func(_ context.Context, _ string, _ worklease.Token, _ []byte, _ bool) ([]byte, error) {
+				}, func(_ context.Context, _ string, _ worklease.Token, _ worklease.Checkpoint) ([]byte, error) {
 					return nil, nil
 				})
 				Expect(errors.Is(err, pool.ErrWithWaitForLeaseProhibited)).To(BeTrue())
@@ -119,7 +140,7 @@ var _ = Describe("pool", func() {
 		})
 		Context("with valid config", func() {
 			It("returns a non-nil Pool", func() {
-				p, err := pool.New(mockLease, pool.Config{WorkIDs: []string{"w1"}}, func(_ context.Context, _ string, _ worklease.Token, _ []byte, _ bool) ([]byte, error) {
+				p, err := pool.New(mockLease, pool.Config{WorkIDs: []string{"w1"}}, func(_ context.Context, _ string, _ worklease.Token, _ worklease.Checkpoint) ([]byte, error) {
 					return nil, nil
 				})
 				Expect(err).NotTo(HaveOccurred())
@@ -127,7 +148,7 @@ var _ = Describe("pool", func() {
 			})
 			It("does not start any goroutines", func() {
 				// Construction completes immediately with no mock calls
-				p, err := pool.New(mockLease, pool.Config{WorkIDs: []string{"w1"}}, func(_ context.Context, _ string, _ worklease.Token, _ []byte, _ bool) ([]byte, error) {
+				p, err := pool.New(mockLease, pool.Config{WorkIDs: []string{"w1"}}, func(_ context.Context, _ string, _ worklease.Token, _ worklease.Checkpoint) ([]byte, error) {
 					return nil, nil
 				})
 				Expect(err).NotTo(HaveOccurred())
@@ -147,10 +168,10 @@ var _ = Describe("pool", func() {
 				).AnyTimes()
 
 				lctx, lcancel := context.WithCancel(context.Background())
-				fn := func(_ context.Context, _ string, _ worklease.Token, _ []byte, _ bool) ([]byte, error) {
+				fn := func(_ context.Context, _ string, _ worklease.Token, _ worklease.Checkpoint) ([]byte, error) {
 					return nil, nil
 				}
-				p, _ := pool.New(mockLease, pool.Config{WorkIDs: []string{"w1"}}, fn)
+				p, _ := pool.New(mockLease, pool.Config{WorkIDs: []string{"w1"}, IdleInterval: 10 * time.Millisecond, RerunInterval: 10 * time.Millisecond, BackoffInterval: 10 * time.Millisecond}, fn)
 
 				done := make(chan error, 1)
 				go func() { done <- p.Run(lctx) }()
@@ -171,9 +192,9 @@ var _ = Describe("pool", func() {
 				stopFn := func() {}
 
 				mockLease.EXPECT().Acquire(gomock.Any(), "w1").Return(worklease.Token{}, nil).Times(2)
-				mockLease.EXPECT().ReadCheckpoint(gomock.Any(), gomock.Any()).Return(nil, false, nil).Times(2)
+				mockLease.EXPECT().ReadCheckpoint(gomock.Any(), gomock.Any()).Return(worklease.Checkpoint{}, nil).Times(2)
 				mockLease.EXPECT().StartRenewal(gomock.Any(), gomock.Any()).Return(renewCtx, stopFn).Times(2)
-				mockLease.EXPECT().Release(gomock.Any(), gomock.Any()).Return(nil).Times(2)
+				mockLease.EXPECT().Release(gomock.Any(), gomock.Any(), worklease.ExitFinished).Return(nil).Times(2)
 				mockLease.EXPECT().Acquire(gomock.Any(), "w1").DoAndReturn(
 					func(ctx context.Context, _ string, _ ...worklease.AcquireOption) (worklease.Token, error) {
 						<-ctx.Done()
@@ -181,12 +202,12 @@ var _ = Describe("pool", func() {
 					},
 				).AnyTimes()
 
-				fn := func(_ context.Context, _ string, _ worklease.Token, _ []byte, _ bool) ([]byte, error) {
+				fn := func(_ context.Context, _ string, _ worklease.Token, _ worklease.Checkpoint) ([]byte, error) {
 					callCount++
 					fnCh <- struct{}{}
 					return nil, nil
 				}
-				p, _ := pool.New(mockLease, pool.Config{WorkIDs: []string{"w1"}}, fn)
+				p, _ := pool.New(mockLease, pool.Config{WorkIDs: []string{"w1"}, IdleInterval: 10 * time.Millisecond, RerunInterval: 10 * time.Millisecond, BackoffInterval: 10 * time.Millisecond}, fn)
 
 				done := make(chan error, 1)
 				go func() { done <- p.Run(lctx) }()
@@ -213,18 +234,18 @@ var _ = Describe("pool", func() {
 				// Iteration 1: fn returns ErrFenced → r.Run returns ErrFenced (no Release call)
 				gomock.InOrder(
 					mockLease.EXPECT().Acquire(gomock.Any(), "w1").Return(worklease.Token{}, nil),
-					mockLease.EXPECT().ReadCheckpoint(gomock.Any(), gomock.Any()).Return(nil, false, nil),
+					mockLease.EXPECT().ReadCheckpoint(gomock.Any(), gomock.Any()).Return(worklease.Checkpoint{}, nil),
 					mockLease.EXPECT().StartRenewal(gomock.Any(), gomock.Any()).Return(renewCtx, stopFn),
 				)
 				// Iteration 2: fn returns PermanentError → goroutine exits
 				gomock.InOrder(
 					mockLease.EXPECT().Acquire(gomock.Any(), "w1").Return(worklease.Token{}, nil),
-					mockLease.EXPECT().ReadCheckpoint(gomock.Any(), gomock.Any()).Return(nil, false, nil),
+					mockLease.EXPECT().ReadCheckpoint(gomock.Any(), gomock.Any()).Return(worklease.Checkpoint{}, nil),
 					mockLease.EXPECT().StartRenewal(gomock.Any(), gomock.Any()).Return(renewCtx, stopFn),
-					mockLease.EXPECT().Release(gomock.Any(), gomock.Any()).Return(nil),
+					mockLease.EXPECT().Release(gomock.Any(), gomock.Any(), worklease.ExitAbandoned).Return(nil),
 				)
 
-				fn := func(_ context.Context, _ string, _ worklease.Token, _ []byte, _ bool) ([]byte, error) {
+				fn := func(_ context.Context, _ string, _ worklease.Token, _ worklease.Checkpoint) ([]byte, error) {
 					iteration++
 					itCh <- iteration
 					if iteration == 1 {
@@ -232,7 +253,7 @@ var _ = Describe("pool", func() {
 					}
 					return nil, testPermError{"stop"}
 				}
-				p, _ := pool.New(mockLease, pool.Config{WorkIDs: []string{"w1"}}, fn)
+				p, _ := pool.New(mockLease, pool.Config{WorkIDs: []string{"w1"}, IdleInterval: 10 * time.Millisecond, RerunInterval: 10 * time.Millisecond, BackoffInterval: 10 * time.Millisecond}, fn)
 
 				done := make(chan error, 1)
 				go func() { done <- p.Run(lctx) }()
@@ -252,18 +273,18 @@ var _ = Describe("pool", func() {
 
 				gomock.InOrder(
 					mockLease.EXPECT().Acquire(gomock.Any(), "w1").Return(worklease.Token{}, nil),
-					mockLease.EXPECT().ReadCheckpoint(gomock.Any(), gomock.Any()).Return(nil, false, nil),
+					mockLease.EXPECT().ReadCheckpoint(gomock.Any(), gomock.Any()).Return(worklease.Checkpoint{}, nil),
 					mockLease.EXPECT().StartRenewal(gomock.Any(), gomock.Any()).Return(renewCtx, stopFn),
-					mockLease.EXPECT().Release(gomock.Any(), gomock.Any()).Return(nil),
+					mockLease.EXPECT().Release(gomock.Any(), gomock.Any(), worklease.ExitAbandoned).Return(nil),
 				)
 
-				fn := func(_ context.Context, _ string, _ worklease.Token, _ []byte, _ bool) ([]byte, error) {
+				fn := func(_ context.Context, _ string, _ worklease.Token, _ worklease.Checkpoint) ([]byte, error) {
 					return nil, testPermError{"permanent failure"}
 				}
 				lctx, lcancel := context.WithTimeout(context.Background(), 500*time.Millisecond)
 				defer lcancel()
 
-				p, _ := pool.New(mockLease, pool.Config{WorkIDs: []string{"w1"}}, fn)
+				p, _ := pool.New(mockLease, pool.Config{WorkIDs: []string{"w1"}, IdleInterval: 10 * time.Millisecond, RerunInterval: 10 * time.Millisecond, BackoffInterval: 10 * time.Millisecond}, fn)
 				err := p.Run(lctx)
 				// The lone slot dies permanently, so Run reports ErrAllSlotsDead.
 				Expect(err).To(MatchError(pool.ErrAllSlotsDead))
@@ -284,9 +305,9 @@ var _ = Describe("pool", func() {
 
 				gomock.InOrder(
 					mockLease.EXPECT().Acquire(gomock.Any(), "w1").Return(worklease.Token{}, nil),
-					mockLease.EXPECT().ReadCheckpoint(gomock.Any(), gomock.Any()).Return(nil, false, nil),
+					mockLease.EXPECT().ReadCheckpoint(gomock.Any(), gomock.Any()).Return(worklease.Checkpoint{}, nil),
 					mockLease.EXPECT().StartRenewal(gomock.Any(), gomock.Any()).Return(renewCtx, stopFn),
-					mockLease.EXPECT().Release(gomock.Any(), gomock.Any()).Return(nil),
+					mockLease.EXPECT().Release(gomock.Any(), gomock.Any(), worklease.ExitAbandoned).Return(nil),
 				)
 				gomock.InOrder(
 					mockLease.EXPECT().Acquire(gomock.Any(), "w1").DoAndReturn(
@@ -295,13 +316,13 @@ var _ = Describe("pool", func() {
 							return worklease.Token{}, nil
 						},
 					),
-					mockLease.EXPECT().ReadCheckpoint(gomock.Any(), gomock.Any()).Return(nil, false, nil),
+					mockLease.EXPECT().ReadCheckpoint(gomock.Any(), gomock.Any()).Return(worklease.Checkpoint{}, nil),
 					mockLease.EXPECT().StartRenewal(gomock.Any(), gomock.Any()).Return(renewCtx, stopFn),
-					mockLease.EXPECT().Release(gomock.Any(), gomock.Any()).Return(nil),
+					mockLease.EXPECT().Release(gomock.Any(), gomock.Any(), worklease.ExitAbandoned).Return(nil),
 				)
 
 				workErr := errors.New("transient failure")
-				fn := func(_ context.Context, _ string, _ worklease.Token, _ []byte, _ bool) ([]byte, error) {
+				fn := func(_ context.Context, _ string, _ worklease.Token, _ worklease.Checkpoint) ([]byte, error) {
 					iteration++
 					if iteration == 1 {
 						times = append(times, time.Now())
@@ -309,7 +330,7 @@ var _ = Describe("pool", func() {
 					}
 					return nil, testPermError{"stop"}
 				}
-				p, _ := pool.New(mockLease, pool.Config{WorkIDs: []string{"w1"}, BackoffInterval: backoff}, fn)
+				p, _ := pool.New(mockLease, pool.Config{WorkIDs: []string{"w1"}, IdleInterval: 10 * time.Millisecond, RerunInterval: 10 * time.Millisecond, BackoffInterval: backoff}, fn)
 				done := make(chan error, 1)
 				go func() { done <- p.Run(lctx) }()
 				// Slot 1 backs off then ends via PermanentError → ErrAllSlotsDead.
@@ -331,17 +352,17 @@ var _ = Describe("pool", func() {
 				stopFn := func() {}
 
 				mockLease.EXPECT().Acquire(gomock.Any(), "w1").Return(worklease.Token{}, nil).AnyTimes()
-				mockLease.EXPECT().ReadCheckpoint(gomock.Any(), gomock.Any()).Return(nil, false, nil).AnyTimes()
+				mockLease.EXPECT().ReadCheckpoint(gomock.Any(), gomock.Any()).Return(worklease.Checkpoint{}, nil).AnyTimes()
 				mockLease.EXPECT().StartRenewal(gomock.Any(), gomock.Any()).Return(renewCtx, stopFn).AnyTimes()
-				mockLease.EXPECT().Release(gomock.Any(), gomock.Any()).Return(nil).AnyTimes()
+				mockLease.EXPECT().Release(gomock.Any(), gomock.Any(), gomock.Any()).Return(nil).AnyTimes()
 
 				lctx, lcancel := context.WithCancel(context.Background())
-				fn := func(_ context.Context, _ string, _ worklease.Token, _ []byte, _ bool) ([]byte, error) {
+				fn := func(_ context.Context, _ string, _ worklease.Token, _ worklease.Checkpoint) ([]byte, error) {
 					close(blocked)
 					<-release
 					return nil, testPermError{"stop"}
 				}
-				p, _ := pool.New(mockLease, pool.Config{WorkIDs: []string{"w1"}}, fn)
+				p, _ := pool.New(mockLease, pool.Config{WorkIDs: []string{"w1"}, IdleInterval: 10 * time.Millisecond, RerunInterval: 10 * time.Millisecond, BackoffInterval: 10 * time.Millisecond}, fn)
 				go p.Run(lctx)
 
 				<-blocked
@@ -372,19 +393,19 @@ var _ = Describe("pool", func() {
 						return worklease.Token{}, nil
 					},
 				).AnyTimes()
-				mockLease.EXPECT().ReadCheckpoint(gomock.Any(), gomock.Any()).Return(nil, false, nil).AnyTimes()
+				mockLease.EXPECT().ReadCheckpoint(gomock.Any(), gomock.Any()).Return(worklease.Checkpoint{}, nil).AnyTimes()
 				mockLease.EXPECT().StartRenewal(gomock.Any(), gomock.Any()).Return(renewCtx, stopFn).AnyTimes()
-				mockLease.EXPECT().Release(gomock.Any(), gomock.Any()).Return(nil).AnyTimes()
+				mockLease.EXPECT().Release(gomock.Any(), gomock.Any(), gomock.Any()).Return(nil).AnyTimes()
 
 				lctx, lcancel := context.WithCancel(context.Background())
 				defer lcancel()
 
-				fn := func(_ context.Context, _ string, _ worklease.Token, _ []byte, _ bool) ([]byte, error) {
+				fn := func(_ context.Context, _ string, _ worklease.Token, _ worklease.Checkpoint) ([]byte, error) {
 					iteration++
 					close(blocked)
 					return nil, errors.New("transient")
 				}
-				p, _ := pool.New(mockLease, pool.Config{WorkIDs: []string{"w1"}, BackoffInterval: backoff}, fn)
+				p, _ := pool.New(mockLease, pool.Config{WorkIDs: []string{"w1"}, IdleInterval: 10 * time.Millisecond, RerunInterval: 10 * time.Millisecond, BackoffInterval: backoff}, fn)
 				go p.Run(lctx)
 
 				<-blocked
@@ -400,11 +421,11 @@ var _ = Describe("pool", func() {
 				stopFn := func() {}
 
 				mockLease.EXPECT().Acquire(gomock.Any(), "w1").Return(worklease.Token{}, nil).AnyTimes()
-				mockLease.EXPECT().ReadCheckpoint(gomock.Any(), gomock.Any()).Return(nil, false, nil).AnyTimes()
+				mockLease.EXPECT().ReadCheckpoint(gomock.Any(), gomock.Any()).Return(worklease.Checkpoint{}, nil).AnyTimes()
 				mockLease.EXPECT().StartRenewal(gomock.Any(), gomock.Any()).Return(renewCtx, stopFn).AnyTimes()
-				mockLease.EXPECT().Release(gomock.Any(), gomock.Any()).Return(nil).AnyTimes()
+				mockLease.EXPECT().Release(gomock.Any(), gomock.Any(), gomock.Any()).Return(nil).AnyTimes()
 
-				p, _ := pool.New(mockLease, pool.Config{WorkIDs: []string{"w1"}}, func(_ context.Context, _ string, _ worklease.Token, _ []byte, _ bool) ([]byte, error) {
+				p, _ := pool.New(mockLease, pool.Config{WorkIDs: []string{"w1"}, IdleInterval: 10 * time.Millisecond, RerunInterval: 10 * time.Millisecond, BackoffInterval: 10 * time.Millisecond}, func(_ context.Context, _ string, _ worklease.Token, _ worklease.Checkpoint) ([]byte, error) {
 					return nil, nil
 				})
 				go p.Run(lctx)
@@ -447,16 +468,16 @@ var _ = Describe("pool", func() {
 				defer renewCancel()
 				stopFn := func() {}
 				mockLease.EXPECT().Acquire(gomock.Any(), gomock.Any()).Return(worklease.Token{}, nil).AnyTimes()
-				mockLease.EXPECT().ReadCheckpoint(gomock.Any(), gomock.Any()).Return(nil, false, nil).AnyTimes()
+				mockLease.EXPECT().ReadCheckpoint(gomock.Any(), gomock.Any()).Return(worklease.Checkpoint{}, nil).AnyTimes()
 				mockLease.EXPECT().StartRenewal(gomock.Any(), gomock.Any()).Return(renewCtx, stopFn).AnyTimes()
-				mockLease.EXPECT().Release(gomock.Any(), gomock.Any()).Return(nil).AnyTimes()
+				mockLease.EXPECT().Release(gomock.Any(), gomock.Any(), gomock.Any()).Return(nil).AnyTimes()
 
-				fn := func(_ context.Context, _ string, _ worklease.Token, _ []byte, _ bool) ([]byte, error) {
+				fn := func(_ context.Context, _ string, _ worklease.Token, _ worklease.Checkpoint) ([]byte, error) {
 					return nil, testPermError{"dead"}
 				}
 				lctx, lcancel := context.WithTimeout(context.Background(), 2*time.Second)
 				defer lcancel()
-				p, _ := pool.New(mockLease, pool.Config{WorkIDs: []string{"w1", "w2"}}, fn)
+				p, _ := pool.New(mockLease, pool.Config{WorkIDs: []string{"w1", "w2"}, IdleInterval: 10 * time.Millisecond, RerunInterval: 10 * time.Millisecond, BackoffInterval: 10 * time.Millisecond}, fn)
 				Expect(p.Run(lctx)).To(MatchError(pool.ErrAllSlotsDead))
 			})
 		})
@@ -473,21 +494,21 @@ var _ = Describe("pool", func() {
 			renewCtx = context.Background()
 			stopFn = func() {}
 			mockLease.EXPECT().Acquire(gomock.Any(), gomock.Any()).Return(worklease.Token{}, nil).AnyTimes()
-			mockLease.EXPECT().ReadCheckpoint(gomock.Any(), gomock.Any()).Return(nil, false, nil).AnyTimes()
+			mockLease.EXPECT().ReadCheckpoint(gomock.Any(), gomock.Any()).Return(worklease.Checkpoint{}, nil).AnyTimes()
 			mockLease.EXPECT().StartRenewal(gomock.Any(), gomock.Any()).Return(renewCtx, stopFn).AnyTimes()
-			mockLease.EXPECT().Release(gomock.Any(), gomock.Any()).Return(nil).AnyTimes()
+			mockLease.EXPECT().Release(gomock.Any(), gomock.Any(), gomock.Any()).Return(nil).AnyTimes()
 		})
 
 		runUntilDead := func(spy pool.Observer, fn pool.WorkFn) {
 			lctx, lcancel := context.WithTimeout(context.Background(), 2*time.Second)
 			defer lcancel()
-			p, _ := pool.New(mockLease, pool.Config{WorkIDs: []string{"w1"}, BackoffInterval: time.Millisecond, Observer: spy}, fn)
+			p, _ := pool.New(mockLease, pool.Config{WorkIDs: []string{"w1"}, IdleInterval: 10 * time.Millisecond, RerunInterval: 10 * time.Millisecond, BackoffInterval: time.Millisecond, Observer: spy}, fn)
 			_ = p.Run(lctx)
 		}
 
 		Context("OnSlotAcquired", func() {
 			It("is called when WorkFn begins executing — not when Acquire succeeds", func() {
-				runUntilDead(spy, func(_ context.Context, _ string, _ worklease.Token, _ []byte, _ bool) ([]byte, error) {
+				runUntilDead(spy, func(_ context.Context, _ string, _ worklease.Token, _ worklease.Checkpoint) ([]byte, error) {
 					return nil, testPermError{"stop"}
 				})
 				Expect(spy.snapshot().acquired).To(ContainElement("w1"))
@@ -496,7 +517,7 @@ var _ = Describe("pool", func() {
 		Context("OnSlotLost", func() {
 			It("is called when runner.Run returns ErrFenced", func() {
 				it := 0
-				runUntilDead(spy, func(_ context.Context, _ string, _ worklease.Token, _ []byte, _ bool) ([]byte, error) {
+				runUntilDead(spy, func(_ context.Context, _ string, _ worklease.Token, _ worklease.Checkpoint) ([]byte, error) {
 					it++
 					if it == 1 {
 						return nil, worklease.ErrFenced
@@ -509,7 +530,7 @@ var _ = Describe("pool", func() {
 		Context("OnSlotBackoff", func() {
 			It("is called with the error and BackoffInterval duration before the backoff sleep", func() {
 				it := 0
-				runUntilDead(spy, func(_ context.Context, _ string, _ worklease.Token, _ []byte, _ bool) ([]byte, error) {
+				runUntilDead(spy, func(_ context.Context, _ string, _ worklease.Token, _ worklease.Checkpoint) ([]byte, error) {
 					it++
 					if it == 1 {
 						return nil, errors.New("transient")
@@ -525,7 +546,7 @@ var _ = Describe("pool", func() {
 		})
 		Context("OnSlotDead", func() {
 			It("is called when WorkFn returns a PermanentError", func() {
-				runUntilDead(spy, func(_ context.Context, _ string, _ worklease.Token, _ []byte, _ bool) ([]byte, error) {
+				runUntilDead(spy, func(_ context.Context, _ string, _ worklease.Token, _ worklease.Checkpoint) ([]byte, error) {
 					return nil, testPermError{"dead"}
 				})
 				snap := spy.snapshot()
@@ -537,11 +558,234 @@ var _ = Describe("pool", func() {
 			It("does not panic when Config.Observer is nil", func() {
 				lctx, lcancel := context.WithTimeout(context.Background(), 2*time.Second)
 				defer lcancel()
-				p, _ := pool.New(mockLease, pool.Config{WorkIDs: []string{"w1"}}, func(_ context.Context, _ string, _ worklease.Token, _ []byte, _ bool) ([]byte, error) {
+				p, _ := pool.New(mockLease, pool.Config{WorkIDs: []string{"w1"}, IdleInterval: 10 * time.Millisecond, RerunInterval: 10 * time.Millisecond, BackoffInterval: 10 * time.Millisecond}, func(_ context.Context, _ string, _ worklease.Token, _ worklease.Checkpoint) ([]byte, error) {
 					return nil, testPermError{"stop"}
 				})
 				Expect(func() { _ = p.Run(lctx) }).NotTo(Panic())
 			})
+		})
+	})
+
+	Describe("Exit modes, termination, and pacing", func() {
+		const fast = 10 * time.Millisecond
+
+		var spy *poolSpy
+
+		BeforeEach(func() {
+			spy = &poolSpy{}
+		})
+
+		// expectSlotRuns lets every slot acquire, read cp, and renew on a live context.
+		expectSlotRuns := func(cp worklease.Checkpoint) {
+			mockLease.EXPECT().Acquire(gomock.Any(), gomock.Any()).Return(worklease.Token{}, nil).AnyTimes()
+			mockLease.EXPECT().ReadCheckpoint(gomock.Any(), gomock.Any()).Return(cp, nil).AnyTimes()
+			mockLease.EXPECT().StartRenewal(gomock.Any(), gomock.Any()).Return(context.Background(), func() {}).AnyTimes()
+		}
+
+		retire := func(_ context.Context, _ string, _ worklease.Token, _ worklease.Checkpoint) ([]byte, error) {
+			return nil, errors.Join(errors.New("tenant deleted"), worklease.ErrRetire)
+		}
+
+		Context("slot whose WorkFn returns an error wrapping ErrRetire", func() {
+			It("releases with ExitRetired, calls OnSlotRetired, and does not reacquire", func() {
+				mockLease.EXPECT().Acquire(gomock.Any(), "w1").Return(worklease.Token{}, nil).Times(1)
+				mockLease.EXPECT().ReadCheckpoint(gomock.Any(), gomock.Any()).Return(worklease.Checkpoint{}, nil).Times(1)
+				mockLease.EXPECT().StartRenewal(gomock.Any(), gomock.Any()).Return(context.Background(), func() {}).Times(1)
+				mockLease.EXPECT().Release(gomock.Any(), gomock.Any(), worklease.ExitRetired).Return(nil).Times(1)
+
+				p, err := pool.New(mockLease, pool.Config{WorkIDs: []string{"w1"}, IdleInterval: fast, RerunInterval: fast, BackoffInterval: fast, Observer: spy}, retire)
+				Expect(err).NotTo(HaveOccurred())
+				Expect(p.Run(ctx)).To(Succeed())
+				Expect(spy.snapshot().retired).To(Equal([]string{"w1"}))
+			})
+
+			It("does not call OnSlotDead or OnSlotBackoff", func() {
+				expectSlotRuns(worklease.Checkpoint{})
+				mockLease.EXPECT().Release(gomock.Any(), gomock.Any(), worklease.ExitRetired).Return(nil).AnyTimes()
+
+				p, _ := pool.New(mockLease, pool.Config{WorkIDs: []string{"w1"}, IdleInterval: fast, RerunInterval: fast, BackoffInterval: fast, Observer: spy}, retire)
+				Expect(p.Run(ctx)).To(Succeed())
+				snap := spy.snapshot()
+				Expect(snap.dead).To(BeEmpty())
+				Expect(snap.backoff).To(BeEmpty())
+			})
+		})
+
+		Context("PermanentError wrapping ErrRetire", func() {
+			It("retires the slot (ErrRetire wins)", func() {
+				expectSlotRuns(worklease.Checkpoint{})
+				mockLease.EXPECT().Release(gomock.Any(), gomock.Any(), worklease.ExitRetired).Return(nil).Times(1)
+
+				p, _ := pool.New(mockLease, pool.Config{WorkIDs: []string{"w1"}, IdleInterval: fast, RerunInterval: fast, BackoffInterval: fast, Observer: spy},
+					func(_ context.Context, _ string, _ worklease.Token, _ worklease.Checkpoint) ([]byte, error) {
+						return nil, pool.Permanent(worklease.ErrRetire)
+					})
+				Expect(p.Run(ctx)).To(Succeed())
+				snap := spy.snapshot()
+				Expect(snap.retired).To(Equal([]string{"w1"}))
+				Expect(snap.dead).To(BeEmpty())
+			})
+		})
+
+		Context("Run termination", func() {
+			It("returns ErrAllSlotsDead when every slot died, even if the caller's ctx is cancelled at the same moment", func() {
+				expectSlotRuns(worklease.Checkpoint{})
+				mockLease.EXPECT().Release(gomock.Any(), gomock.Any(), worklease.ExitAbandoned).Return(nil).AnyTimes()
+
+				lctx, lcancel := context.WithCancel(ctx)
+				defer lcancel()
+				obs := cancelOnDead{poolSpy: spy, cancel: lcancel}
+				p, _ := pool.New(mockLease, pool.Config{WorkIDs: []string{"w1"}, IdleInterval: fast, RerunInterval: fast, BackoffInterval: fast, Observer: obs},
+					func(_ context.Context, _ string, _ worklease.Token, _ worklease.Checkpoint) ([]byte, error) {
+						return nil, testPermError{"dead"}
+					})
+				Expect(p.Run(lctx)).To(MatchError(pool.ErrAllSlotsDead))
+				Expect(lctx.Err()).To(HaveOccurred())
+			})
+
+			It("returns nil when every slot retired", func() {
+				expectSlotRuns(worklease.Checkpoint{})
+				mockLease.EXPECT().Release(gomock.Any(), gomock.Any(), worklease.ExitRetired).Return(nil).Times(2)
+
+				p, _ := pool.New(mockLease, pool.Config{WorkIDs: []string{"w1", "w2"}, IdleInterval: fast, RerunInterval: fast, BackoffInterval: fast, Observer: spy}, retire)
+				Expect(p.Run(ctx)).To(Succeed())
+				Expect(spy.snapshot().retired).To(ConsistOf("w1", "w2"))
+			})
+
+			It("returns nil when one slot retired and the others died via PermanentError", func() {
+				expectSlotRuns(worklease.Checkpoint{})
+				mockLease.EXPECT().Release(gomock.Any(), gomock.Any(), worklease.ExitRetired).Return(nil).Times(1)
+				mockLease.EXPECT().Release(gomock.Any(), gomock.Any(), worklease.ExitAbandoned).Return(nil).Times(2)
+
+				p, _ := pool.New(mockLease, pool.Config{WorkIDs: []string{"w1", "w2", "w3"}, IdleInterval: fast, RerunInterval: fast, BackoffInterval: fast, Observer: spy},
+					func(c context.Context, workID string, t worklease.Token, cp worklease.Checkpoint) ([]byte, error) {
+						if workID == "w1" {
+							return retire(c, workID, t, cp)
+						}
+						return nil, testPermError{"dead"}
+					})
+				Expect(p.Run(ctx)).To(Succeed())
+				snap := spy.snapshot()
+				Expect(snap.retired).To(Equal([]string{"w1"}))
+				Expect(snap.dead).To(HaveLen(2))
+			})
+		})
+
+		Context("ErrLeaseHeld", func() {
+			// countHeldAcquires runs one slot whose work ID is always held for
+			// 300ms under the default IdleInterval and returns the Acquire count.
+			countHeldAcquires := func() int64 {
+				var calls atomic.Int64
+				mockLease.EXPECT().Acquire(gomock.Any(), "w1").DoAndReturn(
+					func(_ context.Context, _ string, _ ...worklease.AcquireOption) (worklease.Token, error) {
+						calls.Add(1)
+						return worklease.Token{}, worklease.ErrLeaseHeld
+					},
+				).AnyTimes()
+
+				lctx, lcancel := context.WithTimeout(ctx, 300*time.Millisecond)
+				defer lcancel()
+				p, _ := pool.New(mockLease, pool.Config{WorkIDs: []string{"w1"}, Observer: spy}, func(_ context.Context, _ string, _ worklease.Token, _ worklease.Checkpoint) ([]byte, error) {
+					return nil, nil
+				})
+				Expect(p.Run(lctx)).To(Succeed())
+				return calls.Load()
+			}
+
+			It("calls Acquire at most twice in 300ms under the default IdleInterval", func() {
+				Expect(countHeldAcquires()).To(BeNumerically("<=", 2))
+			})
+
+			It("does not call OnSlotBackoff", func() {
+				countHeldAcquires()
+				Expect(spy.snapshot().backoff).To(BeEmpty())
+			})
+		})
+
+		Context("WorkFn returns nil", func() {
+			// countReruns runs one slot whose WorkFn always returns nil for 300ms
+			// under the default RerunInterval and returns the Acquire count.
+			countReruns := func() int64 {
+				var calls atomic.Int64
+				mockLease.EXPECT().Acquire(gomock.Any(), "w1").DoAndReturn(
+					func(_ context.Context, _ string, _ ...worklease.AcquireOption) (worklease.Token, error) {
+						calls.Add(1)
+						return worklease.Token{}, nil
+					},
+				).AnyTimes()
+				mockLease.EXPECT().ReadCheckpoint(gomock.Any(), gomock.Any()).Return(worklease.Checkpoint{}, nil).AnyTimes()
+				mockLease.EXPECT().StartRenewal(gomock.Any(), gomock.Any()).Return(context.Background(), func() {}).AnyTimes()
+				mockLease.EXPECT().Release(gomock.Any(), gomock.Any(), worklease.ExitFinished).Return(nil).MinTimes(1)
+
+				lctx, lcancel := context.WithTimeout(ctx, 300*time.Millisecond)
+				defer lcancel()
+				p, _ := pool.New(mockLease, pool.Config{WorkIDs: []string{"w1"}, Observer: spy}, func(_ context.Context, _ string, _ worklease.Token, _ worklease.Checkpoint) ([]byte, error) {
+					return nil, nil
+				})
+				Expect(p.Run(lctx)).To(Succeed())
+				return calls.Load()
+			}
+
+			It("releases with ExitFinished and calls Acquire at most twice in 300ms under the default RerunInterval", func() {
+				Expect(countReruns()).To(BeNumerically("<=", 2))
+			})
+
+			It("does not call OnSlotBackoff", func() {
+				countReruns()
+				Expect(spy.snapshot().backoff).To(BeEmpty())
+			})
+		})
+
+		Context("non-permanent error", func() {
+			It("calls OnSlotBackoff with Duration 1s under the default BackoffInterval", func() {
+				expectSlotRuns(worklease.Checkpoint{})
+				mockLease.EXPECT().Release(gomock.Any(), gomock.Any(), worklease.ExitAbandoned).Return(nil).AnyTimes()
+
+				lctx, lcancel := context.WithCancel(ctx)
+				defer lcancel()
+				p, _ := pool.New(mockLease, pool.Config{WorkIDs: []string{"w1"}, Observer: spy}, func(_ context.Context, _ string, _ worklease.Token, _ worklease.Checkpoint) ([]byte, error) {
+					return nil, errors.New("transient")
+				})
+				done := make(chan error, 1)
+				go func() { done <- p.Run(lctx) }()
+
+				Eventually(func() []pool.SlotBackoffEvent { return spy.snapshot().backoff }).Should(HaveLen(1))
+				lcancel() // do not wait out the 1s backoff
+				Eventually(done).Should(Receive(BeNil()))
+				Expect(spy.snapshot().backoff[0].Duration).To(Equal(time.Second))
+			})
+		})
+
+		It("passes CleanupTimeout to each slot's Runner", func() {
+			expectSlotRuns(worklease.Checkpoint{})
+			var deadline time.Time
+			mockLease.EXPECT().Release(gomock.Any(), gomock.Any(), worklease.ExitRetired).DoAndReturn(
+				func(c context.Context, _ worklease.Token, _ worklease.ExitMode) error {
+					deadline, _ = c.Deadline()
+					return nil
+				},
+			)
+
+			p, _ := pool.New(mockLease, pool.Config{WorkIDs: []string{"w1"}, IdleInterval: fast, RerunInterval: fast, BackoffInterval: fast, CleanupTimeout: 2 * time.Second}, retire)
+			Expect(p.Run(ctx)).To(Succeed())
+			Expect(time.Until(deadline)).To(BeNumerically("~", 2*time.Second, 500*time.Millisecond))
+		})
+
+		It("passes the backend Checkpoint to WorkFn with workID", func() {
+			want := worklease.Checkpoint{State: []byte("offset-7"), PrevExit: worklease.ExitAbandoned, PrevHolderID: "proc-a"}
+			expectSlotRuns(want)
+			mockLease.EXPECT().Release(gomock.Any(), gomock.Any(), worklease.ExitRetired).Return(nil)
+
+			var gotID string
+			var got worklease.Checkpoint
+			p, _ := pool.New(mockLease, pool.Config{WorkIDs: []string{"w1"}, IdleInterval: fast, RerunInterval: fast, BackoffInterval: fast},
+				func(c context.Context, workID string, t worklease.Token, prior worklease.Checkpoint) ([]byte, error) {
+					gotID, got = workID, prior
+					return retire(c, workID, t, prior)
+				})
+			Expect(p.Run(ctx)).To(Succeed())
+			Expect(gotID).To(Equal("w1"))
+			Expect(got).To(Equal(want))
 		})
 	})
 })

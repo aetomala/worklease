@@ -139,3 +139,13 @@ These are breaking at the margins (the `ErrConfigInvalid` message and the `Run`-
 - `docs/adr/0006-backend-acquire-single-attempt.md` — single-attempt backend contract
 - `docs/adr/0007-observer-config-field.md` — `LeaseObserver`, the event-struct pattern `pool.Observer` mirrors
 - `docs/adr/0010-leader-fn-signature-and-acquire-semantics.md` — parallel design decisions for `leader` (callbacks vs interface)
+
+## Amendment (2026-10-06) — v0.6 slot pacing, retirement, and cleanup
+
+- **Idle wait (#81).** `pool.Config.IdleInterval` is the wait after `Runner.Run` returns `ErrLeaseHeld`, meaning a peer holds the work ID. Zero or negative means 1s. Each wait is drawn uniformly from `[IdleInterval, 1.2·IdleInterval)`. `OnSlotBackoff` does not fire for these waits.
+- **Backoff default (#81).** `BackoffInterval` keeps its role, the wait after a real non-permanent error, but its zero value changes from immediate retry to 1s. This is a breaking change.
+- **Rerun wait (v0.6).** `pool.Config.RerunInterval` is the wait after a `WorkFn` returns `nil` and the slot releases with `ExitFinished`. Zero or negative means 1s, with the same 20% jitter as `IdleInterval`. A finished slot no longer reacquires immediately: without a pause, a fast `WorkFn` reran in a tight loop, and a peer process almost never won a finished work ID, which defeated rebalancing. `OnSlotBackoff` does not fire for these waits. This is a breaking change.
+- **Pacing summary.** Every path that loops, except the immediate reacquire after `ErrFenced`, has a non-zero default wait: `IdleInterval` (peer holds the work ID), `RerunInterval` (work finished), `BackoffInterval` (work failed). `ErrFenced` reacquires immediately, as before.
+- **Retirement (ADR-0018).** A `WorkFn` that returns an error wrapping `worklease.ErrRetire` releases with `ExitRetired`. The slot exits without reacquiring or backing off, and `Observer.OnSlotRetired` fires. `OnSlotDead` stays reserved for `PermanentError`. `ErrRetire` wins when an error satisfies both. `Run` returns `ErrAllSlotsDead` only if every slot exited through `PermanentError`; if at least one slot retired, it returns `nil`.
+- **Exit modes (ADR-0018).** `pool.WorkFn` receives `prior worklease.Checkpoint`. A `PermanentError` is a non-fencing error, so its slot releases with `ExitAbandoned`, and its successor resumes from partial state.
+- **Cleanup (#80).** `pool.Config.CleanupTimeout` bounds each slot's final `Checkpoint` and `Release`, which run on a context that survives cancellation of `Run`'s context. Zero or negative means 5s.

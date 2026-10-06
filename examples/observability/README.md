@@ -2,7 +2,7 @@
 
 A runnable example showing how to implement `worklease.LeaseObserver` to produce the
 signals a production deployment cares about — per-operation counts and latency, lease hold
-duration, and a fencing counter — using only the standard library. It demonstrates the
+duration, a fencing counter, and counts per exit mode — using only the standard library. It demonstrates the
 patterns that are non-obvious from the interface alone, and shows where a real metrics
 backend (Prometheus, OpenTelemetry) would plug in.
 
@@ -14,7 +14,7 @@ backend (Prometheus, OpenTelemetry) would plug in.
 observability/
 ├── go.mod    ← separate module; replace directive points to repo root
 ├── go.sum
-└── main.go   ← metricsObserver + a clean lifecycle and a fencing scenario
+└── main.go   ← metricsObserver + a clean lifecycle, a fencing scenario, and an abandoned run
 ```
 
 ---
@@ -40,13 +40,23 @@ Expected output (latency values vary run to run):
 ```
 holder-A checkpoint correctly fenced: worklease: Checkpoint: workID="report-2026-06" holderID="holder-A": worklease: fenced — lease acquired by another holder
 === lease metrics ===
-acquire          calls=2 errors=0 avg_latency=4.6µs
-checkpoint       calls=3 errors=1 avg_latency=125ns
+acquire          calls=3 errors=0 avg_latency=4.014µs
+checkpoint       calls=3 errors=1 avg_latency=97ns
 renew            calls=1 errors=0 avg_latency=125ns
-release          calls=1 errors=0 avg_latency=167ns
-read_checkpoint  calls=1 errors=0 avg_latency=125ns
+release          calls=2 errors=0 avg_latency=125ns
+read_checkpoint  calls=3 errors=0 avg_latency=69ns
 fenced           total=1
-hold_duration    holding[0]=42µs
+renew_retries    total=0
+hold_duration    holding[0]=32.333µs
+hold_duration    holding[1]=416ns
+release_by_mode  mode=finished total=1
+release_by_mode  mode=abandoned total=1
+release_by_mode  mode=retired total=0
+read_by_prev     prev_exit=none total=1
+read_by_prev     prev_exit=finished total=1
+read_by_prev     prev_exit=abandoned total=0
+read_by_prev     prev_exit=retired total=0
+read_by_prev     prev_exit=expired total=1
 ```
 
 The example runs instantly — expiry is driven by an injected fake clock, so there is no
@@ -82,9 +92,19 @@ triggers a real fencing event: holder A's lease expires (fake clock advance), ho
 acquires the same work ID — bumping the fencing token — and holder A's next `Checkpoint` is
 fenced.
 
+**Counting exit modes** — since v0.6 every `ReleaseEvent` carries the declared `Mode`, and
+every `ReadCheckpointEvent` carries `PrevExit`, how the previous holder left. The example
+counts successful releases per `e.Mode.String()` and successful reads per
+`e.PrevExit.String()`. Holder B reads `expired` because holder A never released, holder B
+then releases with `finished`, and holder C reads `finished` and releases with `abandoned`.
+In production, the share of `abandoned` releases is a failure rate, and reads that see
+`expired` count crashes and lost leases. An invalid mode is rejected before the backend is
+called, so it never produces a `ReleaseEvent`.
+
 **Mapping to a real metrics backend** — the `metricsObserver` fields map directly to standard
 instruments (see the comment block at the top of `main.go`): call/error counts → a labeled
-`Counter`, latency and hold duration → `Histogram`s, fencing → a `Counter`. The callback
+`Counter`, latency and hold duration → `Histogram`s, fencing → a `Counter`, exit modes → a
+`Counter` labelled by mode. The callback
 bodies and correlation logic are identical whether the sink is an in-memory map, a Prometheus
 `CounterVec`/`HistogramVec`, or OpenTelemetry instruments.
 

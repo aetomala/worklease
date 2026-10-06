@@ -7,6 +7,93 @@ This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 
 ---
 
+## [Unreleased]
+
+---
+
+## [v0.6.0] — 2026-10-06
+
+### Breaking
+
+- **Postgres schema migration required.** `worklease_leases` gains `exit_mode`, `prev_exit_mode`, and `prev_holder_id` with two named CHECK constraints. Every `Acquire` writes these columns, so deploying v0.6 against a v0.5 schema makes every `Acquire` fail with a `column … does not exist` error. Apply the idempotent migration in `UPGRADING.md` before deploying. `clean_handoff` stays, deprecated, until a later release drops it.
+- `Lease.Release` and `Backend.Release` take a required exit mode: `Release(ctx, token, mode)`. Choose `ExitFinished`, `ExitAbandoned`, or `ExitRetired`; any other value returns `ErrInvalidExitMode`. There is no default, so `defer Release` can no longer mark a failure as completed work.
+- `Lease.ReadCheckpoint` and `Backend.ReadCheckpoint` return a `Checkpoint` (`State`, `PrevExit`, `PrevHolderID`) instead of `(state []byte, cleanHandoff bool)`.
+- `worker.WorkFn` and `pool.WorkFn` receive `prior worklease.Checkpoint` instead of `prior []byte, cleanHandoff bool`.
+- `ReleaseEvent` gains `Mode`. `ReadCheckpointEvent.CleanHandoff` is replaced by `PrevExit` and `PrevHolderID`.
+- `pool.Observer` gains `OnSlotRetired(ctx, SlotRetiredEvent)`. Custom observers must add it.
+- `SweepOptions.IncludeCrashed` is renamed `IncludeExpired`, and `Sweep` now keys on declared exits: retired rows always, expired rows only with `IncludeExpired`, finished and abandoned rows never.
+- `pool.Config.BackoffInterval` zero value is now 1s; it was immediate retry. A slot whose work ID a peer holds now waits the new `IdleInterval` (default 1s, up to 20% jitter) instead of `BackoffInterval`, and `OnSlotBackoff` no longer fires for that case. A slot whose work function returned `nil` now waits the new `RerunInterval` (default 1s, up to 20% jitter) before running again; it reran immediately before.
+- `backend.Backend` interface gains `Forget` and `Sweep` — any custom `Backend` implementation must add both methods. See `UPGRADING.md`.
+- `worklease.Lease` interface gains `Forget` — any custom `Lease` implementation must add the method. See `UPGRADING.md`.
+
+Behavior changes behind unchanged signatures:
+
+- `worker.Runner`, `leader.Elect`, and `pool` release failed runs with `ExitAbandoned` and no longer release when fenced, when the lease window is exhausted, or, for `worker.Runner` and `pool`, when `ReadCheckpoint` fails. In that case the lease expires after its TTL and the successor sees `ExitExpired`. Successors no longer see failures as clean handoffs (#79).
+- `Checkpoint` returns `ErrLeaseExpired`, without writing, once the holder has declared an exit with `Release`. It previously revived the released lease. A background checkpoint loop should stop on `ErrLeaseExpired`.
+- A second `Release` with the same token returns `ErrLeaseExpired` and cannot overwrite the first declared mode. It previously succeeded.
+- `leader.Elect` wraps a non-fenced `Release` error as `leader: release: …` when `fn` succeeded, matching `worker`; when `fn` failed, it returns `fn`'s error. Match with `errors.Is`.
+- `leader.Config.OnRelinquished` fires only after a successful release with `ExitFinished` or `ExitRetired`. It no longer fires after `fn` returns an error.
+- `Release` returns `ErrLeaseExpired` once the lease has expired, even when no successor has acquired it, and records nothing; the successor sees `ExitExpired`. Fencing is checked first (ADR-0012 amended).
+- PostgreSQL `ReadCheckpoint` returns `ErrFenced` when the row does not exist; it returned empty state. The memory backend already did (#75).
+- `ErrLeaseExpired` from `Renew` ends renewal immediately, without backoff. The renewal context's cause is `errors.Join(ErrLeaseWindowExhausted, ErrLeaseExpired)`, so `errors.Is` matches both (#84).
+- `pool.Run` returns `nil`, not `ErrAllSlotsDead`, when at least one slot retired its work ID.
+
+### Added
+
+- `worklease.ExitMode` (`ExitNone`, `ExitFinished`, `ExitAbandoned`, `ExitRetired`, `ExitExpired`) and `worklease.Checkpoint`, aliases of the canonical `backend` types (ADR-0018).
+- `worklease.ErrRetire` — return it, or wrap it, from a work function to release with `ExitRetired` and report success. `pool` stops the slot.
+- `worklease.ErrInvalidExitMode`.
+- `CleanupTimeout` on `worker.RunnerConfig`, `leader.Config`, and `pool.Config` (default 5s): the final `Checkpoint` and `Release` survive cancellation of the caller's context, bounded by this timeout (#80).
+- `pool.Config.IdleInterval`, `pool.Config.RerunInterval`, `pool.Observer.OnSlotRetired`, and `pool.SlotRetiredEvent`.
+- `Lease.Forget(ctx, token) error` — fencing-checked permanent deletion of a lease row.
+- `worklease.Vacuum` / `worklease.SweepOptions` / `NewVacuum` — age-based bulk cleanup of retired and, optionally, expired lease rows via `Vacuum.Sweep`.
+- `ErrRetentionRequired` — returned by `Vacuum.Sweep` when `SweepOptions.Retention <= 0`.
+- `backend.SweepOptions` — canonical definition backing `worklease.SweepOptions` (type alias).
+
+### Fixed
+
+- A successor's handoff signal now describes the immediately previous holder. `clean_handoff` was carried forward by `Acquire`, so after A released and B crashed, C was told the handoff was clean (#73).
+- Default `Vacuum.Sweep` no longer deletes rows whose last holder crashed (#74) or the resume points of work IDs that are only between holders (#76). `Retention` is redefined as how long a retired or expired row is kept after its last update.
+- Final state and release survive a graceful shutdown. `Runner`, `Elect`, and `pool` ran the final `Checkpoint` and `Release` on the caller's cancelled context; on PostgreSQL both failed and the lease stayed held for a TTL (#80).
+- A `pool` slot whose work ID a peer holds no longer polls `Acquire` in a tight loop (#81).
+- Renewal no longer retries `ErrLeaseExpired` until the window closes (#84).
+- Renewal goroutine retry window now advances after every successful renewal. Previously it stayed bounded by `token.ExpiresAt()` from `Acquire`, so once one TTL had elapsed the first transient `Renew` error cancelled `renewCtx` with `ErrLeaseWindowExhausted` while the lease was still valid in storage. The first window is also capped by the local acquire time plus TTL (monotonic clock), so a backend clock running ahead of the local clock can no longer extend retries past the true expiry.
+- `New` rejects a negative `Config.TTL`, and the default renewal interval is floored at 1ns. Previously a TTL below 2ns produced a zero `TTL/2` interval, and a negative TTL a negative one; `time.NewTicker` then panicked inside the renewal goroutine and crashed the process.
+- `worker.Runner.Run` stops lease renewal when the `WorkFn` panics. Previously the renewal goroutine kept renewing after a recovered panic, holding the lease indefinitely.
+- `worker.ErrLeaseRequired` and `worker.ErrWorkFnRequired` messages now carry the `worker:` prefix used by every other package's sentinels. Match with `errors.Is`, not the message text.
+- Holder-ID fencing parity: the memory backend now rejects `Checkpoint`, `Renew`, `Release`, and `Forget` with `ErrFenced` when the record's holder ID does not match the stored lease, as the PostgreSQL backend and ADR-0016 already specify. The PostgreSQL `Renew` no longer misreports a holder mismatch as `ErrLeaseExpired`. A new conformance spec pins the behavior.
+- Memory backend boundary parity with PostgreSQL: `Renew` returns `ErrLeaseExpired` when the clock equals `expiresAt` (postgres: `expires_at > NOW()`), and `Sweep` deletes only rows strictly older than `Retention` (postgres: `updated_at < NOW() - retention`).
+- Memory backend honors context cancellation: every method returns the context error without side effects when `ctx` is already done, as `database/sql` does for the PostgreSQL backend. Previously a cancelled `Acquire` still acquired the lease in memory, which hid cancellation-path behavior that differs on PostgreSQL. A new conformance spec pins the behavior.
+- `leader.Config.OnLost` no longer fires when the parent context passed to `Elect` is cancelled. As documented, it fires only when the renewal context is cancelled by fencing or renewal failure.
+- `Lease.ReadCheckpoint` wraps backend errors like the other `Lease` methods: `worklease: ReadCheckpoint: workID=… holderID=…: …` for `ErrFenced`, and `worklease: ReadCheckpoint: …` otherwise. Use `errors.Is`; a direct `err == worklease.ErrFenced` comparison no longer matches.
+- `checkpoint.Decode` returns the zero value of `T` on a codec error instead of a partially decoded value. `Encode` and `Decode` wrap codec errors with `checkpoint: Encode:` and `checkpoint: Decode:` prefixes.
+
+### Security
+
+- `golang.org/x/text` bumped to v0.39.0 (GO-2026-5970) and `golang.org/x/net` to v0.56.0 (GO-2026-5942). Neither is reachable from worklease code. Both reach the module graph through `backend/conformance`, an exported package that third-party backends import, so those modules would otherwise inherit the vulnerable versions. `go mod tidy` also raises the indirect `golang.org/x/sys` to v0.46.0 and `golang.org/x/tools` to v0.47.0. The `go 1.25.0` floor and the `go1.26.8` toolchain are unchanged.
+
+### Documentation
+
+- ADR-0018 (explicit lease exit modes) accepted. Dated amendments to ADR-0010 (`OnRelinquished` fires only after `ExitFinished` or `ExitRetired`), ADR-0011 (pool pacing, retirement, cleanup), ADR-0012 (`Release` modes and expiry), ADR-0013 (lease window tracking, terminal `ErrLeaseExpired`), and ADR-0016 (retention keyed on declared exits).
+- `docs/ARCHITECTURE.md` matches the shipped code: exit-mode handoff model, schema and query blocks, `Runner`/`Elect`/`pool` contracts, renewal window, residual risks R1–R11 (#77).
+- README: quickstart rewritten around exit modes and a cleanup context; new sections for exit modes, retiring work, and row lifecycle (`Forget`, `Vacuum`); schema DDL synced to `schema.sql`.
+- Examples demonstrate exit modes, `ErrRetire`, `OnSlotRetired`, `CleanupTimeout`, and per-mode observer counts.
+- Godoc drift corrected: `Token`, `Checkpoint`, and `LeaseRecord` no longer claim a token or record comes from `Renew`, and `Forget` is listed among the operations that take one; `Acquire` docs on `Lease`, `Backend`, and the PostgreSQL backend state that `ErrLeaseHeld` means held *and unexpired*; `OnAcquire`/`AcquireEvent` document one event per poll under `WithWaitForLease`; `Token.ExpiresAt` documents that it is the acquisition-time expiry from the backend clock; `OnFenced` notes it does not fire for `ReadCheckpoint` or `Forget`; the `doc.go` `Backend` link resolves.
+- `docs/ARCHITECTURE.md` roadmap and ADR index updated for v0.6 (ADR-0016 retention Accepted, ADR-0017 listed); `UPGRADING.md` notes that `Forget` also returns `ErrFenced` when no row exists.
+- Examples: `partition-processor` no longer waits out the TTL after a clean `Release`; the stale comment predated ADR-0012. The `renewal-backoff` scenario 2 comment now explains that the window-exhausted path fires without any backoff retry.
+- ADR-0016 retention component flipped from Proposed to Accepted.
+- ADR-0017 added — schema migration remains caller-owned.
+
+### Chore
+
+- Go toolchain directive bumped from go1.26.5 to go1.26.8 for GO-2026-6090 (`crypto/tls`) and GO-2026-5972 (`encoding/asn1`), both reachable standard-library vulnerabilities fixed in go1.26.6. The `go 1.25.0` floor is unchanged.
+- CI fails the test job if the PostgreSQL suite would skip: the job sets `WORKLEASE_REQUIRE_POSTGRES=1`, and the suite fails instead of skipping when that variable is set without `WORKLEASE_TEST_POSTGRES_DSN`.
+- CI vets each example module before building it, and a failing example now fails the loop explicitly.
+- `.gitignore` covers example binaries built in place and `.claude/settings.local.json`.
+- The PostgreSQL test suite applies the embedded `schema.sql` instead of a duplicated DDL string.
+
+---
+
 ## [v0.5.0] — 2026-06-29
 
 ### Breaking

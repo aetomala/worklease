@@ -2,6 +2,7 @@ package postgres_test
 
 import (
 	"context"
+	"database/sql"
 	"errors"
 	"time"
 
@@ -12,6 +13,9 @@ import (
 	"github.com/aetomala/worklease/backend"
 	"github.com/aetomala/worklease/backend/conformance"
 	wlpostgres "github.com/aetomala/worklease/backend/postgres"
+	"github.com/aetomala/worklease/leader"
+	"github.com/aetomala/worklease/pool"
+	"github.com/aetomala/worklease/worker"
 )
 
 var _ = Describe("conformance", conformance.RunSuite(func() backend.Backend {
@@ -84,10 +88,11 @@ var _ = Describe("Backend (postgres)", func() {
 			Expect(rec2.FencingToken).To(BeNumerically(">", rec1.FencingToken))
 
 			// Verify previous checkpoint is preserved across the reacquire.
-			checkpoint, cleanHandoff, err := b.ReadCheckpoint(ctx, rec2)
+			cp, err := b.ReadCheckpoint(ctx, rec2)
 			Expect(err).NotTo(HaveOccurred())
-			Expect(checkpoint).To(Equal([]byte("prior-state")))
-			Expect(cleanHandoff).To(BeFalse())
+			Expect(cp.State).To(Equal([]byte("prior-state")))
+			Expect(cp.PrevExit).To(Equal(backend.ExitExpired))
+			Expect(cp.PrevHolderID).To(Equal("old-holder"))
 		})
 	})
 
@@ -100,10 +105,10 @@ var _ = Describe("Backend (postgres)", func() {
 			Expect(err).NotTo(HaveOccurred())
 
 			// Verify state was written
-			checkpoint, cleanHandoff, err := b.ReadCheckpoint(ctx, record)
+			cp, err := b.ReadCheckpoint(ctx, record)
 			Expect(err).NotTo(HaveOccurred())
-			Expect(checkpoint).To(Equal([]byte("new-state")))
-			Expect(cleanHandoff).To(BeFalse())
+			Expect(cp.State).To(Equal([]byte("new-state")))
+			Expect(cp.PrevExit).To(Equal(backend.ExitNone))
 		})
 
 		It("fencing token stale → returns ErrFenced", func() {
@@ -157,22 +162,42 @@ var _ = Describe("Backend (postgres)", func() {
 	})
 
 	Describe("Release", func() {
-		It("fencing token matches → sets clean_handoff=true, expires lease immediately, returns nil", func() {
+		It("Release sets exit_mode to the mode text and expires_at below NOW()", func() {
 			record, err := b.Acquire(ctx, "w8", "holder", 30*time.Second)
 			Expect(err).NotTo(HaveOccurred())
 
-			err = b.Release(ctx, record)
+			err = b.Release(ctx, record, backend.ExitAbandoned)
 			Expect(err).NotTo(HaveOccurred())
 
-			// Verify clean_handoff was set and expires_at is in the past.
-			var cleanHandoff bool
-			var expiresAt time.Time
+			// The expiry comparison uses the database clock — comparing against the
+			// local clock fails whenever the database runs more than 1ms ahead.
+			var exitMode string
+			var expired bool
 			err = db.QueryRowContext(ctx,
-				"SELECT clean_handoff, expires_at FROM worklease_leases WHERE work_id = $1", "w8",
-			).Scan(&cleanHandoff, &expiresAt)
+				"SELECT exit_mode, expires_at < NOW() FROM worklease_leases WHERE work_id = $1", "w8",
+			).Scan(&exitMode, &expired)
 			Expect(err).NotTo(HaveOccurred())
-			Expect(cleanHandoff).To(BeTrue())
-			Expect(expiresAt).To(BeTemporally("<", time.Now()))
+			Expect(exitMode).To(Equal("abandoned"))
+			Expect(expired).To(BeTrue())
+		})
+
+		It("Checkpoint after Release returns ErrLeaseExpired and leaves exit_mode and expires_at unchanged", func() {
+			record, err := b.Acquire(ctx, "w8b", "holder", 30*time.Second)
+			Expect(err).NotTo(HaveOccurred())
+			Expect(b.Release(ctx, record, backend.ExitFinished)).To(Succeed())
+
+			Expect(b.Checkpoint(ctx, record, []byte("late"), 30*time.Second)).To(MatchError(worklease.ErrLeaseExpired))
+
+			var exitMode string
+			var expired bool
+			var checkpoint []byte
+			err = db.QueryRowContext(ctx,
+				"SELECT exit_mode, expires_at < NOW(), checkpoint FROM worklease_leases WHERE work_id = $1", "w8b",
+			).Scan(&exitMode, &expired, &checkpoint)
+			Expect(err).NotTo(HaveOccurred())
+			Expect(exitMode).To(Equal("finished"))
+			Expect(expired).To(BeTrue())
+			Expect(checkpoint).To(BeNil())
 		})
 
 		It("fencing token stale → returns ErrFenced", func() {
@@ -184,21 +209,21 @@ var _ = Describe("Backend (postgres)", func() {
 			Expect(err).NotTo(HaveOccurred())
 
 			// Now the original record's token is stale
-			err = b.Release(ctx, record)
+			err = b.Release(ctx, record, backend.ExitFinished)
 			Expect(errors.Is(err, worklease.ErrFenced)).To(BeTrue())
 		})
 	})
 
 	Describe("ReadCheckpoint", func() {
-		It("no checkpoint exists → returns nil state, false, nil", func() {
+		It("no checkpoint exists → returns nil State and PrevExit ExitNone", func() {
 			// Acquire a lease without checkpoint
 			record, err := b.Acquire(ctx, "w10", "holder", 30*time.Second)
 			Expect(err).NotTo(HaveOccurred())
 
-			checkpoint, cleanHandoff, err := b.ReadCheckpoint(ctx, record)
+			cp, err := b.ReadCheckpoint(ctx, record)
 			Expect(err).NotTo(HaveOccurred())
-			Expect(checkpoint).To(BeNil())
-			Expect(cleanHandoff).To(BeFalse())
+			Expect(cp.State).To(BeNil())
+			Expect(cp.PrevExit).To(Equal(backend.ExitNone))
 		})
 
 		It("fencing token stale → returns ErrFenced", func() {
@@ -210,26 +235,192 @@ var _ = Describe("Backend (postgres)", func() {
 				"UPDATE worklease_leases SET fencing_token = fencing_token + 1 WHERE work_id = $1", "w12")
 			Expect(err).NotTo(HaveOccurred())
 
-			_, _, err = b.ReadCheckpoint(ctx, record)
+			_, err = b.ReadCheckpoint(ctx, record)
 			Expect(errors.Is(err, worklease.ErrFenced)).To(BeTrue())
 		})
 
-		It("checkpoint exists → returns correct bytes and cleanHandoff value", func() {
-			// Acquire a lease and checkpoint it
+		It("ReadCheckpoint returns ErrFenced when no row exists", func() {
+			_, err := b.ReadCheckpoint(ctx, backend.LeaseRecord{WorkID: "w-missing", HolderID: "holder", FencingToken: 1})
+			Expect(err).To(MatchError(worklease.ErrFenced))
+		})
+
+		It("ReadCheckpoint returns the checkpoint bytes and PrevExit after release and reacquire", func() {
 			record, err := b.Acquire(ctx, "w11", "holder", 30*time.Second)
 			Expect(err).NotTo(HaveOccurred())
+			Expect(b.Checkpoint(ctx, record, []byte("saved-state"), 30*time.Second)).To(Succeed())
+			Expect(b.Release(ctx, record, backend.ExitFinished)).To(Succeed())
 
-			err = b.Checkpoint(ctx, record, []byte("saved-state"), 30*time.Second)
+			rec2, err := b.Acquire(ctx, "w11", "holder-2", 30*time.Second)
+			Expect(err).NotTo(HaveOccurred())
+			cp, err := b.ReadCheckpoint(ctx, rec2)
+			Expect(err).NotTo(HaveOccurred())
+			Expect(cp.State).To(Equal([]byte("saved-state")))
+			Expect(cp.PrevExit).To(Equal(backend.ExitFinished))
+			Expect(cp.PrevHolderID).To(Equal("holder"))
+		})
+	})
+
+	Describe("exit columns", func() {
+		It("Acquire on a released row sets prev_exit_mode and prev_holder_id and clears exit_mode", func() {
+			record, err := b.Acquire(ctx, "x1", "holder-a", 30*time.Second)
+			Expect(err).NotTo(HaveOccurred())
+			Expect(b.Release(ctx, record, backend.ExitRetired)).To(Succeed())
+			_, err = b.Acquire(ctx, "x1", "holder-b", 30*time.Second)
 			Expect(err).NotTo(HaveOccurred())
 
-			// Release to set clean_handoff=true
-			err = b.Release(ctx, record)
+			var exitMode sql.NullString
+			var prevExit string
+			var prevHolder sql.NullString
+			err = db.QueryRowContext(ctx,
+				"SELECT exit_mode, prev_exit_mode, prev_holder_id FROM worklease_leases WHERE work_id = $1", "x1",
+			).Scan(&exitMode, &prevExit, &prevHolder)
+			Expect(err).NotTo(HaveOccurred())
+			Expect(exitMode.Valid).To(BeFalse())
+			Expect(prevExit).To(Equal("retired"))
+			Expect(prevHolder.String).To(Equal("holder-a"))
+		})
+
+		It("Acquire never writes clean_handoff: the column keeps its value across Acquire, Checkpoint, and Release", func() {
+			record, err := b.Acquire(ctx, "x2", "holder-a", 30*time.Second)
+			Expect(err).NotTo(HaveOccurred())
+			_, err = db.ExecContext(ctx, "UPDATE worklease_leases SET clean_handoff = TRUE WHERE work_id = $1", "x2")
 			Expect(err).NotTo(HaveOccurred())
 
-			checkpoint, cleanHandoff, err := b.ReadCheckpoint(ctx, record)
+			Expect(b.Checkpoint(ctx, record, []byte("s"), 30*time.Second)).To(Succeed())
+			Expect(b.Release(ctx, record, backend.ExitAbandoned)).To(Succeed())
+			_, err = b.Acquire(ctx, "x2", "holder-b", 30*time.Second)
 			Expect(err).NotTo(HaveOccurred())
-			Expect(checkpoint).To(Equal([]byte("saved-state")))
+
+			var cleanHandoff bool
+			err = db.QueryRowContext(ctx, "SELECT clean_handoff FROM worklease_leases WHERE work_id = $1", "x2").Scan(&cleanHandoff)
+			Expect(err).NotTo(HaveOccurred())
 			Expect(cleanHandoff).To(BeTrue())
+		})
+
+		It("schema rejects exit_mode = 'bogus' with a check violation", func() {
+			_, err := b.Acquire(ctx, "x3", "holder", 30*time.Second)
+			Expect(err).NotTo(HaveOccurred())
+			_, err = db.ExecContext(ctx, "UPDATE worklease_leases SET exit_mode = 'bogus' WHERE work_id = $1", "x3")
+			Expect(err).To(MatchError(ContainSubstring("worklease_leases_exit_mode_check")))
+		})
+
+		It("schema rejects prev_exit_mode = 'bogus' with a check violation", func() {
+			_, err := b.Acquire(ctx, "x4", "holder", 30*time.Second)
+			Expect(err).NotTo(HaveOccurred())
+			_, err = db.ExecContext(ctx, "UPDATE worklease_leases SET prev_exit_mode = 'bogus' WHERE work_id = $1", "x4")
+			Expect(err).To(MatchError(ContainSubstring("worklease_leases_prev_exit_mode_check")))
+		})
+	})
+
+	Describe("worker.Runner on PostgreSQL (#80; Group B)", func() {
+		// runCancelledMidWork runs holder-a's Runner on "w-run", cancels the parent
+		// context while WorkFn is running, and returns Run's error. WorkFn
+		// returns its final state together with the context error.
+		runCancelledMidWork := func() error {
+			leaseA, err := worklease.New(b, worklease.Config{TTL: 30 * time.Second, HolderID: "holder-a"})
+			Expect(err).NotTo(HaveOccurred())
+			parent, cancelParent := context.WithCancel(ctx)
+			defer cancelParent()
+			r, err := worker.NewRunner(worker.RunnerConfig{
+				Lease: leaseA,
+				WorkFn: func(wctx context.Context, _ worklease.Token, _ worklease.Checkpoint) ([]byte, error) {
+					cancelParent()
+					<-wctx.Done()
+					return []byte("final-a"), wctx.Err()
+				},
+			})
+			Expect(err).NotTo(HaveOccurred())
+			return r.Run(parent, "w-run")
+		}
+
+		It("when the parent context is cancelled mid-WorkFn, Run returns the WorkFn error, the final state is stored, and a successor acquires without waiting for the TTL", func() {
+			Expect(runCancelledMidWork()).To(MatchError(context.Canceled))
+
+			leaseB, err := worklease.New(b, worklease.Config{TTL: 30 * time.Second, HolderID: "holder-b"})
+			Expect(err).NotTo(HaveOccurred())
+			tokenB, err := leaseB.Acquire(ctx, "w-run") // fail-fast: ErrLeaseHeld if A did not release
+			Expect(err).NotTo(HaveOccurred())
+			cp, err := leaseB.ReadCheckpoint(ctx, tokenB)
+			Expect(err).NotTo(HaveOccurred())
+			Expect(cp.State).To(Equal([]byte("final-a")))
+		})
+
+		It("the successor reads PrevExit == ExitAbandoned, the cancelled holder's ID, and its final state", func() {
+			Expect(runCancelledMidWork()).To(HaveOccurred())
+
+			leaseB, err := worklease.New(b, worklease.Config{TTL: 30 * time.Second, HolderID: "holder-b"})
+			Expect(err).NotTo(HaveOccurred())
+			tokenB, err := leaseB.Acquire(ctx, "w-run")
+			Expect(err).NotTo(HaveOccurred())
+			cp, err := leaseB.ReadCheckpoint(ctx, tokenB)
+			Expect(err).NotTo(HaveOccurred())
+			Expect(cp).To(Equal(worklease.Checkpoint{State: []byte("final-a"), PrevExit: worklease.ExitAbandoned, PrevHolderID: "holder-a"}))
+		})
+	})
+
+	Describe("pool.Pool on PostgreSQL (#80)", func() {
+		It("when Run's context is cancelled mid-WorkFn, each slot's final state is stored and a successor acquires without waiting for the TTL and reads ExitAbandoned", func() {
+			ids := []string{"p-0", "p-1"}
+			leaseA, err := worklease.New(b, worklease.Config{TTL: 30 * time.Second, HolderID: "pool-a"})
+			Expect(err).NotTo(HaveOccurred())
+
+			started := make(chan string, len(ids))
+			p, err := pool.New(leaseA, pool.Config{
+				WorkIDs:         ids,
+				IdleInterval:    10 * time.Millisecond,
+				RerunInterval:   10 * time.Millisecond,
+				BackoffInterval: 10 * time.Millisecond,
+			}, func(wctx context.Context, workID string, _ worklease.Token, _ worklease.Checkpoint) ([]byte, error) {
+				started <- workID
+				<-wctx.Done()
+				return []byte("final-" + workID), wctx.Err()
+			})
+			Expect(err).NotTo(HaveOccurred())
+
+			runCtx, runCancel := context.WithCancel(ctx)
+			defer runCancel()
+			runDone := make(chan error, 1)
+			go func() { runDone <- p.Run(runCtx) }()
+			for range ids {
+				Eventually(started, "2s").Should(Receive())
+			}
+
+			runCancel()
+			Eventually(runDone, "2s").Should(Receive(BeNil()))
+
+			leaseB, err := worklease.New(b, worklease.Config{TTL: 30 * time.Second, HolderID: "pool-b"})
+			Expect(err).NotTo(HaveOccurred())
+			for _, id := range ids {
+				tokenB, err := leaseB.Acquire(ctx, id) // fail-fast: ErrLeaseHeld if the slot did not release
+				Expect(err).NotTo(HaveOccurred(), "expected %q to be released", id)
+				cp, err := leaseB.ReadCheckpoint(ctx, tokenB)
+				Expect(err).NotTo(HaveOccurred())
+				Expect(cp).To(Equal(worklease.Checkpoint{State: []byte("final-" + id), PrevExit: worklease.ExitAbandoned, PrevHolderID: "pool-a"}))
+			}
+		})
+	})
+
+	Describe("leader.Elect on PostgreSQL (#80; Group B)", func() {
+		It("when the parent context is cancelled mid-fn, the lease is released and a successor acquires without waiting for the TTL and reads ExitAbandoned", func() {
+			leaseA, err := worklease.New(b, worklease.Config{TTL: 30 * time.Second, HolderID: "leader-a"})
+			Expect(err).NotTo(HaveOccurred())
+			parent, cancelParent := context.WithCancel(ctx)
+			defer cancelParent()
+			err = leader.Elect(parent, leaseA, "w-elect", leader.Config{}, func(c context.Context) error {
+				cancelParent()
+				<-c.Done()
+				return c.Err()
+			})
+			Expect(err).To(MatchError(context.Canceled))
+
+			leaseB, err := worklease.New(b, worklease.Config{TTL: 30 * time.Second, HolderID: "leader-b"})
+			Expect(err).NotTo(HaveOccurred())
+			tokenB, err := leaseB.Acquire(ctx, "w-elect") // fail-fast: ErrLeaseHeld if A did not release
+			Expect(err).NotTo(HaveOccurred())
+			cp, err := leaseB.ReadCheckpoint(ctx, tokenB)
+			Expect(err).NotTo(HaveOccurred())
+			Expect(cp.PrevExit).To(Equal(worklease.ExitAbandoned))
+			Expect(cp.PrevHolderID).To(Equal("leader-a"))
 		})
 	})
 })

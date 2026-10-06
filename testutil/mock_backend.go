@@ -71,14 +71,27 @@ func (mr *MockBackendMockRecorder) Checkpoint(ctx, record, state, ttl any) *gomo
 	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "Checkpoint", reflect.TypeOf((*MockBackend)(nil).Checkpoint), ctx, record, state, ttl)
 }
 
+// Forget mocks base method.
+func (m *MockBackend) Forget(ctx context.Context, record backend.LeaseRecord) error {
+	m.ctrl.T.Helper()
+	ret := m.ctrl.Call(m, "Forget", ctx, record)
+	ret0, _ := ret[0].(error)
+	return ret0
+}
+
+// Forget indicates an expected call of Forget.
+func (mr *MockBackendMockRecorder) Forget(ctx, record any) *gomock.Call {
+	mr.mock.ctrl.T.Helper()
+	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "Forget", reflect.TypeOf((*MockBackend)(nil).Forget), ctx, record)
+}
+
 // ReadCheckpoint mocks base method.
-func (m *MockBackend) ReadCheckpoint(ctx context.Context, record backend.LeaseRecord) ([]byte, bool, error) {
+func (m *MockBackend) ReadCheckpoint(ctx context.Context, record backend.LeaseRecord) (backend.Checkpoint, error) {
 	m.ctrl.T.Helper()
 	ret := m.ctrl.Call(m, "ReadCheckpoint", ctx, record)
-	ret0, _ := ret[0].([]byte)
-	ret1, _ := ret[1].(bool)
-	ret2, _ := ret[2].(error)
-	return ret0, ret1, ret2
+	ret0, _ := ret[0].(backend.Checkpoint)
+	ret1, _ := ret[1].(error)
+	return ret0, ret1
 }
 
 // ReadCheckpoint indicates an expected call of ReadCheckpoint.
@@ -88,17 +101,17 @@ func (mr *MockBackendMockRecorder) ReadCheckpoint(ctx, record any) *gomock.Call 
 }
 
 // Release mocks base method.
-func (m *MockBackend) Release(ctx context.Context, record backend.LeaseRecord) error {
+func (m *MockBackend) Release(ctx context.Context, record backend.LeaseRecord, mode backend.ExitMode) error {
 	m.ctrl.T.Helper()
-	ret := m.ctrl.Call(m, "Release", ctx, record)
+	ret := m.ctrl.Call(m, "Release", ctx, record, mode)
 	ret0, _ := ret[0].(error)
 	return ret0
 }
 
 // Release indicates an expected call of Release.
-func (mr *MockBackendMockRecorder) Release(ctx, record any) *gomock.Call {
+func (mr *MockBackendMockRecorder) Release(ctx, record, mode any) *gomock.Call {
 	mr.mock.ctrl.T.Helper()
-	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "Release", reflect.TypeOf((*MockBackend)(nil).Release), ctx, record)
+	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "Release", reflect.TypeOf((*MockBackend)(nil).Release), ctx, record, mode)
 }
 
 // Renew mocks base method.
@@ -113,4 +126,19 @@ func (m *MockBackend) Renew(ctx context.Context, record backend.LeaseRecord, ttl
 func (mr *MockBackendMockRecorder) Renew(ctx, record, ttl any) *gomock.Call {
 	mr.mock.ctrl.T.Helper()
 	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "Renew", reflect.TypeOf((*MockBackend)(nil).Renew), ctx, record, ttl)
+}
+
+// Sweep mocks base method.
+func (m *MockBackend) Sweep(ctx context.Context, opts backend.SweepOptions) (int64, error) {
+	m.ctrl.T.Helper()
+	ret := m.ctrl.Call(m, "Sweep", ctx, opts)
+	ret0, _ := ret[0].(int64)
+	ret1, _ := ret[1].(error)
+	return ret0, ret1
+}
+
+// Sweep indicates an expected call of Sweep.
+func (mr *MockBackendMockRecorder) Sweep(ctx, opts any) *gomock.Call {
+	mr.mock.ctrl.T.Helper()
+	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "Sweep", reflect.TypeOf((*MockBackend)(nil).Sweep), ctx, opts)
 }

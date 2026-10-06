@@ -14,7 +14,7 @@
 //
 // # Entry point
 //
-// Construct a Lease with [New], backed by a [Backend]:
+// Construct a Lease with [New], backed by a [github.com/aetomala/worklease/backend.Backend]:
 //
 //	backend, err := postgres.New(db)
 //	lease, err := worklease.New(backend, worklease.Config{

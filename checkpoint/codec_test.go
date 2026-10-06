@@ -79,6 +79,19 @@ var _ = Describe("Codec", func() {
 			_, err := checkpoint.Decode[progress](fakeCodec{decodeErr: decErr}, []byte("x"))
 			Expect(errors.Is(err, decErr)).To(BeTrue())
 		})
+
+		It("Decode[T] wraps the codec error and returns the zero value, not a partially decoded one", func() {
+			// encoding/json sets step before failing on the mistyped label.
+			got, err := checkpoint.Decode[progress](checkpoint.JSON(), []byte(`{"step":7,"label":5}`))
+			Expect(err).To(HaveOccurred())
+			Expect(err.Error()).To(HavePrefix("checkpoint: Decode: "))
+			Expect(got).To(Equal(progress{}))
+		})
+
+		It("Encode[T] wraps the codec error", func() {
+			_, err := checkpoint.Encode(fakeCodec{encodeErr: errors.New("encode error")}, progress{})
+			Expect(err.Error()).To(HavePrefix("checkpoint: Encode: "))
+		})
 	})
 
 	// ===== PHASE 4: Round-trip =====
