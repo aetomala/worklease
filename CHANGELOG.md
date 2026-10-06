@@ -11,11 +11,26 @@ This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 
 ### Breaking
 
+- **Postgres schema migration required.** `worklease_leases` gains `exit_mode`, `prev_exit_mode`, and `prev_holder_id` with two named CHECK constraints. Every `Acquire` writes these columns, so deploying v0.6 against a v0.5 schema makes every `Acquire` fail with a `column … does not exist` error. Apply the idempotent migration in `UPGRADING.md` before deploying. `clean_handoff` stays, deprecated, until a later release drops it.
+- `Lease.Release` and `Backend.Release` take a required exit mode: `Release(ctx, token, mode)`. Choose `ExitFinished`, `ExitAbandoned`, or `ExitRetired`; any other value returns `ErrInvalidExitMode`. There is no default, so `defer Release` can no longer mark a failure as completed work.
+- `Lease.ReadCheckpoint` and `Backend.ReadCheckpoint` return a `Checkpoint` (`State`, `PrevExit`, `PrevHolderID`) instead of `(state []byte, cleanHandoff bool)`.
+- `ReleaseEvent` gains `Mode`. `ReadCheckpointEvent.CleanHandoff` is replaced by `PrevExit` and `PrevHolderID`.
+- `SweepOptions.IncludeCrashed` is renamed `IncludeExpired`, and `Sweep` now keys on declared exits: retired rows always, expired rows only with `IncludeExpired`, finished and abandoned rows never.
 - `backend.Backend` interface gains `Forget` and `Sweep` — any custom `Backend` implementation must add both methods. No impact on callers using only the shipped PostgreSQL or in-memory backends. See `UPGRADING.md`.
 - `worklease.Lease` interface gains `Forget` — any custom `Lease` implementation must add the method. See `UPGRADING.md`.
 
+Behavior changes behind unchanged signatures:
+
+- `Checkpoint` returns `ErrLeaseExpired`, without writing, once the holder has declared an exit with `Release`. It previously revived the released lease. A background checkpoint loop should stop on `ErrLeaseExpired`.
+- A second `Release` with the same token returns `ErrLeaseExpired` and cannot overwrite the first declared mode. It previously succeeded.
+- `Release` returns `ErrLeaseExpired` once the lease has expired, even when no successor has acquired it, and records nothing; the successor sees `ExitExpired`. Fencing is checked first (ADR-0012 amended).
+- PostgreSQL `ReadCheckpoint` returns `ErrFenced` when the row does not exist; it returned empty state. The memory backend already did (#75).
+- `ErrLeaseExpired` from `Renew` ends renewal immediately, without backoff. The renewal context's cause is `errors.Join(ErrLeaseWindowExhausted, ErrLeaseExpired)`, so `errors.Is` matches both (#84).
+
 ### Added
 
+- `worklease.ExitMode` (`ExitNone`, `ExitFinished`, `ExitAbandoned`, `ExitRetired`, `ExitExpired`) and `worklease.Checkpoint`, aliases of the canonical `backend` types (ADR-0018).
+- `worklease.ErrInvalidExitMode`.
 - `Lease.Forget(ctx, token) error` — fencing-checked permanent deletion of a lease row.
 - `worklease.Vacuum` / `worklease.SweepOptions` / `NewVacuum` — age-based bulk cleanup of terminal lease rows via `Vacuum.Sweep`.
 - `ErrRetentionRequired` — returned by `Vacuum.Sweep` when `SweepOptions.Retention <= 0`.
@@ -23,6 +38,9 @@ This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 
 ### Fixed
 
+- A successor's handoff signal now describes the immediately previous holder. `clean_handoff` was carried forward by `Acquire`, so after A released and B crashed, C was told the handoff was clean (#73).
+- Default `Vacuum.Sweep` no longer deletes rows whose last holder crashed (#74) or the resume points of work IDs that are only between holders (#76). `Retention` is redefined as how long a retired or expired row is kept after its last update.
+- Renewal no longer retries `ErrLeaseExpired` until the window closes (#84).
 - Renewal goroutine retry window now advances after every successful renewal. Previously it stayed bounded by `token.ExpiresAt()` from `Acquire`, so once one TTL had elapsed the first transient `Renew` error cancelled `renewCtx` with `ErrLeaseWindowExhausted` while the lease was still valid in storage. The first window is also capped by the local acquire time plus TTL (monotonic clock), so a backend clock running ahead of the local clock can no longer extend retries past the true expiry.
 - `New` rejects a negative `Config.TTL`, and the default renewal interval is floored at 1ns. Previously a TTL below 2ns produced a zero `TTL/2` interval, and a negative TTL a negative one; `time.NewTicker` then panicked inside the renewal goroutine and crashed the process.
 - `worker.Runner.Run` stops lease renewal when the `WorkFn` panics. Previously the renewal goroutine kept renewing after a recovered panic, holding the lease indefinitely.
@@ -52,6 +70,7 @@ This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 - CI fails the test job if the PostgreSQL suite would skip: the job sets `WORKLEASE_REQUIRE_POSTGRES=1`, and the suite fails instead of skipping when that variable is set without `WORKLEASE_TEST_POSTGRES_DSN`.
 - CI vets each example module before building it, and a failing example now fails the loop explicitly.
 - `.gitignore` covers example binaries built in place and `.claude/settings.local.json`.
+- The PostgreSQL test suite applies the embedded `schema.sql` instead of a duplicated DDL string.
 
 ---
 
