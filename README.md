@@ -58,9 +58,9 @@ These are intentional scope boundaries, not gaps.
 
 **The window between checkpoints is at-least-once.** If Worker A executes a step and crashes before checkpointing, Worker B will re-execute that step from the previous checkpoint. `worklease` provides a resumable progress marker, not exactly-once step execution.
 
-**Recovery logic is yours.** The library delivers checkpoint bytes and the `cleanHandoff` flag. What those bytes mean, how to validate partial state, and how to reconcile external effects that happened before the crash are application concerns.
+**Recovery logic is yours.** The library delivers the checkpoint bytes and how the previous holder exited (`PrevExit`). What those bytes mean, how to validate partial state, and how to reconcile external effects that happened before a crash are application concerns.
 
-**Release expires the lease immediately.** Calling `Release` sets `clean_handoff = true` and sets the lease expiration to the past, making the work item immediately available. A successor using `WithWaitForLease` will acquire on its next poll; a fail-fast successor can call `Acquire` immediately after. The TTL governs crash detection only — it does not add latency to clean handoffs.
+**Release expires the lease immediately.** `Release` records the exit mode you declare and sets the lease expiration to the past, making the work item immediately available. A successor using `WithWaitForLease` acquires on its next poll; a fail-fast successor can call `Acquire` immediately after. The TTL governs crash detection only — it does not add latency to handoffs.
 
 ---
 
@@ -81,60 +81,59 @@ These are intentional scope boundaries, not gaps.
 ### Acquiring a lease and checkpointing progress
 
 ```go
-backend, err := postgres.New(db)
+token, err := lease.Acquire(ctx, "billing-run-2026-10")
+if err != nil {
+    return err // worklease.ErrLeaseHeld: another holder has it
+}
+
+prior, err := lease.ReadCheckpoint(ctx, token)
 if err != nil {
     return err
 }
 
-lease, err := worklease.New(backend, worklease.Config{
-    TTL:      30 * time.Second,
-    HolderID: workerID,
-})
-if err != nil {
-    return err
+switch prior.PrevExit {
+case worklease.ExitNone:
+    // First run: start from scratch.
+case worklease.ExitFinished:
+    // The previous run completed; prior.State is its final state.
+case worklease.ExitRetired:
+    // This work is done for good. Hand the lease back unchanged.
+    return lease.Release(ctx, token, worklease.ExitRetired)
+default:
+    // ExitAbandoned, ExitExpired, or a mode this code does not know:
+    // prior.State is partial. Validate it before resuming.
 }
 
-token, err := lease.Acquire(ctx, "onboarding:tenant-abc")
-if err != nil {
-    return err
-}
-defer lease.Release(ctx, token)
+renewCtx, stopRenewal := lease.StartRenewal(ctx, token)
+defer stopRenewal()
 
-// Read what the previous owner left behind
-state, cleanHandoff, err := lease.ReadCheckpoint(ctx, token)
-if err != nil {
-    return err
+state, workErr := run(renewCtx, token, prior.State)
+stopRenewal()
+
+if errors.Is(workErr, worklease.ErrFenced) || errors.Is(context.Cause(renewCtx), worklease.ErrFenced) {
+    return worklease.ErrFenced // a successor holds the lease; record nothing
 }
 
-var progress OnboardingProgress
+// Final writes must survive cancellation of ctx without hanging shutdown.
+cleanupCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
+defer cancel()
+
+mode := worklease.ExitFinished // use worklease.ExitRetired for one-shot work
+if workErr != nil {
+    mode = worklease.ExitAbandoned
+}
 if state != nil {
-    if err := json.Unmarshal(state, &progress); err != nil {
-        return err
-    }
-    if !cleanHandoff {
-        // Previous owner crashed — validate partial state before resuming.
-        // External effects from incomplete steps may have already fired.
-        progress = recoverFromPartial(progress)
+    if err := lease.Checkpoint(cleanupCtx, token, state); err != nil {
+        return errors.Join(workErr, err)
     }
 }
-
-// Do work, checkpointing at each step boundary.
-// Checkpoint after the external effect completes — not before.
-for _, step := range remainingSteps(progress) {
-    if err := executeStep(ctx, step); err != nil {
-        return err
-    }
-
-    progress.CompletedSteps = append(progress.CompletedSteps, step.ID)
-    snapshot, _ := json.Marshal(progress)
-
-    // Atomically saves progress and renews the lease.
-    // Returns ErrFenced if this worker has been superseded.
-    if err := lease.Checkpoint(ctx, token, snapshot); err != nil {
-        return err
-    }
+if err := lease.Release(cleanupCtx, token, mode); err != nil {
+    return errors.Join(workErr, err) // ErrLeaseExpired: the successor sees ExitExpired
 }
+return workErr
 ```
+
+Rows released with `ExitFinished` are kept as resume points for work that runs again, and `Vacuum.Sweep` never deletes them. Release one-shot work with `ExitRetired`; otherwise its row is never eligible for cleanup. `worker.Runner`, `leader.Elect`, and `pool` do all of the above for you.
 
 ### Renewing without checkpointing
 
@@ -154,11 +153,11 @@ if err := lease.Renew(ctx, token); err != nil {
 `ReadCheckpoint` returns `nil` state (not an error) when this is the first worker to acquire this lease:
 
 ```go
-state, _, err := lease.ReadCheckpoint(ctx, token)
+prior, err := lease.ReadCheckpoint(ctx, token)
 if err != nil {
     return err
 }
-if state == nil {
+if prior.State == nil {
     // First acquisition — start from the beginning.
     progress = OnboardingProgress{}
 }
@@ -188,7 +187,7 @@ if err := doWork(renewCtx, ...); err != nil {
 }
 
 stopRenewal()             // explicit stop before Release
-lease.Release(ctx, token) // use original ctx, not renewCtx
+lease.Release(ctx, token, worklease.ExitFinished) // use the original ctx, not renewCtx
 ```
 
 ---
@@ -228,15 +227,17 @@ import "github.com/aetomala/worklease/worker"
 
 r, err := worker.NewRunner(worker.RunnerConfig{
     Lease:  lease,
-    WorkFn: func(ctx context.Context, token worklease.Token, prior []byte, cleanHandoff bool) ([]byte, error) {
-        // prior is the last checkpoint from the previous holder; nil on first acquisition.
+    WorkFn: func(ctx context.Context, token worklease.Token, prior worklease.Checkpoint) ([]byte, error) {
+        // prior.State is the last checkpoint; prior.PrevExit says how the previous holder exited (ExitNone on first acquisition).
         // Return updated checkpoint bytes, or nil to leave the checkpoint unchanged.
-        return processWork(ctx, prior, cleanHandoff)
+        return processWork(ctx, prior)
     },
 })
 if err != nil { ... }
 if err := r.Run(ctx, "onboarding:tenant-abc"); err != nil { ... }
 ```
+
+`Runner` picks the exit mode from your work function's result: `nil` releases with `ExitFinished`, an error wrapping `worklease.ErrRetire` releases with `ExitRetired` and `Run` returns `nil`, and any other error releases with `ExitAbandoned`. It does not release when fenced or when the lease window ran out; the next holder sees `ExitExpired`. The final `Checkpoint` and `Release` run on a context that survives cancellation of yours, bounded by `RunnerConfig.CleanupTimeout` (default 5s). `leader.Elect` applies the same mapping to `fn`, and calls `OnRelinquished` only after `ExitFinished` or `ExitRetired`.
 
 ### leader — Simplified leadership
 
@@ -263,7 +264,7 @@ import "github.com/aetomala/worklease/pool"
 
 p, err := pool.New(lease, pool.Config{
     WorkIDs: []string{"shard-0", "shard-1", "shard-2", "shard-3"},
-}, func(ctx context.Context, workID string, token worklease.Token, prior []byte, cleanHandoff bool) ([]byte, error) {
+}, func(ctx context.Context, workID string, token worklease.Token, prior worklease.Checkpoint) ([]byte, error) {
     return processShard(ctx, workID, prior)
 })
 if err != nil { ... }
@@ -272,7 +273,7 @@ if err != nil { ... }
 if err := p.Run(ctx); err != nil { ... }
 ```
 
-Return a `PermanentError` from the work function to drop a slot without reacquisition — implement the interface on a custom type, or wrap an error with `pool.Permanent(err)`. When every slot exits permanently, `Run` returns `pool.ErrAllSlotsDead` (rather than `nil`, which signals clean context cancellation). Set `pool.Config.Observer` to a `pool.Observer` to receive slot lifecycle events (`OnSlotAcquired` / `OnSlotLost` / `OnSlotBackoff` / `OnSlotDead`), and call `ActiveSlots()` for a point-in-time view of slots currently executing their work function. Construction errors are distinct sentinels (`ErrNilLease` / `ErrEmptyWorkIDs` / `ErrWithWaitForLeaseProhibited`) that all satisfy `errors.Is(err, pool.ErrConfigInvalid)`.
+Return `worklease.ErrRetire` (or wrap it) from the work function to retire the work ID: the slot releases with `ExitRetired`, calls `OnSlotRetired`, and stops. Return a `PermanentError` to drop a slot without reacquisition — implement the interface on a custom type, or wrap an error with `pool.Permanent(err)`; the slot releases with `ExitAbandoned`. When every slot exits through a `PermanentError`, `Run` returns `pool.ErrAllSlotsDead`; if any slot retired, it returns `nil`. A slot whose work ID another process holds waits `Config.IdleInterval` (default 1s, up to 20% jitter); a slot whose work function returned `nil` waits `Config.RerunInterval` (default 1s, up to 20% jitter) before running again; a slot whose work function failed waits `Config.BackoffInterval` (default 1s) and calls `OnSlotBackoff`. Set `pool.Config.Observer` to a `pool.Observer` to receive slot lifecycle events (`OnSlotAcquired` / `OnSlotLost` / `OnSlotBackoff` / `OnSlotDead` / `OnSlotRetired`), and call `ActiveSlots()` for a point-in-time view of slots currently executing their work function. Construction errors are distinct sentinels (`ErrNilLease` / `ErrEmptyWorkIDs` / `ErrWithWaitForLeaseProhibited`) that all satisfy `errors.Is(err, pool.ErrConfigInvalid)`.
 
 ### checkpoint — Typed serialization helpers
 
@@ -283,6 +284,63 @@ Return a `PermanentError` from the work function to drop a slot without reacquis
 Set `worklease.Config.Observer` to a `LeaseObserver` to receive a synchronous callback after every lease operation — `OnAcquire`, `OnCheckpoint`, `OnRenew`, `OnRelease`, `OnReadCheckpoint`, and `OnFenced` — each with a per-operation event struct carrying the `Token`, error, and a `Duration` for the final backend call. nil installs a no-op, so observability is fully opt-in. See [`examples/observability`](examples/observability/) for a stdlib-only implementation.
 
 ---
+
+### Exit modes and handoff
+
+Every holder declares how it leaves; the next holder reads it as `Checkpoint.PrevExit`.
+
+| `PrevExit` | How it is set | What the next holder should do |
+|---|---|---|
+| `ExitNone` | Inferred: the work ID was never acquired, or its row was removed by `Forget` or `Sweep` | Start fresh |
+| `ExitFinished` | `Release(ctx, token, worklease.ExitFinished)` | Continue from the final state |
+| `ExitAbandoned` | `Release(ctx, token, worklease.ExitAbandoned)` — an error, a cancellation, a shutdown | Validate the partial state, then resume |
+| `ExitExpired` | Inferred: the lease expired with no recorded exit — a crash, a partition, or a renewal window that ran out | Validate the partial state; external effects may have happened after the last checkpoint |
+| `ExitRetired` | `Release(ctx, token, worklease.ExitRetired)` | Do not redo the work |
+
+`Release` accepts only `ExitFinished`, `ExitAbandoned`, and `ExitRetired`; anything else returns `worklease.ErrInvalidExitMode`. Once a lease has expired, `Release` returns `worklease.ErrLeaseExpired` and records nothing, so a holder that lost its lease cannot vouch for its work. Treat any mode your code does not recognize as `ExitExpired`; later releases may add modes. "Crash recovery" in these docs means handling `ExitExpired`.
+
+```go
+prior, err := lease.ReadCheckpoint(ctx, token)
+if err != nil {
+    return err
+}
+log.Printf("previous holder %q exited %s", prior.PrevHolderID, prior.PrevExit)
+```
+
+### Retiring work
+
+Return `worklease.ErrRetire` from a `worker`, `leader`, or `pool` work function when its work ID is complete for good. The lease is released with `ExitRetired`, `Run` and `Elect` report success, and a `pool` slot stops. A later holder of the same work ID sees `ExitRetired`.
+
+```go
+WorkFn: func(ctx context.Context, token worklease.Token, prior worklease.Checkpoint) ([]byte, error) {
+    if prior.PrevExit == worklease.ExitRetired {
+        return prior.State, worklease.ErrRetire // already done: keep it retired
+    }
+    state, err := migrateTenant(ctx, prior.State)
+    if err != nil {
+        return state, err // ExitAbandoned: the next holder resumes from state
+    }
+    return state, worklease.ErrRetire // ExitRetired: Run returns nil
+},
+```
+
+### Row lifecycle: Forget and Vacuum
+
+Lease rows outlive their holders so that successors can read them. Two calls remove them:
+
+```go
+// Delete one row now. The caller must hold the current lease.
+if err := lease.Forget(ctx, token); err != nil {
+    return err // ErrFenced: the lease moved on, or the row is already gone
+}
+
+// Periodically delete retired rows last updated more than a week ago.
+n, err := worklease.NewVacuum(b).Sweep(ctx, worklease.SweepOptions{
+    Retention: 7 * 24 * time.Hour,
+})
+```
+
+`Sweep` deletes rows released with `ExitRetired` once they are older than `Retention`. With `IncludeExpired: true` it also deletes rows whose lease expired with no declared exit, which discards the partial state a successor would have recovered from. Rows released with `ExitFinished` or `ExitAbandoned`, and rows currently held, are never deleted. `Retention` is how long a retired or expired row is kept after its last update; it is not tied to the TTL. After `Forget` or `Sweep`, the next holder sees `ExitNone`, and a holder whose row was removed gets `ErrFenced`. Do not run `Sweep` while v0.5 processes still share the table (see `UPGRADING.md`).
 
 ## Backends
 
@@ -402,7 +460,7 @@ v0.5.0 is the latest release line. The core public API (`Lease`, `Token`, option
 - **v0.3.0** — `leader.Elect`, `pool.Pool`, `HasWaitForLease`, `checkpoint.Codec` method rename (breaking — see `UPGRADING.md`)
 - **v0.4.0** — `LeaseObserver` event-struct redesign (breaking), `backend/conformance` suite, `pool.Observer`/`Permanent`/`ErrAllSlotsDead`, `leader` lifecycle callbacks, memory slice-ownership fix
 - **v0.5.0** — bounded renewal retry (`WithRenewalBackoff`, `ErrLeaseWindowExhausted`, `RenewEvent.Attempt`); global fencing sequence on both backends; single-statement `Acquire` with `RETURNING`; ctx-aware `Acquire` cancellation under `WithWaitForLease` (breaking — see `UPGRADING.md`)
-- **v0.6.0** — caller-governed row lifecycle: `Lease.Forget`, `worklease.Vacuum.Sweep` (breaking — new `Backend`/`Lease` interface methods for custom implementations; see `UPGRADING.md`)
+- **v0.6.0** — caller-governed row lifecycle: `Lease.Forget`, `worklease.Vacuum.Sweep` (breaking — new `Backend`/`Lease` interface methods for custom implementations; see `UPGRADING.md`); explicit exit modes (ADR-0018) — schema migration required, see `UPGRADING.md`
 
 ### Future
 - Redis backend, etcd backend (unscheduled, post-1.0)
