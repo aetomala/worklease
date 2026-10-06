@@ -9,6 +9,10 @@ This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 
 ## [Unreleased]
 
+---
+
+## [v0.6.0] — 2026-10-06
+
 ### Breaking
 
 - **Postgres schema migration required.** `worklease_leases` gains `exit_mode`, `prev_exit_mode`, and `prev_holder_id` with two named CHECK constraints. Every `Acquire` writes these columns, so deploying v0.6 against a v0.5 schema makes every `Acquire` fail with a `column … does not exist` error. Apply the idempotent migration in `UPGRADING.md` before deploying. `clean_handoff` stays, deprecated, until a later release drops it.
