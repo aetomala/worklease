@@ -2,8 +2,83 @@ package backend
 
 import (
 	"context"
+	"strconv"
 	"time"
 )
+
+// ExitMode records how a lease holder left a lease. The zero value is ExitNone.
+// Callers must treat any value they do not recognize as ExitExpired, because
+// modes may be added in later releases.
+type ExitMode uint8
+
+const (
+	// ExitNone means there was no previous holder: the work ID was never
+	// acquired, or its row was removed by Forget or Sweep. Inferred; Release
+	// never accepts it.
+	ExitNone ExitMode = iota
+
+	// ExitFinished means the run completed and the checkpoint is final state
+	// for that run. The work ID may be acquired again. Sweep never deletes a
+	// row whose last exit is ExitFinished, so release one-shot work with
+	// ExitRetired instead.
+	ExitFinished
+
+	// ExitAbandoned means the holder stopped deliberately without completing,
+	// on error, cancellation, or shutdown. The checkpoint is partial state.
+	ExitAbandoned
+
+	// ExitRetired means the work ID is complete permanently. A successor
+	// should not redo the work. The row is eligible for Sweep.
+	ExitRetired
+
+	// ExitExpired means the lease expired with no recorded exit: a crash, a
+	// partition, or a renewal window that ran out. The checkpoint is partial
+	// state, and external effects may have happened after it. Inferred;
+	// Release never accepts it.
+	ExitExpired
+)
+
+// SQL text forms of each ExitMode, as stored by the PostgreSQL backend.
+const (
+	exitTextNone      = "none"
+	exitTextFinished  = "finished"
+	exitTextAbandoned = "abandoned"
+	exitTextRetired   = "retired"
+	exitTextExpired   = "expired"
+)
+
+// String returns the SQL text form of m: "none", "finished", "abandoned",
+// "retired", or "expired". Any other value formats as "ExitMode(<n>)".
+func (m ExitMode) String() string {
+	switch m {
+	case ExitNone:
+		return exitTextNone
+	case ExitFinished:
+		return exitTextFinished
+	case ExitAbandoned:
+		return exitTextAbandoned
+	case ExitRetired:
+		return exitTextRetired
+	case ExitExpired:
+		return exitTextExpired
+	default:
+		return "ExitMode(" + strconv.Itoa(int(m)) + ")"
+	}
+}
+
+// Checkpoint is what a lease holder reads at the start of its lease: the last
+// checkpointed state and how the immediately previous holder exited. Fields
+// may be added in later releases.
+type Checkpoint struct {
+	// State is the last checkpointed state; nil if none was ever written.
+	State []byte
+
+	// PrevExit is how the immediately previous holder exited.
+	PrevExit ExitMode
+
+	// PrevHolderID is the previous holder's ID; empty when PrevExit is ExitNone.
+	PrevHolderID string
+}
 
 // Backend defines the contract for worklease storage backends. All methods are
 // single-attempt — retry policy is the caller's responsibility.

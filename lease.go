@@ -5,6 +5,8 @@ import (
 	"errors"
 	"fmt"
 	"time"
+
+	"github.com/aetomala/worklease/backend"
 )
 
 // Error message constants for lease operations.
@@ -27,6 +29,52 @@ var (
 	// successful renewal (goroutine lifecycle path 3).
 	// Inspect via context.Cause(renewCtx) — not returned directly from any method.
 	ErrLeaseWindowExhausted = errors.New(msgLeaseWindowExhausted)
+)
+
+// ExitMode records how a lease holder left a lease. It is an alias for
+// backend.ExitMode; the canonical definition lives in package backend because
+// package backend cannot import package worklease.
+type ExitMode = backend.ExitMode
+
+// Exit modes. Callers treat any mode they do not recognize as ExitExpired.
+const (
+	// ExitNone means there was no previous holder. Release never accepts it.
+	ExitNone = backend.ExitNone
+
+	// ExitFinished means the run completed; the checkpoint is final state.
+	ExitFinished = backend.ExitFinished
+
+	// ExitAbandoned means the holder stopped deliberately without completing.
+	ExitAbandoned = backend.ExitAbandoned
+
+	// ExitRetired means the work ID is complete permanently.
+	ExitRetired = backend.ExitRetired
+
+	// ExitExpired means the lease expired with no recorded exit. Release never
+	// accepts it.
+	ExitExpired = backend.ExitExpired
+)
+
+// Checkpoint is the last checkpointed state plus how the immediately previous
+// holder exited. It is an alias for backend.Checkpoint.
+type Checkpoint = backend.Checkpoint
+
+// Error message constants for the exit-mode sentinels.
+const (
+	msgInvalidExitMode = "worklease: invalid exit mode"
+	msgRetire          = "worklease: retire work ID"
+)
+
+var (
+	// ErrInvalidExitMode is returned by Release when mode is not ExitFinished,
+	// ExitAbandoned, or ExitRetired.
+	ErrInvalidExitMode = errors.New(msgInvalidExitMode)
+
+	// ErrRetire is returned, or wrapped, by a work function to declare that its
+	// work ID is complete permanently. Runner.Run in package worker, Elect in
+	// package leader, and Pool in package pool release the lease with
+	// ExitRetired and report success. Pool also stops the slot.
+	ErrRetire = errors.New(msgRetire)
 )
 
 // Default backoff parameters for the renewal goroutine retry policy.
