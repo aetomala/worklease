@@ -118,6 +118,9 @@ type Lease interface {
 	// a derived context and a stop function. Calling stop cancels the renewal context
 	// and terminates the renewal loop. The renewal context is cancelled if the underlying
 	// context is cancelled or if the lease is lost.
+	// If Renew returns ErrLeaseExpired, storage has found the lease lapsed:
+	// renewal stops at once without retrying, and the renewal context's cause
+	// matches both ErrLeaseWindowExhausted and ErrLeaseExpired.
 	StartRenewal(ctx context.Context, token Token, opts ...RenewalOption) (renewCtx context.Context, stopRenewal func())
 
 	// Forget permanently deletes the lease record for token's workID. Returns

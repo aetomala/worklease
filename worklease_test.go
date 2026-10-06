@@ -583,6 +583,32 @@ var _ = Describe("worklease", func() {
 			Expect(context.Cause(renewCtx)).To(MatchError(worklease.ErrLeaseWindowExhausted))
 		})
 
+		It("ErrLeaseExpired from Renew → cancels renewCtx at once with a cause matching ErrLeaseWindowExhausted and ErrLeaseExpired, without retrying", func() {
+			lease, _ := worklease.New(mockB, cfg)
+			record := backend.LeaseRecord{
+				WorkID:       "w1",
+				HolderID:     "test-worker",
+				FencingToken: 1,
+				ExpiresAt:    time.Now().Add(30 * time.Second),
+			}
+			mockB.EXPECT().Acquire(gomock.Any(), "w1", "test-worker", 30*time.Second).Return(record, nil)
+			token, _ := lease.Acquire(ctx, "w1")
+
+			// Times(1): a retry would be a second call. The one-hour backoff and the
+			// open 30s window mean only the terminal path can close renewCtx in time.
+			mockB.EXPECT().Renew(gomock.Any(), record, 30*time.Second).Return(worklease.ErrLeaseExpired).Times(1)
+
+			renewCtx, stopRenewal := lease.StartRenewal(ctx, token,
+				worklease.WithRenewalInterval(10*time.Millisecond),
+				worklease.WithRenewalBackoff(time.Hour, time.Hour, 0))
+			defer stopRenewal()
+
+			Eventually(renewCtx.Done(), time.Second).Should(BeClosed())
+			cause := context.Cause(renewCtx)
+			Expect(errors.Is(cause, worklease.ErrLeaseWindowExhausted)).To(BeTrue())
+			Expect(errors.Is(cause, worklease.ErrLeaseExpired)).To(BeTrue())
+		})
+
 		It("successful renewal → retry window extends past the token's original ExpiresAt", func() {
 			shortCfg := cfg
 			shortCfg.TTL = 200 * time.Millisecond
@@ -977,6 +1003,31 @@ var _ = Describe("worklease", func() {
 				Expect(errors.Is(rCalls[0].Err, worklease.ErrFenced)).To(BeTrue())
 				Expect(rCalls[0].Attempt).To(Equal(1))
 				Expect(fCalls).To(HaveLen(1))
+			})
+
+			It("calls OnRenew once with Attempt 1 and never OnFenced when renewal returns ErrLeaseExpired", func() {
+				lease, _ := worklease.New(mockB, cfg)
+				record := backend.LeaseRecord{WorkID: "w1", HolderID: "test-worker", FencingToken: 1, ExpiresAt: time.Now().Add(30 * time.Second)}
+				mockB.EXPECT().Acquire(gomock.Any(), "w1", "test-worker", 30*time.Second).Return(record, nil)
+				mockB.EXPECT().Renew(gomock.Any(), record, 30*time.Second).Return(worklease.ErrLeaseExpired).Times(1)
+
+				token, _ := lease.Acquire(ctx, "w1")
+				renewCtx, stopRenewal := lease.StartRenewal(ctx, token,
+					worklease.WithRenewalInterval(10*time.Millisecond),
+					worklease.WithRenewalBackoff(time.Hour, time.Hour, 0))
+				defer stopRenewal()
+
+				Eventually(renewCtx.Done(), time.Second).Should(BeClosed())
+
+				spy.mu.Lock()
+				rCalls := append([]worklease.RenewEvent(nil), spy.renewCalls...)
+				fCalls := len(spy.fencedCalls)
+				spy.mu.Unlock()
+
+				Expect(rCalls).To(HaveLen(1))
+				Expect(rCalls[0].Attempt).To(Equal(1))
+				Expect(errors.Is(rCalls[0].Err, worklease.ErrLeaseExpired)).To(BeTrue())
+				Expect(fCalls).To(BeZero())
 			})
 
 			It("increments RenewEvent.Attempt on each retry until the lease window is exhausted", func() {
