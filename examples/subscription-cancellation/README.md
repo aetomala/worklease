@@ -1,8 +1,9 @@
 # subscription-cancellation
 
 A runnable example showing how `worklease` handles a multi-step SaaS subscription
-cancellation when workers crash mid-flow — demonstrating crash recovery
-(`cleanHandoff = false`), zombie fencing (`ErrFenced`), and the clean handoff path.
+cancellation when workers crash mid-flow — demonstrating how each worker reads the previous
+holder's exit (`PrevExit`, `PrevHolderID`), crash recovery (`ExitExpired`), zombie fencing
+(`ErrFenced`), and a completed run (`ExitFinished`).
 
 ---
 
@@ -37,6 +38,7 @@ Expected output:
 
 ```
 === Scenario 1: Happy Path ===
+  worker-A: acquired lease (fencing token 1) — PrevExit=none, PrevHolderID=none
   worker-A: cancel billing
     cancel billing [tenant-alpha] — ok
   worker-A: schedule deprovisioning
@@ -45,14 +47,14 @@ Expected output:
     archive data [tenant-alpha] — ok
   worker-A: send email
     send email [tenant-alpha] — ok
-  worker-A: lease released cleanly (cleanHandoff=true)
+  worker-A: work function returned nil — released with ExitFinished
 
 === Scenario 2: Crash Recovery ===
     cancel billing [tenant-beta] — ok
   worker-B: crashed after billing — lease expires in 3s
   [waiting 4s for lease to expire...]
-  worker-C: acquired lease (fencing token 2)
-  worker-C: cleanHandoff=false — previous worker crashed, validating partial state
+  worker-C: acquired lease (fencing token 3) — PrevExit=expired, PrevHolderID=worker-B
+  worker-C: previous worker's lease expired with no declared exit — validating partial state
   worker-C: billing already cancelled by previous worker — skipping
   worker-C: schedule deprovisioning
     schedule deprovisioning [tenant-beta] — ok
@@ -60,14 +62,14 @@ Expected output:
     archive data [tenant-beta] — ok
   worker-C: send email
     send email [tenant-beta] — ok
-  worker-C: lease released cleanly (cleanHandoff=true)
+  worker-C: work function returned nil — released with ExitFinished
 
 === Scenario 3: Zombie Fencing ===
-  worker-D: acquired lease (fencing token 1), now stuck for 4s...
+  worker-D: acquired lease (fencing token 4), now stuck for 4s...
   [waiting 4s for lease to expire...]
   [lease expired]
-  worker-E: acquired lease (fencing token 2)
-  worker-D: ErrFenced — token 1 rejected; worker-E holds token 2 — zombie stopped
+  worker-E: acquired lease (fencing token 5) — PrevExit=expired, PrevHolderID=worker-D
+  worker-D: ErrFenced — token 4 rejected; worker-E holds token 5 — zombie stopped
   worker-E: cancel billing
     cancel billing [tenant-gamma] — ok
   worker-E: schedule deprovisioning
@@ -76,7 +78,7 @@ Expected output:
     archive data [tenant-gamma] — ok
   worker-E: send email
     send email [tenant-gamma] — ok
-  worker-E: cancellation complete
+  worker-E: cancellation complete — released with ExitFinished
 ```
 
 The example takes approximately 9 seconds — 4 seconds in each of Scenarios 2 and 3
@@ -92,18 +94,21 @@ successor re-executes that step. This is the at-least-once window. The checkpoin
 records that the step completed safely; it does not prevent the effect from having
 already fired. Steps must be idempotent at the downstream system.
 
-**`StartRenewal` and `renewCtx`** — Scenario 1 calls `StartRenewal` to keep the
-lease alive across all four steps. The returned `renewCtx` is cancelled if the
-renewal loop detects the lease has been fenced. All steps use `renewCtx` so that a
-fencing event propagates into downstream work. `Release` uses the original `ctx`
-(not `renewCtx`) — once `stopRenewal()` is called, `renewCtx` may already be
-cancelled, which would cause `Release` to fail.
+**`worker.Runner` and `renewCtx`** — each scenario runs its steps through
+`worker.Runner`, which starts lease renewal for the whole run. The work function
+receives `renewCtx`, which is cancelled if the renewal loop detects the lease has been
+fenced or its window ran out. All steps use `renewCtx` so that a fencing event
+propagates into downstream work. `Runner` releases on its own cleanup context, which
+survives cancellation of the caller's `ctx` (bounded by `CleanupTimeout`, default 5s).
 
-**`cleanHandoff` distinction** — when a worker calls `Release`, the successor reads
-`cleanHandoff = true`: the previous owner exited intentionally. When a lease expires
-without a `Release`, the successor reads `cleanHandoff = false`: the previous owner
-crashed or was fenced. These are different situations. Scenario 2 demonstrates the
-crash case — Worker C logs the distinction and skips steps that are already marked
+**Exit modes** — every worker logs `PrevExit` and `PrevHolderID` when it acquires.
+A first acquisition reads `ExitNone`. When a work function returns `nil`, `Runner`
+releases with `ExitFinished`, and the next holder would read `ExitFinished`. When a
+lease expires with no `Release`, as with worker-B and worker-D, the successor reads
+`ExitExpired`: the previous holder crashed or stalled, and external effects may have
+fired after its last checkpoint. A work function that returns an error releases with
+`ExitAbandoned`, which a successor also treats as partial state. Scenario 2 shows the
+crash case: worker-C validates the partial state and skips steps already marked
 complete in the checkpoint.
 
 ---

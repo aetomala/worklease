@@ -43,6 +43,7 @@ Expected output:
 === Scenario 2: WithRenewalBackoff + ErrLeaseWindowExhausted ===
   worker-C: lease acquired (expires in 200ms, fencing token 1)
   worker-C: ErrLeaseWindowExhausted — lease window closed before renewal succeeded
+  worker-C: cause also matches ErrLeaseExpired — terminal, renewal did not retry
   worker-C: work abandoned; a successor worker may re-acquire this lease
 ```
 
@@ -59,13 +60,15 @@ it returns an error wrapping `ctx.Err()` so `errors.Is(err, context.DeadlineExce
 `errors.Is(err, context.Canceled)` work as expected. The `ErrLeaseHeld` sentinel no longer
 fires on the wait path — only on the immediate fail-fast path (no `WithWaitForLease`).
 
-**`WithRenewalBackoff` and `ErrLeaseWindowExhausted`** — `StartRenewal` retries non-fencing
-`Renew` errors with exponential backoff bounded by the lease window (`token.ExpiresAt()`).
-In Scenario 2 the renewal interval is deliberately set longer than the TTL, so renewal fires
-after the lease has already expired. The resulting `ErrLeaseExpired` from `Renew` is a
-non-fencing error — it triggers the retry path. Since the lease window is already past when
-the error fires, `ErrLeaseWindowExhausted` follows immediately and
-`context.Cause(renewCtx) == worklease.ErrLeaseWindowExhausted`.
+**`WithRenewalBackoff` and terminal `ErrLeaseExpired`** — `StartRenewal` retries transient
+non-fencing `Renew` errors with exponential backoff bounded by the lease window. The window
+starts as the earlier of `token.ExpiresAt()` and the local acquire time plus TTL, and
+advances after every successful renewal. In Scenario 2 the renewal interval is deliberately
+set longer than the TTL, so the first `Renew` runs after the lease has expired and returns
+`ErrLeaseExpired`. That error is terminal (#84): storage has found the lease lapsed, so the
+goroutine cancels `renewCtx` at once, without any backoff retry. The cause is
+`errors.Join(ErrLeaseWindowExhausted, ErrLeaseExpired)`, so `errors.Is` matches both
+sentinels, and existing checks for `ErrLeaseWindowExhausted` keep working.
 
 In production (Postgres), transient errors such as connection drops also enter this retry
 path. `WithRenewalBackoff` controls how aggressively the goroutine retries before the

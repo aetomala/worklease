@@ -48,7 +48,14 @@ func scenario1HappyPath(ctx context.Context, b backend.Backend) {
 		}
 	}()
 
-	err := leader.Elect(ctx, leaseA, "scheduler:primary", leader.Config{}, func(renewCtx context.Context) error {
+	// OnRelinquished fires only after Release succeeds with ExitFinished or ExitRetired —
+	// never after a failed term, which releases with ExitAbandoned.
+	cfgA := leader.Config{
+		OnRelinquished: func(_ context.Context, t worklease.Token) {
+			log.Printf("  node-A: OnRelinquished — term released with ExitFinished (fencing token %d)", t.FencingToken())
+		},
+	}
+	err := leader.Elect(ctx, leaseA, "scheduler:primary", cfgA, func(renewCtx context.Context) error {
 		return runScheduler(renewCtx, "node-A", 3)
 	})
 	if err != nil {
@@ -140,7 +147,7 @@ func scenario3FencedLeader(ctx context.Context, b backend.Backend) {
 func scenario4PersistentLeaderWithBackoff(ctx context.Context, b backend.Backend) {
 	log.Println("=== Scenario 4: Persistent Leader with BackoffInterval ===")
 	log.Println("  Two nodes compete in retry loops. BackoffInterval=300ms throttles")
-	log.Println("  reacquisition after Release — which now expires the lease immediately.")
+	log.Println("  reacquisition after Release — which expires the lease immediately.")
 
 	// runNode wraps Elect in a retry loop, executing up to maxTerms leadership terms.
 	// BackoffInterval prevents rapid acquire/release/reacquire cycling: without it,
@@ -159,8 +166,11 @@ func scenario4PersistentLeaderWithBackoff(ctx context.Context, b backend.Backend
 			if errors.Is(err, worklease.ErrFenced) || ctx.Err() != nil {
 				break
 			}
-			// ErrLeaseHeld: another node is leading — BackoffInterval already slept,
-			// so the loop retries without an additional delay.
+			// BackoffInterval applies only after a successful Acquire. ErrLeaseHeld
+			// (another node is leading) returns at once, so wait before polling again.
+			if errors.Is(err, worklease.ErrLeaseHeld) {
+				time.Sleep(100 * time.Millisecond)
+			}
 		}
 		log.Printf("  %s: exiting after %d term(s)", name, term)
 		done <- name

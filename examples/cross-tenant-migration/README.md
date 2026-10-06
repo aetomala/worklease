@@ -2,10 +2,12 @@
 
 A runnable example showing how `worklease` coordinates a data migration across all
 tenants in a multi-tenant SaaS — demonstrating checkpoint-as-cursor, crash recovery
-that resumes from the last migrated tenant, and zombie fencing mid-batch.
+that resumes from the last migrated tenant, zombie fencing mid-batch, and retiring the
+migration once it is complete.
 
 - **Cursor checkpoint** — the checkpoint is an append-only list of migrated tenant IDs, not boolean step flags; recovery builds a set and skips any tenant already in it
-- **Crash recovery** — a crashed coordinator's successor reads the cursor, skips already-migrated tenants, and resumes from the next one
+- **Crash recovery** — a crashed coordinator's successor reads `PrevExit == ExitExpired` (or `ExitAbandoned` after a failed run), reads the cursor, skips already-migrated tenants, and resumes from the next one
+- **Retirement** — a coordinator that migrates every tenant returns `worklease.ErrRetire`, so the lease is released with `ExitRetired`; a later coordinator sees `PrevExit == ExitRetired` and keeps it retired instead of redoing the migration
 - **Zombie fencing mid-batch** — a stale coordinator's `Checkpoint` call is rejected with `ErrFenced`; both fencing token values are printed
 
 ---
@@ -41,6 +43,7 @@ Expected output:
 
 ```
 === Scenario 1: Happy Path ===
+  coordinator-A: acquired lease (fencing token 1) — PrevExit=none
   coordinator-A: migrated tenant-001 (1/8)
   coordinator-A: migrated tenant-002 (2/8)
   coordinator-A: migrated tenant-003 (3/8)
@@ -49,7 +52,9 @@ Expected output:
   coordinator-A: migrated tenant-006 (6/8)
   coordinator-A: migrated tenant-007 (7/8)
   coordinator-A: migrated tenant-008 (8/8)
-  coordinator-A: all 8 tenants migrated, lease released cleanly
+  coordinator-A: all 8 tenants migrated — released with ExitRetired
+  coordinator-A2: acquired lease (fencing token 2) — PrevExit=retired
+  coordinator-A2: migration already complete — keeping it retired
 
 === Scenario 2: Crash Recovery ===
   coordinator-B: migrated tenant-001 (1/8)
@@ -57,8 +62,8 @@ Expected output:
   coordinator-B: migrated tenant-003 (3/8)
   coordinator-B: crashed after 3 tenants — lease expires in 3s
   [waiting 4s for lease to expire...]
-  coordinator-C: acquired lease (fencing token 2)
-  coordinator-C: cleanHandoff=false — 3 tenants already migrated, resuming
+  coordinator-C: acquired lease (fencing token 2) — PrevExit=expired
+  coordinator-C: previous coordinator coordinator-B did not finish — 3 tenants already migrated, resuming
   coordinator-C: skipping tenant-001 — already migrated
   coordinator-C: skipping tenant-002 — already migrated
   coordinator-C: skipping tenant-003 — already migrated
@@ -67,15 +72,15 @@ Expected output:
   coordinator-C: migrated tenant-006 (6/8)
   coordinator-C: migrated tenant-007 (7/8)
   coordinator-C: migrated tenant-008 (8/8)
-  coordinator-C: all 8 tenants migrated, lease released cleanly
+  coordinator-C: all 8 tenants migrated — released with ExitRetired
 
 === Scenario 3: Zombie Fencing ===
   coordinator-D: acquired (token 1), migrated 2 tenants, now stuck...
   [waiting 4s for lease to expire...]
   [lease expired]
-  coordinator-E: acquired (token 2)
   coordinator-D: ErrFenced — token 1 rejected; coordinator-E holds token 2 — zombie stopped
-  coordinator-E: resuming from checkpoint (2 tenants already migrated)
+  coordinator-E: acquired lease (fencing token 2) — PrevExit=expired
+  coordinator-E: previous coordinator coordinator-D did not finish — 2 tenants already migrated, resuming
   coordinator-E: skipping tenant-001 — already migrated
   coordinator-E: skipping tenant-002 — already migrated
   coordinator-E: migrated tenant-003 (3/8)
@@ -84,7 +89,7 @@ Expected output:
   coordinator-E: migrated tenant-006 (6/8)
   coordinator-E: migrated tenant-007 (7/8)
   coordinator-E: migrated tenant-008 (8/8)
-  coordinator-E: all 8 tenants migrated, lease released cleanly
+  coordinator-E: all 8 tenants migrated — released with ExitRetired
 ```
 
 The example takes approximately 9 seconds — 4 seconds in each of Scenarios 2 and 3
@@ -107,11 +112,19 @@ checkpoint must complete regardless of renewal state. Using `renewCtx` for
 `Checkpoint` would silently drop progress if the context cancelled between the
 effect and the record.
 
-**`cleanHandoff` distinction** — when a coordinator calls `Release`, the successor
-reads `cleanHandoff = true`: the previous owner exited intentionally. When a lease
-expires without `Release`, the successor reads `cleanHandoff = false`: the coordinator
-crashed or was fenced. Scenario 2 demonstrates the crash case — coordinator-C logs
-the distinction and skips the 3 tenants already recorded in the cursor.
+**`CleanupTimeout`** — `worker.Runner` runs its final `Checkpoint` and `Release` on a
+context that survives cancellation of the caller's `ctx`, so a coordinator shut down
+mid-batch still records its cursor and releases with `ExitAbandoned`. The example sets
+`RunnerConfig.CleanupTimeout` explicitly (10s) to bound that cleanup when the database
+is slow or unreachable; zero means 5s.
+
+**Exit modes** — the work function branches on `PrevExit`. `ExitRetired` means the
+migration already finished, so it returns `ErrRetire` again without redoing anything.
+`ExitExpired` (a crash or stall, as with coordinator-B and coordinator-D) and
+`ExitAbandoned` (a run that returned an error) both mean the cursor is partial, so it
+resumes from it. `ExitNone` is a first run. When every tenant is migrated it returns the
+final cursor with `ErrRetire`: `Runner` checkpoints the cursor, releases with
+`ExitRetired`, and `Run` returns `nil`.
 
 ---
 

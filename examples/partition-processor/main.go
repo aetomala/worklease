@@ -25,6 +25,24 @@ type slotDone struct{ reason string }
 func (e *slotDone) Error() string   { return e.reason }
 func (e *slotDone) Permanent() bool { return true }
 
+// Pacing used by every pool in this example. Set explicitly so the demo runs quickly;
+// the defaults are 1s each (IdleInterval and RerunInterval add up to 20% jitter).
+const (
+	idleInterval  = 100 * time.Millisecond // wait while a peer holds the work ID
+	rerunInterval = 300 * time.Millisecond // wait before rerunning a finished slot
+)
+
+// retiredLogger is a pool.Observer that logs slot retirements and ignores other events.
+type retiredLogger struct{ pool string }
+
+func (retiredLogger) OnSlotAcquired(context.Context, pool.SlotAcquiredEvent) {}
+func (retiredLogger) OnSlotLost(context.Context, pool.SlotLostEvent)         {}
+func (retiredLogger) OnSlotBackoff(context.Context, pool.SlotBackoffEvent)   {}
+func (retiredLogger) OnSlotDead(context.Context, pool.SlotDeadEvent)         {}
+func (l retiredLogger) OnSlotRetired(_ context.Context, e pool.SlotRetiredEvent) {
+	log.Printf("  [%s] OnSlotRetired: %s — slot stopped, work ID retired", l.pool, e.WorkID)
+}
+
 func scenario1Distribution(ctx context.Context, b backend.Backend) {
 	log.Println("=== Scenario 1: Pool Distributes Work Across Partitions ===")
 
@@ -38,7 +56,7 @@ func scenario1Distribution(ctx context.Context, b backend.Backend) {
 		return nil, &slotDone{"done"}
 	}
 
-	p, _ := pool.New(lease, pool.Config{WorkIDs: workIDs}, fn)
+	p, _ := pool.New(lease, pool.Config{WorkIDs: workIDs, IdleInterval: idleInterval, RerunInterval: rerunInterval}, fn)
 
 	var wg sync.WaitGroup
 	wg.Add(1)
@@ -58,13 +76,12 @@ func scenario1Distribution(ctx context.Context, b backend.Backend) {
 }
 
 func scenario2CheckpointResume(ctx context.Context, b backend.Backend) {
-	log.Println("=== Scenario 2: Checkpoint Resume on Clean Handoff ===")
+	log.Println("=== Scenario 2: Checkpoint Resume After pool-A Stops ===")
 
 	workIDs := []string{"shard-0", "shard-1", "shard-2"}
 
-	// pool-A: TTL=1s; each slot processes one batch, checkpoints, then exits permanently.
-	// The short TTL means the leases expire quickly so pool-B can acquire.
-	leaseA, _ := worklease.New(b, worklease.Config{TTL: 1 * time.Second, HolderID: "pool-A"})
+	// pool-A: each slot processes one batch, checkpoints, then exits permanently.
+	leaseA, _ := worklease.New(b, worklease.Config{TTL: 30 * time.Second, HolderID: "pool-A"})
 
 	aFn := func(ctx context.Context, workID string, _ worklease.Token, _ worklease.Checkpoint) ([]byte, error) {
 		time.Sleep(100 * time.Millisecond)
@@ -77,23 +94,26 @@ func scenario2CheckpointResume(ctx context.Context, b backend.Backend) {
 		return data, &slotDone{"batch complete"}
 	}
 
-	poolA, _ := pool.New(leaseA, pool.Config{WorkIDs: workIDs}, aFn)
+	poolA, _ := pool.New(leaseA, pool.Config{WorkIDs: workIDs, IdleInterval: idleInterval, RerunInterval: rerunInterval}, aFn)
 	poolA.Run(ctx) // blocks until all 3 slots exit via PermanentError
 
-	// The Runner calls Release before returning the PermanentError, setting
-	// cleanHandoff=true. Release expires the lease immediately (ADR-0012), so
-	// pool-B can acquire the leases without waiting for the TTL.
+	// A PermanentError is a non-fencing error, so each slot's Runner checkpointed the
+	// offset and released with ExitAbandoned. Release expires the lease immediately
+	// (ADR-0012), so pool-B acquires without waiting for the TTL.
 
 	leaseB, _ := worklease.New(b, worklease.Config{TTL: 30 * time.Second, HolderID: "pool-B"})
 
 	bFn := func(ctx context.Context, workID string, _ worklease.Token, cp worklease.Checkpoint) ([]byte, error) {
-		prior, cleanHandoff := cp.State, cp.PrevExit == worklease.ExitFinished
-		progress, err := checkpoint.Decode[PartitionProgress](checkpoint.JSON(), prior)
+		progress, err := checkpoint.Decode[PartitionProgress](checkpoint.JSON(), cp.State)
 		if err != nil {
 			return nil, err
 		}
-		if cleanHandoff && progress.LastOffset > 0 {
-			log.Printf("  [pool-B] %s: resuming from offset %d (clean handoff)", workID, progress.LastOffset)
+		switch cp.PrevExit {
+		case worklease.ExitFinished, worklease.ExitAbandoned, worklease.ExitExpired:
+			// A cursor is safe to resume from whichever way the previous holder left;
+			// the next batch starts after the last checkpointed offset.
+			log.Printf("  [pool-B] %s: resuming from offset %d (PrevExit=%s, PrevHolderID=%s)",
+				workID, progress.LastOffset, cp.PrevExit, cp.PrevHolderID)
 		}
 		time.Sleep(100 * time.Millisecond)
 		start := progress.LastOffset
@@ -106,7 +126,7 @@ func scenario2CheckpointResume(ctx context.Context, b backend.Backend) {
 		return data, &slotDone{"batch complete"}
 	}
 
-	poolB, _ := pool.New(leaseB, pool.Config{WorkIDs: workIDs, BackoffInterval: 50 * time.Millisecond}, bFn)
+	poolB, _ := pool.New(leaseB, pool.Config{WorkIDs: workIDs, IdleInterval: idleInterval, RerunInterval: rerunInterval, BackoffInterval: 50 * time.Millisecond}, bFn)
 	poolB.Run(ctx)
 
 	log.Println()
@@ -149,7 +169,7 @@ func scenario3PermanentError(ctx context.Context, b backend.Backend) {
 		return data, nil
 	}
 
-	p, _ := pool.New(lease, pool.Config{WorkIDs: workIDs, BackoffInterval: 50 * time.Millisecond}, fn)
+	p, _ := pool.New(lease, pool.Config{WorkIDs: workIDs, IdleInterval: idleInterval, RerunInterval: rerunInterval, BackoffInterval: 50 * time.Millisecond}, fn)
 
 	runCtx, cancel := context.WithTimeout(ctx, 1200*time.Millisecond)
 	defer cancel()
@@ -171,10 +191,43 @@ func scenario3PermanentError(ctx context.Context, b backend.Backend) {
 	log.Println()
 }
 
+func scenario4Retire(ctx context.Context, b backend.Backend) {
+	log.Println("=== Scenario 4: ErrRetire Retires a Finished Partition ===")
+
+	workIDs := []string{"topic-0", "topic-1", "topic-legacy"}
+	lease, _ := worklease.New(b, worklease.Config{TTL: 30 * time.Second, HolderID: "pool-D"})
+
+	fn := func(ctx context.Context, workID string, _ worklease.Token, _ worklease.Checkpoint) ([]byte, error) {
+		if workID == "topic-legacy" {
+			// The legacy topic is fully drained: retire it for good. The lease is
+			// released with ExitRetired and the slot stops without backoff.
+			log.Printf("  [pool-D] %s: drained — returning worklease.ErrRetire", workID)
+			return nil, worklease.ErrRetire
+		}
+		time.Sleep(100 * time.Millisecond)
+		log.Printf("  [pool-D] %s: processed one batch — stopping slot", workID)
+		return nil, &slotDone{"batch complete"}
+	}
+
+	p, _ := pool.New(lease, pool.Config{
+		WorkIDs:       workIDs,
+		IdleInterval:  idleInterval,
+		RerunInterval: rerunInterval,
+		Observer:      retiredLogger{pool: "pool-D"},
+	}, fn)
+
+	// Two slots die through PermanentError and one retires. Because a slot retired,
+	// Run returns nil rather than ErrAllSlotsDead.
+	err := p.Run(ctx)
+	log.Printf("  pool-D Run returned: %v", err)
+	log.Println()
+}
+
 func main() {
 	ctx := context.Background()
 
 	scenario1Distribution(ctx, memory.New())
 	scenario2CheckpointResume(ctx, memory.New())
 	scenario3PermanentError(ctx, memory.New())
+	scenario4Retire(ctx, memory.New())
 }

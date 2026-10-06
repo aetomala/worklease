@@ -12,11 +12,11 @@ Swap in the PostgreSQL backend for production use.
 
 A multi-step SaaS cancellation flow that crashes mid-execution. Best for:
 - Understanding what worklease solves that a distributed lock does not
-- Seeing crash recovery (`cleanHandoff = false`) and zombie fencing (`ErrFenced`) side by side
+- Seeing how each worker reads the previous holder's exit (`PrevExit`): crash recovery (`ExitExpired`), a completed run (`ExitFinished`), and zombie fencing (`ErrFenced`) side by side
 
 **Features**:
 - Three sequential scenarios: happy path, crash recovery, zombie fencing
-- `StartRenewal` keeping the lease alive across a long-running flow
+- `worker.Runner` keeping the lease alive across a long-running flow
 - Effect-before-checkpoint ordering demonstrated explicitly
 
 **Run**:
@@ -34,7 +34,8 @@ A coordinator that migrates tenants one at a time across a shared database. Best
 - Seeing how crash recovery skips already-processed items rather than re-running from scratch
 
 **Features**:
-- For-loop coordination pattern with `StartRenewal` keeping the lease alive across many iterations
+- For-loop coordination pattern with `worker.Runner` keeping the lease alive across many iterations
+- Resume on `ExitExpired` or `ExitAbandoned`; retire the migration with `worklease.ErrRetire` once every tenant is done; explicit `CleanupTimeout`
 - Checkpoint after each tenant — fine-grained recovery cursor
 - Zombie fencing mid-batch with fencing token values in output
 
@@ -58,6 +59,8 @@ A background scheduler that must run on exactly one cluster node at a time, usin
 - Scenario 1: Fail-fast election — the losing node gets `ErrLeaseHeld` and skips
 - Scenario 2: Standby failover — `WithWaitForLease` blocks until the crashed leader's lease expires
 - Scenario 3: Fenced leader exits cleanly — `renewCtx` cancellation reaches the work loop
+- Scenario 4: Persistent leaders in a retry loop — `BackoffInterval` throttles terms; the loop waits on `ErrLeaseHeld` itself
+- `OnRelinquished` logs only a clean handover (`ExitFinished` or `ExitRetired`)
 
 **Run**:
 ```bash
@@ -76,8 +79,10 @@ An event pipeline with a fixed set of named partitions, using the `pool` package
 
 **Features**:
 - Scenario 1: Pool acquires all 6 partitions immediately; `ActiveSlots` shows concurrent ownership
-- Scenario 2: Pool-A checkpoints per-partition cursors; Pool-B resumes from those offsets on clean handoff
+- Scenario 2: Pool-A checkpoints per-partition cursors and stops through `PermanentError` (`ExitAbandoned`); Pool-B resumes from those offsets without waiting for the TTL
 - Scenario 3: `PermanentError` evicts a decommissioned partition while the rest of the pool keeps running
+- Scenario 4: `worklease.ErrRetire` retires a drained partition; `OnSlotRetired` fires and `Run` returns `nil`
+- Explicit `IdleInterval` and `RerunInterval` pacing
 
 **Run**:
 ```bash
@@ -98,6 +103,7 @@ A stdlib-only `LeaseObserver` that produces real metrics — counts, latency, ho
 - Per-operation call counts, error counts, and average latency (read from `e.Duration`)
 - Lease hold duration correlated on the fencing token across `OnAcquire` → `OnRelease`
 - A dedicated fencing counter, exercised by a real fencing scenario (a successor steals an expired lease)
+- Exit-mode counters: releases per `ReleaseEvent.Mode` and reads per `ReadCheckpointEvent.PrevExit`, including an `ExitAbandoned` release
 - A comment block mapping each field to the equivalent Prometheus / OpenTelemetry instrument
 - Compile-time interface assertion; injected via `Config.Observer`
 
@@ -117,7 +123,7 @@ A focused example demonstrating the v0.5 additions to the renewal and acquire li
 
 **Features**:
 - Scenario 1: `Acquire` + `WithWaitForLease` with a deadline context — `errors.Is(err, context.DeadlineExceeded)` demonstrates the v0.5 error contract
-- Scenario 2: `StartRenewal` + `WithRenewalBackoff` with a short TTL — `context.Cause(renewCtx) == ErrLeaseWindowExhausted` when the lease window closes before renewal can succeed
+- Scenario 2: `StartRenewal` + `WithRenewalBackoff` with a short TTL — `ErrLeaseExpired` from `Renew` ends renewal at once; `context.Cause(renewCtx)` matches both `ErrLeaseWindowExhausted` and `ErrLeaseExpired`
 
 **Run**:
 ```bash

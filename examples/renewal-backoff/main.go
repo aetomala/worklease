@@ -58,15 +58,15 @@ func scenario2RenewalWindowExhaustion(ctx context.Context) {
 	// Set the renewal interval longer than the TTL so the first renewal fires after
 	// the lease has already expired. This is a deliberate misconfiguration that
 	// forces the window-exhausted path; in production keep the interval below the
-	// TTL (the default is TTL/2). The first Renew returns ErrLeaseExpired, which the
-	// goroutine treats as a non-fencing error.
+	// TTL (the default is TTL/2). The first Renew returns ErrLeaseExpired.
 	//
-	// WithRenewalBackoff configures the retry policy for non-fencing errors (e.g.,
-	// Postgres connection drops in production). initial=50ms, max=200ms, no jitter.
+	// WithRenewalBackoff configures the retry policy for transient non-fencing errors
+	// (e.g., Postgres connection drops in production). initial=50ms, max=200ms, no jitter.
 	//
-	// Because the lease window has already closed when that error arrives, no
-	// backoff retry runs: the window check cancels renewCtx with
-	// ErrLeaseWindowExhausted immediately.
+	// ErrLeaseExpired is terminal: storage has found the lease lapsed, so retrying
+	// cannot help. The goroutine cancels renewCtx at once, with no backoff retry, and
+	// the cause is errors.Join(ErrLeaseWindowExhausted, ErrLeaseExpired), so
+	// errors.Is matches either sentinel.
 	renewCtx, stopRenewal := lease.StartRenewal(ctx, token,
 		worklease.WithRenewalInterval(400*time.Millisecond),
 		worklease.WithRenewalBackoff(50*time.Millisecond, 200*time.Millisecond, 0),
@@ -79,6 +79,9 @@ func scenario2RenewalWindowExhaustion(ctx context.Context) {
 
 	if errors.Is(context.Cause(renewCtx), worklease.ErrLeaseWindowExhausted) {
 		log.Println("  worker-C: ErrLeaseWindowExhausted — lease window closed before renewal succeeded")
+		if errors.Is(context.Cause(renewCtx), worklease.ErrLeaseExpired) {
+			log.Println("  worker-C: cause also matches ErrLeaseExpired — terminal, renewal did not retry")
+		}
 		log.Println("  worker-C: work abandoned; a successor worker may re-acquire this lease")
 	}
 	log.Println()
