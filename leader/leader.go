@@ -67,6 +67,10 @@ type Config struct {
 // worklease.ErrFenced, and context errors from the underlying Lease unchanged.
 // Elect does not force blocking acquisition; pass worklease.WithWaitForLease()
 // in cfg.AcquireOptions to block until leadership is available.
+// If Release fails with a non-fencing error, the exit may not be recorded;
+// after ErrLeaseExpired it is not, and the successor sees ExitExpired. Elect
+// then returns the release error wrapped as "leader: release:" if fn
+// succeeded, or fn's error otherwise.
 func Elect(ctx context.Context, lease worklease.Lease, workID string, cfg Config, fn func(ctx context.Context) error) error {
 	// ===== STEP 1: Nil check =====
 	if lease == nil {

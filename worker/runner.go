@@ -99,6 +99,14 @@ func NewRunner(cfg RunnerConfig) (*Runner, error) {
 // successor holds the lease. Run does not release when the lease window was
 // exhausted; the successor sees ExitExpired. If WorkFn panics, renewal is
 // stopped, the lease is not released, and the panic propagates.
+// If ReadCheckpoint fails, Run returns the error without calling WorkFn and
+// without releasing; the lease expires after its TTL and the successor sees
+// ExitExpired. If the final Checkpoint fails with a non-fencing error, Run
+// releases with ExitAbandoned and returns the checkpoint error, or WorkFn's
+// error if WorkFn failed. If Release fails with a non-fencing error, the exit
+// may not be recorded; after ErrLeaseExpired it is not, and the successor sees
+// ExitExpired. Run then returns the release error if WorkFn succeeded, or
+// WorkFn's error otherwise.
 func (r *Runner) Run(ctx context.Context, workID string) error {
 	// ===== STEP 1: Acquire =====
 	token, err := r.lease.Acquire(ctx, workID, r.acquireOptions...)

@@ -79,9 +79,9 @@ With `worklease`:
 - Worker A writes progress state atomically with every lease renewal. The last checkpoint
   is guaranteed to be written before any renewal succeeds.
 - Worker B acquires the lease, reads the checkpoint, and resumes from the last known safe
-  state. It also knows whether Worker A called `Release` explicitly (clean handoff) or
-  whether the lease simply expired (crash recovery). These are different situations requiring
-  different handling.
+  state. It also knows how Worker A left: a declared exit through `Release` (finished,
+  abandoned, or retired) or a lease that simply expired (crash recovery). These are different
+  situations requiring different handling.
 - If Worker A is a zombie (slow, not dead), its next write to the lease store will be
   rejected — Worker B was issued a higher fencing token, and Worker A's writes with a stale
   token fail with `ErrFenced`.
@@ -161,19 +161,20 @@ beyond what this library provides.
 
 ### Release expires the lease immediately
 
-`Release` sets `clean_handoff = TRUE` in the lease store and sets `expires_at` to a past
-timestamp, making the work item immediately acquirable by a successor. A successor using
-`WithWaitForLease` will acquire on its next poll; a fail-fast successor can call `Acquire`
-immediately after.
+`Release(ctx, token, mode)` records the exit mode the holder declares — `ExitFinished`,
+`ExitAbandoned`, or `ExitRetired` — and sets `expires_at` to a past timestamp, making the work
+item immediately acquirable by a successor. A successor using `WithWaitForLease` will acquire
+on its next poll; a fail-fast successor can call `Acquire` immediately after. Every mode expires
+the lease immediately (ADR-0012, amended by ADR-0018).
 
-"Clean handoff" is a semantic flag that tells the successor the previous owner finished
-intentionally. The TTL governs crash detection only — when a holder crashes without calling
-`Release`, the successor must wait for the TTL to elapse before the record appears expired.
-A clean `Release` bypasses that wait.
+The exit mode tells the successor how the previous holder left. The TTL governs crash detection
+only — when a holder crashes without calling `Release`, the successor must wait for the TTL to
+elapse before the record appears expired, and then sees `ExitExpired`. A `Release` bypasses
+that wait.
 
 ### Recovery logic lives in caller code
 
-`worklease` delivers the checkpoint bytes and the `cleanHandoff` flag. What those bytes mean,
+`worklease` delivers the checkpoint bytes and how the previous holder exited (`PrevExit`). What those bytes mean,
 whether the partial state is valid, how to roll back a half-finished step, and how to reconcile
 external effects that happened before the crash — these are application concerns.
 
@@ -225,17 +226,24 @@ the lease (via `Checkpoint`).
 ### Handoff vs Crash Recovery
 
 When a new owner acquires a lease, it calls `ReadCheckpoint` to get the previous owner's
-state. The call returns two values: the state bytes, and a `cleanHandoff bool`.
+state. The call returns a `Checkpoint` value: `State` (the last checkpointed bytes),
+`PrevExit` (how the immediately previous holder exited), and `PrevHolderID` (who it was).
+`Acquire` captures the previous holder's exit atomically with token issuance, so the values
+describe the immediately previous holder and are the same on every read during the lease
+(ADR-0018).
 
-- `cleanHandoff == true`: the previous owner called `Release` explicitly. The checkpoint
-  contains the final state of completed work. The new owner can resume cleanly.
-- `cleanHandoff == false`: the previous owner's lease expired without a `Release`. The
-  checkpoint contains the last known partial state. The new owner should validate that
-  state before resuming — the previous owner may have been mid-step.
+| `PrevExit` | How it is set | What the new owner should do |
+|---|---|---|
+| `ExitNone` | Inferred: the work ID was never acquired, or its row was removed by `Forget` or `Sweep` | Start fresh |
+| `ExitFinished` | `Release(…, ExitFinished)` | Continue from the final state |
+| `ExitAbandoned` | `Release(…, ExitAbandoned)` — an error, a cancellation, a shutdown | Validate the partial state, then resume; the holder stopped cleanly |
+| `ExitExpired` | Inferred: the lease expired with no recorded exit — a crash, a partition, or a renewal window that ran out | Validate the partial state; external effects may have fired after the last checkpoint |
+| `ExitRetired` | `Release(…, ExitRetired)` | Do not redo the work |
 
-These are semantically different situations. The library makes the distinction explicit and
-forces callers to handle both. Treating crash recovery the same as clean handoff is a common
-source of subtle bugs in distributed systems.
+Unknown modes must be treated as `ExitExpired`, the conservative interpretation. These are
+semantically different situations; the library makes them explicit and forces callers to
+handle each. Treating crash recovery the same as a completed run is a common source of subtle
+bugs in distributed systems.
 
 ---
 
@@ -245,8 +253,9 @@ source of subtle bugs in distributed systems.
 checkpointed lease handoff with fencing. It has no serialization opinions, no framework
 requirements, and no platform dependencies.
 
-**2. Explicit over implicit.** `cleanHandoff bool` forces callers to handle crash recovery
-differently from clean handoff. `nil` state on fresh acquisition is explicit, not an error.
+**2. Explicit over implicit.** `Release` takes a required exit mode, so a holder must declare
+whether it finished, abandoned, or retired the work, and successors handle each `PrevExit`
+differently. `nil` state on fresh acquisition is explicit, not an error.
 `ErrFenced` is returned, not silently swallowed.
 
 **3. Library owns fencing, callers own state.** The library unconditionally enforces fencing
@@ -357,9 +366,10 @@ type Lease interface {
     Acquire(ctx context.Context, workID string, opts ...AcquireOption) (Token, error)
     Checkpoint(ctx context.Context, token Token, state []byte) error
     Renew(ctx context.Context, token Token) error
-    Release(ctx context.Context, token Token) error
-    ReadCheckpoint(ctx context.Context, token Token) (state []byte, cleanHandoff bool, err error)
+    Release(ctx context.Context, token Token, mode ExitMode) error
+    ReadCheckpoint(ctx context.Context, token Token) (Checkpoint, error)
     StartRenewal(ctx context.Context, token Token, opts ...RenewalOption) (renewCtx context.Context, stopRenewal func())
+    Forget(ctx context.Context, token Token) error
 }
 ```
 
@@ -465,8 +475,10 @@ type Backend interface {
     Acquire(ctx context.Context, workID, holderID string, ttl time.Duration) (LeaseRecord, error)
     Checkpoint(ctx context.Context, record LeaseRecord, state []byte, ttl time.Duration) error
     Renew(ctx context.Context, record LeaseRecord, ttl time.Duration) error
-    Release(ctx context.Context, record LeaseRecord) error
-    ReadCheckpoint(ctx context.Context, record LeaseRecord) (state []byte, cleanHandoff bool, err error)
+    Release(ctx context.Context, record LeaseRecord, mode ExitMode) error
+    ReadCheckpoint(ctx context.Context, record LeaseRecord) (Checkpoint, error)
+    Forget(ctx context.Context, record LeaseRecord) error
+    Sweep(ctx context.Context, opts SweepOptions) (int64, error)
 }
 ```
 
@@ -527,22 +539,26 @@ As of v0.5, `fencing_token` is sourced from a single global `worklease_fencing_s
 rather than a per-row `+ 1` (ADR-0016). Tokens are therefore strictly increasing across **all**
 work IDs, not just within a single row's history, and they survive row deletion — the property
 that makes the planned v0.6 retention work safe. `checkpoint` is nullable — `NULL` on first
-acquisition means no prior state. `clean_handoff` is reset to `FALSE` on every acquisition and
-set to `TRUE` only by an explicit `Release`.
+acquisition means no prior state. `exit_mode` holds the current holder's declared exit (`NULL`
+until it calls `Release`); `prev_exit_mode` and `prev_holder_id` hold the immediately previous
+holder's exit and ID, captured by `Acquire` (ADR-0018). `clean_handoff` is deprecated: it is
+never read or written since v0.6 and stays only so a rollback to v0.5 does not fail (#86).
 
 ### Acquire — Single-Statement Upsert with RETURNING
 
 ```sql
-INSERT INTO worklease_leases (work_id, holder_id, fencing_token, expires_at, checkpoint, clean_handoff)
-VALUES ($1, $2, nextval('worklease_fencing_seq'), NOW() + $3, NULL, FALSE)
+INSERT INTO worklease_leases (work_id, holder_id, fencing_token, expires_at, checkpoint, exit_mode, prev_exit_mode, prev_holder_id)
+VALUES ($1, $2, nextval('worklease_fencing_seq'), NOW() + $3, NULL, NULL, 'none', NULL)
 ON CONFLICT (work_id) DO UPDATE
-SET holder_id     = EXCLUDED.holder_id,
-    fencing_token = nextval('worklease_fencing_seq'),
-    expires_at    = EXCLUDED.expires_at,
-    checkpoint    = worklease_leases.checkpoint,   -- preserve last checkpoint
-    clean_handoff = worklease_leases.clean_handoff, -- preserve until successor reads
-    updated_at    = NOW()
-WHERE worklease_leases.expires_at < NOW()           -- only if expired
+SET holder_id      = EXCLUDED.holder_id,
+    fencing_token  = nextval('worklease_fencing_seq'),
+    expires_at     = EXCLUDED.expires_at,
+    checkpoint     = worklease_leases.checkpoint,
+    prev_exit_mode = COALESCE(worklease_leases.exit_mode, 'expired'),
+    prev_holder_id = worklease_leases.holder_id,
+    exit_mode      = NULL,
+    updated_at     = NOW()
+WHERE worklease_leases.expires_at < NOW()
 RETURNING fencing_token, expires_at
 ```
 
@@ -550,7 +566,9 @@ The `WHERE` clause is the fencing gate. If the lease is held and unexpired, the 
 false — zero rows are updated, the statement returns no row, and the backend maps the resulting
 `sql.ErrNoRows` to `ErrLeaseHeld`. If the lease is absent or expired, the upsert succeeds, draws
 a fresh token from the sequence, and `RETURNING` yields the token and expiry in the same
-statement. As of v0.5 this replaces the prior two-step `ExecContext` + read-back `SELECT`,
+statement. In the same statement it captures the previous holder's exit into `prev_exit_mode`
+(`'expired'` when that holder declared none) and its ID into `prev_holder_id`, then clears
+`exit_mode` for the new holder. A first insert records `prev_exit_mode = 'none'`. As of v0.5 this replaces the prior two-step `ExecContext` + read-back `SELECT`,
 closing the read-back race (R8/F4).
 
 **Sequence consumption on failed acquires**: `nextval('worklease_fencing_seq')` in the
@@ -567,17 +585,21 @@ decisions are made by the database, not by the client. This is intentional; see
 
 ```sql
 UPDATE worklease_leases
-SET checkpoint    = $1,
-    expires_at    = NOW() + $2,
-    clean_handoff = FALSE,
-    updated_at    = NOW()
+SET checkpoint = $1,
+    expires_at = NOW() + $2,
+    updated_at = NOW()
 WHERE work_id       = $3
   AND holder_id     = $4
   AND fencing_token = $5
+  AND exit_mode IS NULL
 ```
 
-Zero rows updated means the fencing token in the database is higher than the one the worker
-holds — the worker has been superseded. The backend returns `ErrFenced`.
+Zero rows updated means either that the worker has been superseded or that it has already
+declared an exit. A follow-up `queryHolderCheck` (shown under Release) tells them apart: no
+matching row returns `ErrFenced`; a matching row returns `ErrLeaseExpired`, because a holder
+cannot write after `Release` (ADR-0018). `Checkpoint` never writes an exit column. A lease that
+lapsed with no declared exit can still be revived by its holder's `Checkpoint` if no successor
+has acquired it.
 
 The `AND fencing_token = $5` clause is the fencing enforcement. It is evaluated atomically by
 PostgreSQL. There is no Lua script, no optimistic retry, no distributed clock dependency.
@@ -586,43 +608,75 @@ PostgreSQL. There is no Lua script, no optimistic retry, no distributed clock de
 
 ```sql
 UPDATE worklease_leases
-SET expires_at = NOW() + $1,
-    updated_at = NOW()
+SET expires_at  = NOW() + $1,
+    updated_at  = NOW()
 WHERE work_id       = $2
   AND holder_id     = $3
   AND fencing_token = $4
   AND expires_at    > NOW()
 ```
 
-Same fencing gate, plus an expiry guard. If the lease has already expired, zero rows are
-updated and `ErrLeaseExpired` is returned — the renewal goroutine cancels `renewCtx` and
-signals to downstream work that the lease is lost. No bare `time.Now()` — the database's
-`NOW()` is authoritative.
+Same fencing gate, plus an expiry guard. When zero rows are updated, a follow-up read
+classifies the result: `ErrFenced` if the holder or token no longer match, `ErrLeaseExpired` if
+they match but the lease has expired. No bare `time.Now()` — the database's `NOW()` is
+authoritative. `ErrLeaseExpired` is terminal for the renewal goroutine: it cancels `renewCtx`
+at once, without backoff or further attempts, with the cause
+`errors.Join(ErrLeaseWindowExhausted, ErrLeaseExpired)` (#84; see Renewal Loop).
 
-### Release — Set clean_handoff and expire immediately
+### Release — Record the exit and expire immediately
 
 ```sql
 UPDATE worklease_leases
-SET clean_handoff = TRUE,
-    expires_at    = NOW() - INTERVAL '1 millisecond',
-    updated_at    = NOW()
+SET exit_mode  = $4,
+    expires_at = NOW() - INTERVAL '1 millisecond',
+    updated_at = NOW()
+WHERE work_id       = $1
+  AND holder_id     = $2
+  AND fencing_token = $3
+  AND expires_at    > NOW()
+```
+
+`Release` first validates the mode: only `ExitFinished`, `ExitAbandoned`, and `ExitRetired` are
+accepted, and anything else returns `ErrInvalidExitMode` without touching the database. The
+update records the declared mode in `exit_mode` and sets `expires_at` to a past timestamp, so
+the record satisfies the `Acquire` condition (`expires_at < NOW()`) immediately and the
+successor acquires without waiting for the TTL (ADR-0012). The checkpoint column is not
+touched: the final checkpoint written by the last `Checkpoint` call survives, and the successor
+reads it with `PrevExit` set to the declared mode.
+
+When zero rows are updated, the shared holder check classifies the result — fencing first,
+then expiry:
+
+```sql
+SELECT 1
+FROM worklease_leases
 WHERE work_id       = $1
   AND holder_id     = $2
   AND fencing_token = $3
 ```
 
-The checkpoint column is not touched. The final checkpoint written by the last `Checkpoint`
-call survives. The successor will read it alongside `cleanHandoff = true`.
+No matching row returns `ErrFenced`. A matching row returns `ErrLeaseExpired`: the lease has
+expired, or this holder already declared an exit, so nothing is recorded and a successor sees
+`ExitExpired` (or the first declared mode). A second `Release` cannot overwrite the first.
 
-Setting `expires_at` to a past timestamp makes the record satisfy the `Acquire` condition
-(`expires_at < NOW()`) immediately, so the successor can acquire without waiting for the
-original TTL to elapse.
+**Operational note on `expires_at` ambiguity:** a row with `expires_at < NOW()` may be a
+released lease or an expired one. `exit_mode` disambiguates: a declared mode means `Release`,
+`NULL` means the holder never declared an exit. `expires_at > NOW()` continues to reliably
+identify a currently held lease.
 
-**Operational note on `expires_at` ambiguity:** After `Release`, a row with
-`expires_at < NOW()` is ambiguous — it may indicate a clean release, a crash-timeout that
-elapsed, or an expired stale row. `clean_handoff = TRUE` disambiguates intent for ad-hoc
-operational queries. `expires_at > NOW()` continues to reliably identify a currently held
-lease.
+### Sweep — Retention keyed on declared exits
+
+```sql
+DELETE FROM worklease_leases
+WHERE updated_at < NOW() - $1::interval
+  AND expires_at < NOW()
+  AND (exit_mode = 'retired' OR ($2 AND exit_mode IS NULL))
+```
+
+`Vacuum.Sweep` deletes expired rows last updated more than `Retention` ago that were released
+with `ExitRetired`, plus, with `SweepOptions.IncludeExpired`, rows whose lease expired with no
+declared exit. Rows released with `ExitFinished` or `ExitAbandoned`, and held rows, are never
+deleted (ADR-0016, amended by ADR-0018).
 
 ---
 
@@ -697,7 +751,7 @@ if err := doWork(renewCtx, ...); err != nil {
 
 stopRenewal()  // explicit call — stops renewal before Release
 // Use the original ctx for Release — renewCtx may be cancelled by the time work finishes.
-return lease.Release(ctx, token)
+return lease.Release(ctx, token, worklease.ExitFinished)
 ```
 
 ### Context Lifecycle
@@ -709,6 +763,7 @@ cancellation is inspectable with `context.Cause(renewCtx)`:
 |-------|---------------------------|
 | Renewal receives `ErrFenced` | `ErrFenced` — this worker is a zombie, stop all work (never retried) |
 | Lease window exhausted after retries | `ErrLeaseWindowExhausted` — renewal failed for the whole window |
+| Renewal receives `ErrLeaseExpired` | `errors.Join(ErrLeaseWindowExhausted, ErrLeaseExpired)` — storage found the lease lapsed; cancelled at once, never retried (#84). `errors.Is` matches both |
 | Parent `ctx` is cancelled | the parent's cause — propagated from parent |
 | `stopRenewal()` is called | `nil` — `renewCtx` is **not** cancelled, clean shutdown |
 
@@ -719,12 +774,16 @@ were fenced" from "the lease window ran out" by inspecting `context.Cause(renewC
 ### Bounded Retry (v0.5)
 
 A non-fencing error from `Backend.Renew` no longer cancels `renewCtx` on the first failure.
-The goroutine retries with exponential backoff plus additive jitter, bounded strictly by
-`token.ExpiresAt()` — it never renews past the point where it could still be the legitimate
-owner. When the window is exhausted, it cancels with cause `ErrLeaseWindowExhausted`. A fencing
-error is never retried. Each attempt is reported to `OnRenew` via `RenewEvent.Attempt` (1-based,
+The goroutine retries with exponential backoff plus additive jitter, bounded strictly by the
+lease window — it never renews past the point where it could still be the legitimate owner.
+The window starts as the earlier of `token.ExpiresAt()` and the local acquire start plus TTL,
+and advances to the local start of each successful `Renew` plus TTL. The local bounds use the
+monotonic clock, so a backend clock running ahead of the local clock cannot extend retries
+past the true expiry (v0.6, PR #83). When the window is exhausted, it cancels with cause
+`ErrLeaseWindowExhausted`. A fencing error is never retried, and `ErrLeaseExpired` from `Renew`
+ends renewal at once (#84). See the [ADR-0013 amendment](adr/0013-renewal-goroutine-retry-policy.md). Each attempt is reported to `OnRenew` via `RenewEvent.Attempt` (1-based,
 incremented per retry). Configure the policy with `WithRenewalBackoff(initial, max, jitter)`
-(defaults 100ms / 5s / 0.20). See [ADR-0013](adr/0013-renewal-goroutine-retry-policy.md).
+(defaults 100ms / 5s / 0.20).
 
 Note that `renewCtx` cancellation propagates fencing into downstream work — it does not fence
 external systems. An in-flight HTTP call or database write to an external system initiated
@@ -832,14 +891,18 @@ const (
 
 Every event carries the `Token` (zero value when the operation errored before acquiring one)
 and the operation's `Err`. Operation events also carry a `Duration`; `CheckpointEvent`/
-`ReadCheckpointEvent` carry a `Size`; `ReadCheckpointEvent` carries `CleanHandoff`;
-`FencedEvent` carries the `Operation` that triggered it.
+`ReadCheckpointEvent` carry a `Size`; `ReleaseEvent` carries the declared `Mode`;
+`ReadCheckpointEvent` carries `PrevExit` and `PrevHolderID` (zero values when the read failed);
+`FencedEvent` carries the `Operation` that triggered it. An invalid exit mode is rejected
+before the backend is called, so it produces no `OnRelease` event.
 
 **Fencing order.** When a fencing event occurs, the operation-specific callback fires first
 (`OnCheckpoint`, `OnRenew`, or `OnRelease`), then `OnFenced`. This order is mandatory.
 `OnFenced` fires on the **Release** path as well as Checkpoint and Renew — `FencedEvent.Operation`
 identifies which. `OnReadCheckpoint` is **not** a fencing trigger: a fenced `ReadCheckpoint`
-surfaces only through `ReadCheckpointEvent.Err`.
+surfaces only through `ReadCheckpointEvent.Err`. `ErrLeaseExpired` from `Checkpoint` or
+`Release` (an exit already declared, or a lapsed lease) is reported through the operation
+event's `Err` and does not fire `OnFenced`.
 
 **Duration contract.** `Duration` measures the single final backend call only — never the
 `WithWaitForLease` poll loop. A caller that needs cumulative wait-loop time records its own
@@ -864,15 +927,40 @@ scaffold; `Runner` reduces that to a single `Run` call.
 import "github.com/aetomala/worklease/worker"
 
 // WorkFn is the work function signature accepted by Runner.Run.
-// ctx is the renewal context — cancelled on fencing or renewal failure.
-// prior contains the last checkpointed state from the previous holder (nil on first run).
-// cleanHandoff is true when the previous holder released intentionally.
-// Return final state to checkpoint after work completes; return nil to skip final checkpoint.
-type WorkFn func(ctx context.Context, token worklease.Token, prior []byte, cleanHandoff bool) ([]byte, error)
+// The ctx argument is the renewal context; it is cancelled on fencing, when the
+// lease window is exhausted, or when the caller's context is cancelled. The
+// prior argument carries the last checkpointed state and how the immediately
+// previous holder exited; PrevExit is ExitNone on a first run. Return final
+// state to checkpoint, or nil to skip the final checkpoint. Return nil to
+// release with ExitFinished, an error wrapping worklease.ErrRetire to release
+// with ExitRetired, or any other error to release with ExitAbandoned.
+type WorkFn func(ctx context.Context, token worklease.Token, prior worklease.Checkpoint) ([]byte, error)
+
+// RunnerConfig holds configuration for a Runner instance.
+type RunnerConfig struct {
+	// Lease is the lease client. Required; nil returns ErrLeaseRequired from
+	// NewRunner.
+	Lease worklease.Lease
+
+	// WorkFn is the work function. Required; nil returns ErrWorkFnRequired from
+	// NewRunner.
+	WorkFn WorkFn
+
+	// AcquireOptions are passed to Lease.Acquire. Optional.
+	AcquireOptions []worklease.AcquireOption
+
+	// RenewalOptions are passed to Lease.StartRenewal. Optional.
+	RenewalOptions []worklease.RenewalOption
+
+	// CleanupTimeout bounds the final Checkpoint and Release, which run on a
+	// context that survives cancellation of the caller's context. Zero or
+	// negative means 5s.
+	CleanupTimeout time.Duration
+}
 
 runner, err := worker.NewRunner(worker.RunnerConfig{
-    Lease:  lease,
-    WorkFn: myWorkFn,
+	Lease:  lease,
+	WorkFn: myWorkFn,
 })
 
 err = runner.Run(ctx, "onboarding:tenant-abc")
@@ -880,22 +968,34 @@ err = runner.Run(ctx, "onboarding:tenant-abc")
 
 `Runner.Run` performs these steps in order:
 
-1. `lease.Acquire` — obtains the lease
-2. `lease.ReadCheckpoint` — reads prior state and `cleanHandoff` flag
-3. `lease.StartRenewal` — starts the managed renewal goroutine
-4. Calls `WorkFn` with `renewCtx`, the token, prior state, and `cleanHandoff`
-5. `stopRenewal()` — explicit stop before release
-6. If `WorkFn` returned non-nil state: `lease.Checkpoint` — writes final state
-7. `lease.Release` — surrenders the lease (skipped on `ErrFenced`)
+| Step | Action | Context |
+|---|---|---|
+| 1 | `lease.Acquire`; an error is returned wrapped as `worker: acquire: …` | `ctx` |
+| 2 | `lease.ReadCheckpoint`. `ErrFenced` is returned as is; any other error is returned wrapped as `worker: read checkpoint: …`. Neither path releases: the lease expires after its TTL and the successor sees `ExitExpired` with this holder as `PrevHolderID` | `ctx` |
+| 3 | `lease.StartRenewal`; `stopRenewal` is also deferred as a panic-safety net | `ctx` |
+| 4 | Calls `WorkFn` with `renewCtx`, the token, and the `Checkpoint` | `renewCtx` |
+| 5 | `stopRenewal()`, then reads `context.Cause(renewCtx)` | — |
+| 6 | Classifies the outcome, first match wins: fenced (`WorkFn` or the cause) → return `ErrFenced`, no checkpoint, no release; lease window exhausted → no checkpoint, no release, return the `WorkFn` error or `worker: …` wrapping the cause; an error wrapping `ErrRetire` → `ExitRetired`, success; `nil` → `ExitFinished`, success; any other error → `ExitAbandoned` | — |
+| 7 | Derives one cleanup context, `context.WithTimeout(context.WithoutCancel(ctx), CleanupTimeout)` | — |
+| 8 | If `WorkFn` returned non-nil state: `lease.Checkpoint`. `ErrFenced` → return `ErrFenced`, no release. Any other error switches the mode to `ExitAbandoned`; the result becomes `worker: checkpoint: …` if the run was a success, else stays the `WorkFn` error | cleanup |
+| 9 | `lease.Release` with the mode. `ErrFenced` → return `ErrFenced`. Any other error is returned wrapped as `worker: release: …` only if nothing failed earlier; otherwise the earlier error is returned | cleanup |
 
 `Token` is passed to `WorkFn` so callers can make mid-work `Checkpoint` calls for fine-grained
 progress recording without stepping outside the `Runner` API.
 
 **Error contract:**
 
-- `ErrFenced` from any step — `Runner` returns `ErrFenced`; `Release` is not called.
-- `WorkFn` returning `ErrFenced` — same as above.
-- Any other error — `Runner` calls `Release` before returning.
+- `Run` returns `nil` when `WorkFn` returns `nil` or an error wrapping `worklease.ErrRetire`
+  and the exit is recorded.
+- `ErrFenced` from any step, or as the renewal cause — `Run` returns `ErrFenced` and records
+  nothing; a successor already holds the lease.
+- Lease window exhausted, `ReadCheckpoint` failure, or a `WorkFn` panic — no release; the
+  successor sees `ExitExpired` after the TTL. A panic propagates after renewal is stopped.
+- Any other `WorkFn` error — the final state is checkpointed, the lease is released with
+  `ExitAbandoned`, and `Run` returns the `WorkFn` error.
+- The final `Checkpoint` and `Release` survive cancellation of the caller's `ctx`, bounded by
+  `CleanupTimeout` (default 5s), so a graceful shutdown still records the final state and
+  releases the lease.
 
 ---
 
@@ -955,14 +1055,24 @@ import "github.com/aetomala/worklease/leader"
 err := leader.Elect(ctx, lease, "scheduler:primary", leader.Config{
     AcquireOptions: []worklease.AcquireOption{worklease.WithWaitForLease()},
 }, func(ctx context.Context) error {
-    // ctx is cancelled if the lease is fenced or renewal fails.
+    // ctx is cancelled if the lease is fenced, the lease window runs out, or ctx is cancelled.
     return runScheduler(ctx)
 })
 ```
 
 `Elect` manages the full lifecycle: acquire, start renewal, call `fn` with `renewCtx`, stop
-renewal explicitly, and release. `fn` receives no `Token` — leader election is presence-only.
-Callers who need to make fencing-aware writes during work should use `worker.Runner` instead.
+renewal explicitly, and release with the exit mode that matches `fn`'s outcome. `fn` receives
+no `Token` — leader election is presence-only. Callers who need to make fencing-aware writes
+during work should use `worker.Runner` instead.
+
+The mapping follows `worker.Runner`, first match wins: fenced (from `fn` or the renewal cause)
+→ no release, return `ErrFenced`; lease window exhausted → no release, return `fn`'s error or
+`leader: …` wrapping the cause; an error wrapping `worklease.ErrRetire` → release with
+`ExitRetired` and return `nil`; `nil` → release with `ExitFinished`; any other error → release
+with `ExitAbandoned` and return it. `Release` runs on
+`context.WithTimeout(context.WithoutCancel(ctx), cfg.CleanupTimeout)` (default 5s), so a
+cancelled `ctx` still releases. A non-fenced `Release` error is returned wrapped as
+`leader: release: …` when `fn` succeeded; when `fn` failed, `Elect` returns `fn`'s error.
 
 Blocking vs fail-fast acquire behavior is caller-controlled via `cfg.AcquireOptions` —
 `Elect` does not force `WithWaitForLease`. Pass it explicitly to block until leadership is
@@ -971,8 +1081,8 @@ available.
 **Retry loops and backoff:** Because `Release` expires the lease immediately (ADR-0012), a
 caller wrapping `Elect` in a retry loop with a fast-returning `fn` will see rapid
 acquire/release/reacquire cycling without throttling. Set `cfg.BackoffInterval` to avoid
-this — `Elect` sleeps for that duration before returning on non-fencing paths. Fencing paths
-bypass the sleep:
+this — `Elect` sleeps for that duration before returning on every non-fencing path, including
+`ExitAbandoned` and an exhausted lease window. Fencing paths bypass the sleep:
 
 ```go
 for {
@@ -991,13 +1101,15 @@ observing the leadership lifecycle:
 ```go
 err := leader.Elect(ctx, lease, "scheduler:primary", leader.Config{
     OnElected:      func(ctx context.Context, t worklease.Token) { /* became leader */ },
-    OnLost:         func(ctx context.Context, t worklease.Token) { /* fenced / renewal failed */ },
-    OnRelinquished: func(ctx context.Context, t worklease.Token) { /* released cleanly */ },
+    OnLost:         func(ctx context.Context, t worklease.Token) { /* fenced / lease window ran out */ },
+    OnRelinquished: func(ctx context.Context, t worklease.Token) { /* released with ExitFinished or ExitRetired */ },
 }, runScheduler)
 ```
 
 `OnElected` fires after `Acquire` succeeds, before `fn`; `OnLost` fires when the renewal context
-is cancelled before `fn` returns; `OnRelinquished` fires after a successful `Release`. All are
+is cancelled before `fn` returns while the parent `ctx` is not; `OnRelinquished` fires only after
+`Release` succeeds with `ExitFinished` or `ExitRetired` — never after `ExitAbandoned` (v0.6,
+ADR-0018; see the ADR-0010 amendment). All are
 optional (nil is a no-op) and receive the original `ctx`. They are plain `func` fields rather than
 a `leader.Observer` interface because the event surface is narrow — three closures are more
 idiomatic than a thin interface (contrast `pool.Observer` below). They sit above the underlying
@@ -1021,16 +1133,90 @@ import "github.com/aetomala/worklease/pool"
 p, err := pool.New(lease, pool.Config{
     WorkIDs:         []string{"shard:0", "shard:1", "shard:2", "shard:3"},
     BackoffInterval: 5 * time.Second,
-}, func(ctx context.Context, workID string, token worklease.Token, prior []byte, cleanHandoff bool) ([]byte, error) {
-    return processShard(ctx, workID, prior, cleanHandoff)
+}, func(ctx context.Context, workID string, token worklease.Token, prior worklease.Checkpoint) ([]byte, error) {
+    return processShard(ctx, workID, prior)
 })
 
-err = p.Run(ctx)  // blocks until ctx is cancelled
+err = p.Run(ctx)  // blocks until ctx is cancelled or every slot has exited
 ```
 
-`Pool.Run` starts one goroutine per work ID. Each goroutine loops: acquire → work → release,
-with `BackoffInterval` delay on non-fencing errors. When `ctx` is cancelled, all goroutines
-exit and `Run` returns after all active slots have completed or released.
+The work function and configuration:
+
+```go
+// WorkFn is the work function executed per slot.
+// The workID argument identifies the slot. The token argument is the current
+// lease token; use it for mid-work Checkpoint calls. The prior argument
+// carries the last checkpointed state and how the immediately previous holder
+// exited. Return final state to checkpoint, or nil to skip it. Return nil to
+// release with ExitFinished and run again after RerunInterval, an error wrapping
+// worklease.ErrRetire to release with ExitRetired and stop the slot, a
+// PermanentError to release with ExitAbandoned and drop the slot, or any other
+// error to release with ExitAbandoned and back off.
+type WorkFn func(ctx context.Context, workID string, token worklease.Token, prior worklease.Checkpoint) ([]byte, error)
+
+// Config holds construction parameters for a Pool.
+type Config struct {
+	// WorkIDs is the fixed set of work IDs this pool competes for.
+	// Required; an empty slice returns ErrEmptyWorkIDs from New.
+	WorkIDs []string
+
+	// AcquireOptions are passed to each slot's internal Runner. Passing
+	// worklease.WithWaitForLease returns ErrWithWaitForLeaseProhibited from New.
+	AcquireOptions []worklease.AcquireOption
+
+	// RenewalOptions are passed to each slot's internal Runner. Optional.
+	RenewalOptions []worklease.RenewalOption
+
+	// IdleInterval is the wait before retrying a slot whose work ID another
+	// holder holds, meaning Runner.Run returned ErrLeaseHeld. Zero or negative
+	// means 1s. Each wait is drawn uniformly from
+	// [IdleInterval, 1.2*IdleInterval). OnSlotBackoff is not called for these
+	// waits.
+	IdleInterval time.Duration
+
+	// RerunInterval is the wait before reacquiring a slot after its WorkFn
+	// returned nil and the lease was released with ExitFinished. Zero or
+	// negative means 1s. Each wait is drawn uniformly from
+	// [RerunInterval, 1.2*RerunInterval), which also gives peer processes a
+	// chance to acquire the work ID. OnSlotBackoff is not called for these
+	// waits.
+	RerunInterval time.Duration
+
+	// BackoffInterval is the wait before reacquiring a slot after Runner.Run
+	// returns a non-permanent error other than ErrFenced and ErrLeaseHeld.
+	// Zero or negative means 1s. No jitter.
+	BackoffInterval time.Duration
+
+	// CleanupTimeout is passed to each slot's Runner. It bounds the final
+	// Checkpoint and Release, which survive cancellation of Run's context.
+	// Zero or negative means 5s.
+	CleanupTimeout time.Duration
+
+	// Observer receives callbacks on slot lifecycle transitions.
+	// Optional; nil installs a no-op observer.
+	Observer Observer
+}
+```
+
+`Pool.Run` starts one goroutine per work ID. Each goroutine loops: acquire, run the work
+function through a `worker.Runner` (so the exit-mode mapping and cleanup context above apply),
+then decide what to do next. After each `Runner.Run`, the first matching row wins:
+
+| # | Condition | Action |
+|---|---|---|
+| 1 | `Run` returned `nil` and the work function retired the work ID (`ErrRetire`) | `OnSlotRetired`; the slot exits and does not count as dead |
+| 2 | `Run`'s internal context is cancelled | the slot exits; no observer call |
+| 3 | `Run` returned `nil` | wait `RerunInterval` plus up to 20% jitter; no observer call; loop |
+| 4 | `ErrFenced` | `OnSlotLost`; reacquire immediately |
+| 5 | `PermanentError` | `OnSlotDead`; the slot exits |
+| 6 | `ErrLeaseHeld` | wait `IdleInterval` plus up to 20% jitter; no observer call; loop |
+| 7 | any other error | `OnSlotBackoff` with the effective `BackoffInterval`; wait it; loop |
+
+Every wait ends early when `ctx` is cancelled. With the defaults (1s each), a slot whose work
+ID a peer holds makes about one `Acquire` attempt per second (#81), and a finished slot pauses
+before running again so peer processes can win the work ID. When `ctx` is cancelled, every
+active slot completes its final `Checkpoint` and `Release`, bounded by `CleanupTimeout`, before
+`Run` returns.
 
 `WorkFn` receives the `Token` because pool targets stateful work — mid-work `Checkpoint` calls
 are expected. The `workID` parameter identifies which slot is executing; callers dispatch
@@ -1054,17 +1240,24 @@ Implement the interface on a custom error type, or wrap an existing error with t
 return nil, pool.Permanent(fmt.Errorf("partition %s decommissioned", workID))
 ```
 
+A `PermanentError` is a non-fencing failure, so the slot releases with `ExitAbandoned` and a
+successor resumes from its partial state. To finish a work ID for good instead, return an error
+wrapping `worklease.ErrRetire`: the slot releases with `ExitRetired`, fires `OnSlotRetired`, and
+stops. `ErrRetire` wins when an error satisfies both.
+
 **Slot observability (v0.4):** `pool.Config.Observer` accepts a `pool.Observer` — an interface
-with `OnSlotAcquired`, `OnSlotLost`, `OnSlotBackoff`, and `OnSlotDead`, each taking an event
-struct. nil installs a no-op. Unlike `leader`'s `func` callbacks, the pool uses an interface
-because it has four distinct slot events. `OnSlotAcquired` fires when a slot enters its `WorkFn`
+with `OnSlotAcquired`, `OnSlotLost`, `OnSlotBackoff`, `OnSlotDead`, and (v0.6) `OnSlotRetired`,
+each taking an event struct. nil installs a no-op. Unlike `leader`'s `func` callbacks, the pool
+uses an interface because it has several distinct slot events. `OnSlotBackoff` fires only before
+a `BackoffInterval` wait, never for `ErrLeaseHeld` or after a `nil` return. `OnSlotAcquired` fires when a slot enters its `WorkFn`
 — the same moment the slot becomes visible in `ActiveSlots` — not when the internal `Acquire`
 succeeds. `ActiveSlots()` reflects only slots currently executing `WorkFn`; slots that are
 acquiring or in backoff are excluded.
 
-**Shutdown signal (v0.4):** `Run` returns `ErrAllSlotsDead` when every slot has exited via a
-`PermanentError`, distinguishing a fully-dead pool from clean shutdown (which returns `nil` on
-context cancellation). Supervisors can act on the difference without parsing a nil return.
+**Shutdown signal (v0.4, narrowed in v0.6):** `Run` returns `ErrAllSlotsDead` only when every
+slot exited via a `PermanentError`, even if `ctx` was cancelled at the same moment. It returns
+`nil` when `ctx` was cancelled or at least one slot retired. Supervisors can act on the
+difference without parsing a nil return.
 
 **`WithWaitForLease` is prohibited** in `pool.Config.AcquireOptions`. The pool manages its
 own acquisition loop — if a slot goroutine blocks inside `Runner.Run` waiting for a lease, it
@@ -1163,52 +1356,27 @@ make ci   # lint, build, test (all three targets)
 
 ## Residual Risks
 
-**R1 — Clock skew across workers.** Lease expiry is determined by `expires_at TIMESTAMPTZ`
-in PostgreSQL, which uses the database server's clock. A worker that uses its local clock to
-decide whether to attempt `Acquire` may observe a different expiry than the database. The
-library addresses this by always letting the database determine expiry — the `WHERE expires_at < NOW()`
-clause in `Acquire` uses PostgreSQL's `NOW()`, not the client's clock. Worker-side clocks are
-never used for expiry decisions.
+**R1 — Clock skew across workers.** Lease expiry is decided by the database clock: `Acquire`, `Renew`, and `Release` compare `expires_at` with the server's `NOW()`. The renewal goroutine bounds its retries with a local monotonic window (acquire start plus TTL, advanced after each successful `Renew`), so a local clock that runs slow relative to the database can let a holder believe its lease is live slightly longer than storage does. Fencing still rejects its writes once a successor acquires. The one-millisecond past offset that `Release` writes (ADR-0012) assumes at least millisecond clock resolution.
 
-**R2 — Renewal goroutine leak on missed stopRenewal.** If the caller does not call
-`stopRenewal()` after completing work, the renewal goroutine runs until the parent context is
-cancelled. The goroutine will eventually self-terminate when the lease expires or is acquired
-by another holder (fencing). Callers should `defer stopRenewal()` immediately after
-`StartRenewal` returns to prevent this. The godoc for `StartRenewal` makes this explicit.
-`worker.Runner` handles this correctly by design.
+**R2 — Renewal goroutine leak on a missed `stopRenewal`.** If a caller of `StartRenewal` never calls `stopRenewal()`, the goroutine runs until the parent context is cancelled or fencing occurs. Call `defer stopRenewal()` immediately after `StartRenewal`. `worker.Runner` and `leader.Elect` do this themselves.
 
-**R3 — In-memory backend real-time expiry.** Resolved in v0.2. The `Clock` interface is
-injected via `memory.WithClock`. All expiry paths inside `memory.go` use `mb.clock.Now()`;
-no bare `time.Now()` remains. Tests exercise expiry deterministically without real sleep.
+**R3 — In-memory backend real-time expiry.** Resolved in v0.2: `memory.WithClock` injects a clock, and every expiry path uses it.
 
-**R4 — External side effects are not fenced.** `worklease` fences writes to the lease store.
-It does not fence external mutations — Stripe charges, email sends, S3 writes, or domain table
-updates outside the lease schema. A zombie worker can initiate external mutations between lease
-expiry and its next `Checkpoint` or `Renew` call. `renewCtx` cancellation propagates fencing
-into Go context-aware code, but does not cancel in-flight network calls already dispatched.
-Callers must make every external mutation idempotent, use an outbox pattern, or enforce
-idempotency keys at each downstream system.
+**R4 — External side effects are not fenced.** `ErrFenced` stops stale writes to the lease store only. Make every external mutation idempotent.
 
-**R5 — Checkpoint ordering and external effect sequencing.** Two failure modes exist at the
-boundary between checkpointing and external effects:
+**R5 — At-least-once between checkpoints.** A holder that crashes between two checkpoints causes its successor to redo the work since the last checkpoint. The successor sees `ExitExpired` and partial state. worklease provides a resumable progress marker, not exactly-once step execution.
 
-- Effect before checkpoint: Worker A calls an external API, then crashes before checkpointing.
-  Worker B resumes from the previous checkpoint and re-executes the step. The external effect
-  fires twice.
-- Checkpoint before effect: Worker A checkpoints a step as complete, then crashes before the
-  external effect. Worker B resumes after that checkpoint and skips the effect. The external
-  effect never fires.
+**R6 — `pool` and `WithWaitForLease`.** Blocking acquisition inside a pool slot would stop the slot from responding to cancellation. `pool.New` returns `ErrWithWaitForLeaseProhibited` if `WithWaitForLease` is in `AcquireOptions`.
 
-Neither case is a library defect — they are inherent to at-least-once execution between
-checkpoint boundaries. The correct mitigation is idempotent external effects with
-checkpoint-aligned boundaries: checkpoint after the effect completes successfully, not before.
+**R7 — `leader.Elect` retry loops have no built-in backoff.** `Release` expires the lease immediately (ADR-0012), in every exit mode. A caller that wraps `Elect` in a tight loop with a fast-failing `fn` cycles through acquire, release, and reacquire. Mitigated by `leader.Config.BackoffInterval`, which applies on every non-fencing return, including `ExitAbandoned`. `pool` waits `IdleInterval`, `RerunInterval`, or `BackoffInterval` (each defaults to 1s) on every looping path except the immediate reacquire after `ErrFenced`. Direct `Lease` and `worker.Runner` callers own their retry pacing.
 
-**R6 — pool WithWaitForLease misuse.** Passing `worklease.WithWaitForLease()` in
-`pool.Config.AcquireOptions` causes each slot goroutine to block inside `runner.Run` during
-acquisition, preventing the goroutine from responding to context cancellation until the lease
-becomes available. This breaks clean pool shutdown. `pool.New` returns
-`ErrWithWaitForLeaseProhibited` (which satisfies `errors.Is(err, ErrConfigInvalid)`) if
-`WithWaitForLease` is detected in `AcquireOptions`.
+**R8 — Postgres `Acquire` read-back race.** Resolved in v0.5: `Acquire` is a single `INSERT … ON CONFLICT … RETURNING` statement.
+
+**R9 — Renewal surrenders on the first transient error.** Resolved in v0.5 (ADR-0013): retries use exponential backoff with additive jitter, bounded by the lease window. Since v0.6, `ErrLeaseExpired` from `Renew` ends renewal immediately, because storage has already found the lease lapsed.
+
+**R10 — Checkpoint data loss when sweeping expired rows.** `Vacuum.Sweep` never deletes rows released with `ExitFinished` or `ExitAbandoned`, and deletes `ExitRetired` rows only after `Retention`. With `IncludeExpired`, it also deletes expired rows with no declared exit, which discards the partial state a successor would have recovered from. `IncludeExpired` defaults to `false`. Operators who enable it should set `Retention` longer than the time a successor needs to arrive. Rows last released before v0.6 migrate with `exit_mode = NULL`, so default `Sweep` never removes them; only `IncludeExpired` does, together with genuinely expired rows. Deletion is fencing-safe: the global sequence (ADR-0016) gives the next `Acquire` a strictly greater token, so a zombie holding the old token is fenced.
+
+**R11 — Degraded handoff accuracy during a v0.5 → v0.6 rolling upgrade.** Fencing is unaffected. v0.5 processes neither write `exit_mode` nor capture `prev_exit_mode` and `prev_holder_id`, so while both versions share the table, handoff information is conservative or stale. Do not run `Vacuum.Sweep` until no v0.5 process remains: a v0.5 holder can reacquire a row whose `exit_mode` is still `'retired'`. See `UPGRADING.md`.
 
 ---
 
@@ -1266,6 +1434,19 @@ becomes available. This breaks clean pool shutdown. `pool.New` returns
 
 - `Lease.Forget` / `Vacuum.Sweep` — caller-governed row lifecycle and retention; `Backend` gains `Forget` and `Sweep` (ADR-0016 retention component, Accepted)
 - ADR-0017 — schema migration remains caller-owned
+- Explicit lease exit modes (ADR-0018) — `Release(ctx, token, mode)` with `ExitFinished`, `ExitAbandoned`, `ExitRetired`; `ReadCheckpoint` returns a `Checkpoint` with `PrevExit` and `PrevHolderID`; `worker.Runner`, `leader.Elect`, and `pool` record each run's outcome, release on a cleanup context bounded by `CleanupTimeout`, and `pool` gains `IdleInterval`, `RerunInterval`, and slot retirement via `ErrRetire`. PostgreSQL schema migration required — see `UPGRADING.md`
+
+### v0.7 — Planned
+
+- Drop the deprecated `clean_handoff` column (#86)
+- Run the integration suite against both the memory and PostgreSQL backends (#87)
+- Bound each renewal attempt so `stopRenewal` cannot hang on a stalled `Renew` (#88)
+- Define PostgreSQL isolation-level behavior for contended `Acquire` (#89)
+- Reject TTLs below a minimum that PostgreSQL intervals can represent (#90)
+- Report a nil backend from `NewVacuum` instead of panicking in `Sweep` (#91)
+- Make `Forget` and `Vacuum.Sweep` outcomes observable (#92)
+- Expose the tracked lease window to work code (#93)
+- Reject empty and duplicate work IDs in `pool.New` (#97)
 
 ### Unscheduled (post-1.0)
 
@@ -1290,19 +1471,22 @@ the decision made, and the consequences — including the alternatives that were
 | [0007](adr/0007-observer-config-field.md) | LeaseObserver injected via Config field; nil installs no-op | Accepted |
 | [0008](adr/0008-clock-interface-memory-backend.md) | Clock interface for in-memory backend testability | Accepted |
 | [0009](adr/0009-checkpoint-subpackage-codec-interface.md) | checkpoint subpackage with Codec interface and generic helpers | Accepted |
-| [0010](adr/0010-leader-fn-signature-and-acquire-semantics.md) | leader.Elect fn receives no Token; acquire semantics are caller-controlled | Accepted |
-| [0011](adr/0011-pool-scope-and-permanent-error-interface.md) | pool scope is cross-process; permanent slot failure signals via interface (amended v0.4: Observer, Permanent, distinct sentinels, ErrAllSlotsDead) | Accepted |
-| [0012](adr/0012-release-expires-lease-immediately.md) | Release expires the lease immediately — successor acquires without TTL wait | Accepted |
-| [0013](adr/0013-renewal-goroutine-retry-policy.md) | Renewal goroutine retry policy bounded by the lease window | Accepted |
+| [0010](adr/0010-leader-fn-signature-and-acquire-semantics.md) | leader.Elect fn receives no Token; acquire semantics are caller-controlled (amended v0.6: `OnRelinquished` only after `ExitFinished`/`ExitRetired`) | Accepted |
+| [0011](adr/0011-pool-scope-and-permanent-error-interface.md) | pool scope is cross-process; permanent slot failure signals via interface (amended v0.4: Observer, Permanent, distinct sentinels, ErrAllSlotsDead; amended v0.6: slot pacing, retirement, cleanup) | Accepted |
+| [0012](adr/0012-release-expires-lease-immediately.md) | Release expires the lease immediately — successor acquires without TTL wait (amended v0.6: declared exit modes) | Accepted |
+| [0013](adr/0013-renewal-goroutine-retry-policy.md) | Renewal goroutine retry policy bounded by the lease window (amended v0.6: window tracking, terminal `ErrLeaseExpired`) | Accepted |
 | [0014](adr/0014-backend-slice-ownership-contract.md) | Backend slice ownership contract — defensive copies required | Accepted |
 | [0015](adr/0015-backend-conformance-suite.md) | Backend conformance suite — RunSuite against all backends | Accepted |
-| [0016](adr/0016-row-lifecycle-global-fencing-sequence.md) | Row lifecycle: global fencing sequence (v0.5); retention — `Forget` / `Vacuum.Sweep` (v0.6) | Accepted |
+| [0016](adr/0016-row-lifecycle-global-fencing-sequence.md) | Row lifecycle: global fencing sequence (v0.5); retention — `Forget` / `Vacuum.Sweep` (v0.6; amended v0.6: retention keys on declared exits) | Accepted |
 | [0017](adr/0017-schema-migration-caller-owned.md) | Schema migration remains caller-owned | Accepted |
+| [0018](adr/0018-explicit-lease-exit-modes.md) | Explicit lease exit modes — holders declare how they exit; successors read `PrevExit` | Accepted |
 
 ADR-0007 and ADR-0010 carry v0.4 amendments (observer event-struct redesign; leader lifecycle
 callbacks). ADR-0004 and ADR-0005 carry v0.5 amendments (renewal bounded retry; acquire ctx.Err()
 propagation). ADR-0013 shipped in v0.5; ADR-0016's global-fencing-sequence component shipped in
-v0.5, and its retention component (`Forget` / `Vacuum.Sweep`) is Accepted for v0.6.
+v0.5, and its retention component (`Forget` / `Vacuum.Sweep`) is Accepted for v0.6. ADR-0018
+(explicit exit modes) is Accepted for v0.6 and carries dated amendments to ADR-0010, ADR-0011,
+ADR-0012, ADR-0013, and ADR-0016.
 
 ---
 
