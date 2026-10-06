@@ -42,6 +42,7 @@ Expected output:
   node-B: ErrLeaseHeld — another node is leader, skipping this cycle
   node-A: aggregated metrics (cycle 2/3)
   node-A: aggregated metrics (cycle 3/3)
+  node-A: OnRelinquished — term released with ExitFinished (fencing token 1)
   node-A: leadership term complete — lease released
 
 === Scenario 2: Standby Failover with WithWaitForLease ===
@@ -63,6 +64,20 @@ Expected output:
   node-E: context cancelled (context canceled)
   node-E: leader.Elect returned ErrFenced — another node took leadership
   node-F: released leadership
+
+=== Scenario 4: Persistent Leader with BackoffInterval ===
+  Two nodes compete in retry loops. BackoffInterval=300ms throttles
+  reacquisition after Release — which expires the lease immediately.
+  node-H: leading (term 1/2)
+  node-H: aggregated metrics (cycle 1/1)
+  node-G: leading (term 1/2)
+  node-G: aggregated metrics (cycle 1/1)
+  node-H: leading (term 2/2)
+  node-H: aggregated metrics (cycle 1/1)
+  node-G: leading (term 2/2)
+  node-H: exiting after 2 term(s)
+  node-G: aggregated metrics (cycle 1/1)
+  node-G: exiting after 2 term(s)
 ```
 
 The example takes approximately 10 seconds — ~3 seconds in Scenario 2 waiting for node-C's
@@ -102,6 +117,18 @@ context (not the context given to `Elect`) into `fn`. This means `fn` sees cance
 from both fencing events and parent context cancellation. `Release` inside `Elect` uses
 the original outer context so that releasing the lease succeeds even when `renewCtx` is
 already cancelled.
+
+**`OnRelinquished` means a clean handover** — Scenario 1 sets `leader.Config.OnRelinquished`.
+It fires only after `Release` succeeds with `ExitFinished` (or `ExitRetired`, when `fn`
+returns `worklease.ErrRetire`). If `fn` returns any other error, `Elect` releases with
+`ExitAbandoned` and does not call it, so the callback never reports a failed term as a
+handover.
+
+**`BackoffInterval` does not cover `ErrLeaseHeld`** — Scenario 4 runs `Elect` in a retry
+loop. `BackoffInterval` throttles the loop after a term the node actually held, including a
+failed one, but `Elect` returns an `Acquire` error such as `ErrLeaseHeld` immediately,
+without sleeping. The loop therefore waits on `ErrLeaseHeld` itself; without that wait, the
+node that is not leading would poll `Acquire` in a tight loop.
 
 ---
 

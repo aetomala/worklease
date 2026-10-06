@@ -32,8 +32,9 @@ type Config struct {
 	RenewalOptions []worklease.RenewalOption
 
 	// BackoffInterval is the duration Elect sleeps before returning on every
-	// non-fencing path, including ExitAbandoned. Zero means no sleep. Fencing
-	// paths bypass the sleep.
+	// non-fencing path after a successful Acquire, including ExitAbandoned. Zero
+	// means no sleep. Fencing paths bypass the sleep, and an Acquire error is
+	// returned without it.
 	BackoffInterval time.Duration
 
 	// CleanupTimeout bounds Release, which runs on a context that survives
@@ -67,6 +68,12 @@ type Config struct {
 // worklease.ErrFenced, and context errors from the underlying Lease unchanged.
 // Elect does not force blocking acquisition; pass worklease.WithWaitForLease()
 // in cfg.AcquireOptions to block until leadership is available.
+// If fn panics, renewal is stopped, the lease is not released, and the panic
+// propagates; the successor sees ExitExpired after the TTL.
+// If Release fails with a non-fencing error, the exit may not be recorded;
+// after ErrLeaseExpired it is not, and the successor sees ExitExpired. Elect
+// then returns the release error wrapped as "leader: release:" if fn
+// succeeded, or fn's error otherwise.
 func Elect(ctx context.Context, lease worklease.Lease, workID string, cfg Config, fn func(ctx context.Context) error) error {
 	// ===== STEP 1: Nil check =====
 	if lease == nil {

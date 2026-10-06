@@ -2,22 +2,7 @@
 
 ## v0.5.x → v0.6.0
 
-### Breaking Changes
-
-- **`Lease` interface gains `Forget`.** Any custom implementation of `worklease.Lease` (rare — the library's own `New()` is the only implementation most callers need) must add:
-
-  ```go
-  Forget(ctx context.Context, token Token) error
-  ```
-
-- **`backend.Backend` interface gains `Forget` and `Sweep`.** Any custom `backend.Backend` implementation (e.g. a third-party Redis or etcd backend) must add:
-
-  ```go
-  Forget(ctx context.Context, record LeaseRecord) error
-  Sweep(ctx context.Context, opts SweepOptions) (int64, error)
-  ```
-
-  See "Migrate the PostgreSQL schema" below.
+v0.6 replaces the `clean_handoff` flag with declared exit modes (ADR-0018). It needs a schema migration and code changes in every caller of `Release`, `ReadCheckpoint`, and the `worker`/`pool` work functions.
 
 ### 1. Migrate the PostgreSQL schema before deploying
 
@@ -75,15 +60,93 @@ Fencing is unaffected while v0.5 and v0.6 processes share the table: both draw t
 
 Finish the rollout promptly. To keep exact handoff information throughout, drain every v0.5 process before starting v0.6.
 
-### New in v0.6.0
+### 3. Update `Release` calls
 
-- `Lease.Forget(ctx, token) error` — permanently deletes a lease row. Returns `ErrFenced` if the token no longer matches the stored lease or if no row exists for the work ID. Unlike `Release`, the row is not left behind for a future `ReadCheckpoint`.
-- `worklease.Vacuum` and `worklease.SweepOptions` — age-based bulk cleanup. `NewVacuum(b backend.Backend) *Vacuum`, then `v.Sweep(ctx, SweepOptions{Retention: ..., IncludeCrashed: ...})` deletes rows older than `Retention` that are not currently held. `Retention` must exceed the maximum TTL configured across all `Lease` clients sharing the backend — `Sweep` returns `ErrRetentionRequired` if `Retention <= 0`.
-- `ErrRetentionRequired` — new sentinel, returned by `Vacuum.Sweep`.
-- ADR-0016's retention component (`Forget` / `Vacuum.Sweep`) is now Accepted.
-- ADR-0017 — schema migration remains caller-owned; ships as of this release.
+`Release` takes a required exit mode. Choose the one that tells the next holder what happened:
 
-Neither `Forget` nor `Sweep` invoke `LeaseObserver` — the observer's method set is unchanged in v0.6.0.
+| Mode | Use when | The next holder should |
+|---|---|---|
+| `worklease.ExitFinished` | The run completed; the checkpoint is final state for this run, and the work ID will be acquired again (a shard, a recurring job) | Continue from the final state |
+| `worklease.ExitAbandoned` | You stopped deliberately without completing: an error, a cancellation, a shutdown | Validate the partial state, then resume |
+| `worklease.ExitRetired` | The work ID is done for good | Not redo the work |
+
+```go
+// Before
+defer lease.Release(ctx, token)
+
+// After: choose the mode from the outcome.
+mode := worklease.ExitFinished
+if workErr != nil {
+    mode = worklease.ExitAbandoned
+}
+err := lease.Release(cleanupCtx, token, mode)
+```
+
+Rows released with `ExitFinished` are kept as resume points and are never swept. Release one-shot work with `ExitRetired`, or the table grows without bound.
+
+`Release` now returns `ErrLeaseExpired` once the lease has expired, even when no successor has acquired it, and records nothing; the next holder sees `ExitExpired`. Treat it as "my exit was not recorded". A second `Release` with the same token also returns `ErrLeaseExpired`; the first declared mode stands. After `Release`, `Checkpoint` returns `ErrLeaseExpired` without writing, so stop any background checkpoint loop when it sees that error.
+
+### 4. Update `ReadCheckpoint` calls
+
+```go
+// Before
+state, cleanHandoff, err := lease.ReadCheckpoint(ctx, token)
+
+// After
+prior, err := lease.ReadCheckpoint(ctx, token)
+state := prior.State
+switch prior.PrevExit {
+case worklease.ExitNone:
+    // No previous holder: start fresh.
+case worklease.ExitFinished:
+    // Continue from the previous run's final state.
+case worklease.ExitRetired:
+    // Done for good: do not redo the work.
+default:
+    // ExitAbandoned, ExitExpired, or a mode this code does not know: validate partial state.
+}
+```
+
+Treat any mode your code does not recognize as `ExitExpired`; later releases may add modes. `ReadCheckpoint` now returns `ErrFenced` on PostgreSQL when the row does not exist (for example after `Forget` or `Sweep`), matching the memory backend.
+
+### 5. Update work functions
+
+```go
+// worker: before
+WorkFn: func(ctx context.Context, token worklease.Token, prior []byte, cleanHandoff bool) ([]byte, error)
+// worker: after
+WorkFn: func(ctx context.Context, token worklease.Token, prior worklease.Checkpoint) ([]byte, error)
+
+// pool: before
+func(ctx context.Context, workID string, token worklease.Token, prior []byte, cleanHandoff bool) ([]byte, error)
+// pool: after
+func(ctx context.Context, workID string, token worklease.Token, prior worklease.Checkpoint) ([]byte, error)
+```
+
+`worker.Runner`, `leader.Elect`, and `pool` choose the exit mode from the work function's result: `nil` → `ExitFinished`; an error wrapping `worklease.ErrRetire` → `ExitRetired` and success; any other error → `ExitAbandoned`. They do not release when fenced, when the lease window ran out, or, for `worker.Runner` and `pool`, when `ReadCheckpoint` failed. A `pool.PermanentError` releases with `ExitAbandoned`. The final `Checkpoint` and `Release` now run on a context that survives cancellation of yours, bounded by the new `CleanupTimeout` field (default 5s).
+
+### 6. Other changes
+
+- `leader.Config.OnRelinquished` fires only after a successful release with `ExitFinished` or `ExitRetired`. When `fn` succeeded, `Elect` wraps a non-fenced release error as `leader: release: …`; when `fn` failed, it returns `fn`'s error.
+- `pool.Config.BackoffInterval` zero now means 1s, not immediate retry; set a small positive value if you relied on immediate retry. A slot whose work ID a peer holds waits the new `IdleInterval` (default 1s, up to 20% jitter) and no longer triggers `OnSlotBackoff`. A slot whose work function returned `nil` waits the new `RerunInterval` (default 1s, up to 20% jitter) before running again; set it lower for back-to-back batches, or loop inside the work function. Custom `pool.Observer` implementations must add `OnSlotRetired`. `pool.Run` returns `nil` when at least one slot retired.
+- `ErrLeaseExpired` from `Renew` ends renewal immediately. `context.Cause(renewCtx)` matches both `ErrLeaseWindowExhausted` and `ErrLeaseExpired`.
+- Observers: `ReleaseEvent.Mode` is new; `ReadCheckpointEvent.CleanHandoff` is replaced by `PrevExit` and `PrevHolderID`.
+- Custom `backend.Backend` implementations: change `Release` and `ReadCheckpoint` as above, capture the previous exit and holder in `Acquire` atomically with token issuance, and pass `conformance.RunSuite`.
+
+### 7. New in v0.6.0
+
+- `Lease.Forget(ctx, token) error` — permanently deletes a lease row. Returns `ErrFenced` if the token no longer matches the stored lease or if no row exists for the work ID.
+- `worklease.Vacuum` and `worklease.SweepOptions` — `NewVacuum(b).Sweep(ctx, SweepOptions{Retention: …, IncludeExpired: …})` deletes rows released with `ExitRetired`, and with `IncludeExpired` also rows whose lease expired with no declared exit, once they are older than `Retention`. Held rows are never deleted. `Sweep` returns `ErrRetentionRequired` if `Retention <= 0`.
+- The `Lease` and `backend.Backend` interfaces gain `Forget` (and `Backend` gains `Sweep`); custom implementations must add them:
+
+  ```go
+  Forget(ctx context.Context, token Token) error              // Lease
+  Forget(ctx context.Context, record LeaseRecord) error       // Backend
+  Sweep(ctx context.Context, opts SweepOptions) (int64, error) // Backend
+  ```
+
+- Neither `Forget` nor `Sweep` invokes `LeaseObserver`.
+- ADR-0016's retention component and ADR-0017 (schema migration remains caller-owned) are Accepted; ADR-0018 (explicit exit modes) is Accepted.
 
 ## v0.4.x → v0.5.0
 

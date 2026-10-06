@@ -63,13 +63,24 @@ func runStep(
 	return lease.Checkpoint(ctx, token, data)
 }
 
+// logAcquired reports the fencing token and how the previous holder of the work ID exited.
+func logAcquired(token worklease.Token, cp worklease.Checkpoint) {
+	prev := cp.PrevHolderID
+	if prev == "" {
+		prev = "none"
+	}
+	log.Printf("  %s: acquired lease (fencing token %d) — PrevExit=%s, PrevHolderID=%s",
+		token.HolderID(), token.FencingToken(), cp.PrevExit, prev)
+}
+
 func scenario1HappyPath(ctx context.Context, b backend.Backend) {
 	log.Println("=== Scenario 1: Happy Path ===")
 
 	lease, _ := worklease.New(b, worklease.Config{TTL: 30 * time.Second, HolderID: "worker-A"})
 	r, _ := worker.NewRunner(worker.RunnerConfig{
 		Lease: lease,
-		WorkFn: func(renewCtx context.Context, token worklease.Token, _ worklease.Checkpoint) ([]byte, error) {
+		WorkFn: func(renewCtx context.Context, token worklease.Token, cp worklease.Checkpoint) ([]byte, error) {
+			logAcquired(token, cp)
 			progress := CancellationProgress{}
 
 			if err := runStep(renewCtx, lease, token, "cancel billing", func() { cancelBilling("tenant-alpha") }, &progress.BillingCancelled, &progress); err != nil {
@@ -92,7 +103,7 @@ func scenario1HappyPath(ctx context.Context, b backend.Backend) {
 		log.Printf("worker-A: run failed: %v", err)
 		return
 	}
-	log.Println("  worker-A: lease released cleanly (cleanHandoff=true)")
+	log.Println("  worker-A: work function returned nil — released with ExitFinished")
 	log.Println()
 }
 
@@ -122,14 +133,16 @@ func scenario2CrashRecovery(ctx context.Context, b backend.Backend) {
 	r, _ := worker.NewRunner(worker.RunnerConfig{
 		Lease: leaseC,
 		WorkFn: func(renewCtx context.Context, token worklease.Token, cp worklease.Checkpoint) ([]byte, error) {
-			prior, cleanHandoff := cp.State, cp.PrevExit == worklease.ExitFinished
-			progress, err := checkpoint.Decode[CancellationProgress](checkpoint.JSON(), prior)
+			logAcquired(token, cp)
+			progress, err := checkpoint.Decode[CancellationProgress](checkpoint.JSON(), cp.State)
 			if err != nil {
 				return nil, err
 			}
-			log.Printf("  worker-C: acquired lease (fencing token %d)", token.FencingToken())
-			if !cleanHandoff {
-				log.Println("  worker-C: cleanHandoff=false — previous worker crashed, validating partial state")
+			switch cp.PrevExit {
+			case worklease.ExitExpired:
+				log.Println("  worker-C: previous worker's lease expired with no declared exit — validating partial state")
+			case worklease.ExitAbandoned:
+				log.Println("  worker-C: previous worker abandoned the run — validating partial state")
 			}
 
 			if progress.BillingCancelled {
@@ -156,7 +169,7 @@ func scenario2CrashRecovery(ctx context.Context, b backend.Backend) {
 		log.Printf("  worker-C: run failed: %v", err)
 		return
 	}
-	log.Println("  worker-C: lease released cleanly (cleanHandoff=true)")
+	log.Println("  worker-C: work function returned nil — released with ExitFinished")
 	log.Println()
 }
 
@@ -182,8 +195,8 @@ func scenario3ZombieFencing(ctx context.Context, b backend.Backend) {
 	leaseE, _ := worklease.New(b, worklease.Config{TTL: 30 * time.Second, HolderID: "worker-E"})
 	rE, _ := worker.NewRunner(worker.RunnerConfig{
 		Lease: leaseE,
-		WorkFn: func(renewCtx context.Context, token worklease.Token, _ worklease.Checkpoint) ([]byte, error) {
-			log.Printf("  worker-E: acquired lease (fencing token %d)", token.FencingToken())
+		WorkFn: func(renewCtx context.Context, token worklease.Token, cp worklease.Checkpoint) ([]byte, error) {
+			logAcquired(token, cp)
 
 			// Worker D wakes up and tries to checkpoint — rejected.
 			dProgress := CancellationProgress{BillingCancelled: true}
@@ -215,7 +228,7 @@ func scenario3ZombieFencing(ctx context.Context, b backend.Backend) {
 		log.Printf("  worker-E: run failed: %v", err)
 		return
 	}
-	log.Println("  worker-E: cancellation complete")
+	log.Println("  worker-E: cancellation complete — released with ExitFinished")
 	log.Println()
 }
 

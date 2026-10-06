@@ -18,7 +18,13 @@ var ErrRetentionRequired = errors.New(msgRetentionRequired)
 // avoid an import cycle (package backend cannot import package worklease).
 type SweepOptions = backend.SweepOptions
 
-// Vacuum performs age-based bulk cleanup of terminal lease rows.
+// Vacuum performs age-based bulk cleanup of lease rows. Sweep deletes rows
+// released with ExitRetired once they are older than SweepOptions.Retention
+// and, with SweepOptions.IncludeExpired, rows whose lease expired with no
+// declared exit. Rows released with ExitFinished or ExitAbandoned, and rows
+// currently held, are never deleted. A deleted row's checkpoint is gone: the
+// next holder of that work ID sees ExitNone and empty state, and a holder
+// whose row was deleted gets ErrFenced.
 type Vacuum struct {
 	b backend.Backend
 }
