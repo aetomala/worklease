@@ -65,7 +65,7 @@ var _ = Describe("leader", func() {
 
 				mockLease.EXPECT().Acquire(gomock.Any(), "work-1").Return(worklease.Token{}, nil)
 				mockLease.EXPECT().StartRenewal(gomock.Any(), worklease.Token{}).Return(renewCtx, stopFn)
-				mockLease.EXPECT().Release(gomock.Any(), worklease.Token{}).Return(nil)
+				mockLease.EXPECT().Release(gomock.Any(), worklease.Token{}, worklease.ExitFinished).Return(nil)
 
 				fnCtx := context.Background()
 				err := leader.Elect(ctx, mockLease, "work-1", leader.Config{}, func(c context.Context) error {
@@ -104,7 +104,7 @@ var _ = Describe("leader", func() {
 
 				mockLease.EXPECT().Acquire(gomock.Any(), "work-1").Return(worklease.Token{}, nil)
 				mockLease.EXPECT().StartRenewal(gomock.Any(), worklease.Token{}).Return(renewCtx, stopFn)
-				mockLease.EXPECT().Release(gomock.Any(), worklease.Token{}).Return(nil)
+				mockLease.EXPECT().Release(gomock.Any(), worklease.Token{}, worklease.ExitFinished).Return(nil)
 
 				err := leader.Elect(ctx, mockLease, "work-1", leader.Config{}, func(ctx context.Context) error {
 					return fnErr
@@ -121,7 +121,7 @@ var _ = Describe("leader", func() {
 
 				mockLease.EXPECT().Acquire(gomock.Any(), "work-1").Return(worklease.Token{}, nil)
 				mockLease.EXPECT().StartRenewal(gomock.Any(), worklease.Token{}).Return(renewCtx, stopFn)
-				mockLease.EXPECT().Release(gomock.Any(), worklease.Token{}).Return(worklease.ErrFenced)
+				mockLease.EXPECT().Release(gomock.Any(), worklease.Token{}, worklease.ExitFinished).Return(worklease.ErrFenced)
 
 				err := leader.Elect(ctx, mockLease, "work-1", leader.Config{}, func(ctx context.Context) error {
 					return nil
@@ -138,7 +138,7 @@ var _ = Describe("leader", func() {
 
 				mockLease.EXPECT().Acquire(gomock.Any(), "work-1", gomock.Any()).Return(worklease.Token{}, nil)
 				mockLease.EXPECT().StartRenewal(gomock.Any(), worklease.Token{}).Return(renewCtx, stopFn)
-				mockLease.EXPECT().Release(gomock.Any(), worklease.Token{}).Return(nil)
+				mockLease.EXPECT().Release(gomock.Any(), worklease.Token{}, worklease.ExitFinished).Return(nil)
 
 				cfg := leader.Config{
 					AcquireOptions: []worklease.AcquireOption{worklease.WithWaitForLease()},
@@ -157,7 +157,7 @@ var _ = Describe("leader", func() {
 
 				mockLease.EXPECT().Acquire(gomock.Any(), "work-1").Return(worklease.Token{}, nil)
 				mockLease.EXPECT().StartRenewal(gomock.Any(), worklease.Token{}).Return(innerCtx, stopFn)
-				mockLease.EXPECT().Release(gomock.Any(), worklease.Token{}).Return(nil)
+				mockLease.EXPECT().Release(gomock.Any(), worklease.Token{}, worklease.ExitFinished).Return(nil)
 
 				fnErr := leader.Elect(ctx, mockLease, "work-1", leader.Config{}, func(renewCtx context.Context) error {
 					return context.Canceled
@@ -174,7 +174,7 @@ var _ = Describe("leader", func() {
 
 				mockLease.EXPECT().Acquire(gomock.Any(), "work-1").Return(worklease.Token{}, nil)
 				mockLease.EXPECT().StartRenewal(gomock.Any(), worklease.Token{}).Return(renewCtx, stopFn)
-				mockLease.EXPECT().Release(gomock.Any(), worklease.Token{}).Return(nil)
+				mockLease.EXPECT().Release(gomock.Any(), worklease.Token{}, worklease.ExitFinished).Return(nil)
 
 				cfg := leader.Config{BackoffInterval: 50 * time.Millisecond}
 				start := time.Now()
@@ -213,7 +213,7 @@ var _ = Describe("leader", func() {
 
 				mockLease.EXPECT().Acquire(gomock.Any(), "work-1").Return(worklease.Token{}, nil)
 				mockLease.EXPECT().StartRenewal(gomock.Any(), worklease.Token{}).Return(renewCtx, stopFn)
-				mockLease.EXPECT().Release(gomock.Any(), worklease.Token{}).Return(worklease.ErrFenced)
+				mockLease.EXPECT().Release(gomock.Any(), worklease.Token{}, worklease.ExitFinished).Return(worklease.ErrFenced)
 
 				cfg := leader.Config{BackoffInterval: 5 * time.Second}
 				start := time.Now()
@@ -234,7 +234,7 @@ var _ = Describe("leader", func() {
 				defer renewCancel()
 				mockLease.EXPECT().Acquire(gomock.Any(), "work-1").Return(worklease.Token{}, nil)
 				mockLease.EXPECT().StartRenewal(gomock.Any(), worklease.Token{}).Return(renewCtx, stopFn)
-				mockLease.EXPECT().Release(gomock.Any(), worklease.Token{}).Return(nil)
+				mockLease.EXPECT().Release(gomock.Any(), worklease.Token{}, worklease.ExitFinished).Return(nil)
 
 				var order []string
 				cfg := leader.Config{OnElected: func(_ context.Context, _ worklease.Token) { order = append(order, "elected") }}
@@ -258,7 +258,7 @@ var _ = Describe("leader", func() {
 				defer renewCancel()
 				mockLease.EXPECT().Acquire(gomock.Any(), "work-1").Return(worklease.Token{}, nil)
 				mockLease.EXPECT().StartRenewal(gomock.Any(), worklease.Token{}).Return(renewCtx, stopFn)
-				mockLease.EXPECT().Release(gomock.Any(), worklease.Token{}).Return(nil)
+				mockLease.EXPECT().Release(gomock.Any(), worklease.Token{}, worklease.ExitFinished).Return(nil)
 				Expect(func() {
 					_ = leader.Elect(ctx, mockLease, "work-1", leader.Config{}, func(context.Context) error { return nil })
 				}).NotTo(Panic())
@@ -271,7 +271,7 @@ var _ = Describe("leader", func() {
 				renewCtx, renewCancel := context.WithCancel(ctx)
 				mockLease.EXPECT().Acquire(gomock.Any(), "work-1").Return(worklease.Token{}, nil)
 				mockLease.EXPECT().StartRenewal(gomock.Any(), worklease.Token{}).Return(renewCtx, stopFn)
-				mockLease.EXPECT().Release(gomock.Any(), worklease.Token{}).Return(nil)
+				mockLease.EXPECT().Release(gomock.Any(), worklease.Token{}, worklease.ExitFinished).Return(nil)
 
 				lost := false
 				cfg := leader.Config{OnLost: func(_ context.Context, _ worklease.Token) { lost = true }}
@@ -288,7 +288,7 @@ var _ = Describe("leader", func() {
 				defer renewCancel()
 				mockLease.EXPECT().Acquire(gomock.Any(), "work-1").Return(worklease.Token{}, nil)
 				mockLease.EXPECT().StartRenewal(gomock.Any(), worklease.Token{}).Return(renewCtx, func() {})
-				mockLease.EXPECT().Release(gomock.Any(), worklease.Token{}).Return(nil)
+				mockLease.EXPECT().Release(gomock.Any(), worklease.Token{}, worklease.ExitFinished).Return(nil)
 
 				lost := false
 				cfg := leader.Config{OnLost: func(_ context.Context, _ worklease.Token) { lost = true }}
@@ -305,7 +305,7 @@ var _ = Describe("leader", func() {
 				defer renewCancel()
 				mockLease.EXPECT().Acquire(gomock.Any(), "work-1").Return(worklease.Token{}, nil)
 				mockLease.EXPECT().StartRenewal(gomock.Any(), worklease.Token{}).Return(renewCtx, stopFn)
-				mockLease.EXPECT().Release(gomock.Any(), worklease.Token{}).Return(nil)
+				mockLease.EXPECT().Release(gomock.Any(), worklease.Token{}, worklease.ExitFinished).Return(nil)
 
 				lost := false
 				cfg := leader.Config{OnLost: func(_ context.Context, _ worklease.Token) { lost = true }}
@@ -318,7 +318,7 @@ var _ = Describe("leader", func() {
 				renewCtx, renewCancel := context.WithCancel(ctx)
 				mockLease.EXPECT().Acquire(gomock.Any(), "work-1").Return(worklease.Token{}, nil)
 				mockLease.EXPECT().StartRenewal(gomock.Any(), worklease.Token{}).Return(renewCtx, stopFn)
-				mockLease.EXPECT().Release(gomock.Any(), worklease.Token{}).Return(nil)
+				mockLease.EXPECT().Release(gomock.Any(), worklease.Token{}, worklease.ExitFinished).Return(nil)
 				Expect(func() {
 					_ = leader.Elect(ctx, mockLease, "work-1", leader.Config{}, func(context.Context) error {
 						renewCancel()
@@ -335,7 +335,7 @@ var _ = Describe("leader", func() {
 				defer renewCancel()
 				mockLease.EXPECT().Acquire(gomock.Any(), "work-1").Return(worklease.Token{}, nil)
 				mockLease.EXPECT().StartRenewal(gomock.Any(), worklease.Token{}).Return(renewCtx, stopFn)
-				mockLease.EXPECT().Release(gomock.Any(), worklease.Token{}).Return(nil)
+				mockLease.EXPECT().Release(gomock.Any(), worklease.Token{}, worklease.ExitFinished).Return(nil)
 
 				relinquished := false
 				cfg := leader.Config{OnRelinquished: func(_ context.Context, _ worklease.Token) { relinquished = true }}
@@ -349,7 +349,7 @@ var _ = Describe("leader", func() {
 				defer renewCancel()
 				mockLease.EXPECT().Acquire(gomock.Any(), "work-1").Return(worklease.Token{}, nil)
 				mockLease.EXPECT().StartRenewal(gomock.Any(), worklease.Token{}).Return(renewCtx, stopFn)
-				mockLease.EXPECT().Release(gomock.Any(), worklease.Token{}).Return(worklease.ErrFenced)
+				mockLease.EXPECT().Release(gomock.Any(), worklease.Token{}, worklease.ExitFinished).Return(worklease.ErrFenced)
 
 				relinquished := false
 				cfg := leader.Config{OnRelinquished: func(_ context.Context, _ worklease.Token) { relinquished = true }}
@@ -376,7 +376,7 @@ var _ = Describe("leader", func() {
 				defer renewCancel()
 				mockLease.EXPECT().Acquire(gomock.Any(), "work-1").Return(worklease.Token{}, nil)
 				mockLease.EXPECT().StartRenewal(gomock.Any(), worklease.Token{}).Return(renewCtx, stopFn)
-				mockLease.EXPECT().Release(gomock.Any(), worklease.Token{}).Return(nil)
+				mockLease.EXPECT().Release(gomock.Any(), worklease.Token{}, worklease.ExitFinished).Return(nil)
 				Expect(func() {
 					_ = leader.Elect(ctx, mockLease, "work-1", leader.Config{}, func(context.Context) error { return nil })
 				}).NotTo(Panic())

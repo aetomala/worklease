@@ -43,7 +43,7 @@ func scenario1WaitDeadline(ctx context.Context) {
 		log.Printf("  worker-B: unexpected error: %v", err)
 	}
 
-	_ = leaseA.Release(ctx, tokenA)
+	_ = leaseA.Release(ctx, tokenA, worklease.ExitFinished)
 	log.Println()
 }
 

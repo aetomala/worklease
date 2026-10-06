@@ -2,6 +2,7 @@ package postgres_test
 
 import (
 	"context"
+	"database/sql"
 	"errors"
 	"time"
 
@@ -84,10 +85,11 @@ var _ = Describe("Backend (postgres)", func() {
 			Expect(rec2.FencingToken).To(BeNumerically(">", rec1.FencingToken))
 
 			// Verify previous checkpoint is preserved across the reacquire.
-			checkpoint, cleanHandoff, err := b.ReadCheckpoint(ctx, rec2)
+			cp, err := b.ReadCheckpoint(ctx, rec2)
 			Expect(err).NotTo(HaveOccurred())
-			Expect(checkpoint).To(Equal([]byte("prior-state")))
-			Expect(cleanHandoff).To(BeFalse())
+			Expect(cp.State).To(Equal([]byte("prior-state")))
+			Expect(cp.PrevExit).To(Equal(backend.ExitExpired))
+			Expect(cp.PrevHolderID).To(Equal("old-holder"))
 		})
 	})
 
@@ -100,10 +102,10 @@ var _ = Describe("Backend (postgres)", func() {
 			Expect(err).NotTo(HaveOccurred())
 
 			// Verify state was written
-			checkpoint, cleanHandoff, err := b.ReadCheckpoint(ctx, record)
+			cp, err := b.ReadCheckpoint(ctx, record)
 			Expect(err).NotTo(HaveOccurred())
-			Expect(checkpoint).To(Equal([]byte("new-state")))
-			Expect(cleanHandoff).To(BeFalse())
+			Expect(cp.State).To(Equal([]byte("new-state")))
+			Expect(cp.PrevExit).To(Equal(backend.ExitNone))
 		})
 
 		It("fencing token stale → returns ErrFenced", func() {
@@ -157,23 +159,42 @@ var _ = Describe("Backend (postgres)", func() {
 	})
 
 	Describe("Release", func() {
-		It("fencing token matches → sets clean_handoff=true, expires lease immediately, returns nil", func() {
+		It("Release sets exit_mode to the mode text and expires_at below NOW()", func() {
 			record, err := b.Acquire(ctx, "w8", "holder", 30*time.Second)
 			Expect(err).NotTo(HaveOccurred())
 
-			err = b.Release(ctx, record)
+			err = b.Release(ctx, record, backend.ExitAbandoned)
 			Expect(err).NotTo(HaveOccurred())
 
-			// Verify clean_handoff was set and expires_at is in the past. The expiry
-			// comparison uses the database clock — comparing against the local clock
-			// fails whenever the database runs more than 1ms ahead of the test host.
-			var cleanHandoff, expired bool
+			// The expiry comparison uses the database clock — comparing against the
+			// local clock fails whenever the database runs more than 1ms ahead.
+			var exitMode string
+			var expired bool
 			err = db.QueryRowContext(ctx,
-				"SELECT clean_handoff, expires_at < NOW() FROM worklease_leases WHERE work_id = $1", "w8",
-			).Scan(&cleanHandoff, &expired)
+				"SELECT exit_mode, expires_at < NOW() FROM worklease_leases WHERE work_id = $1", "w8",
+			).Scan(&exitMode, &expired)
 			Expect(err).NotTo(HaveOccurred())
-			Expect(cleanHandoff).To(BeTrue())
+			Expect(exitMode).To(Equal("abandoned"))
 			Expect(expired).To(BeTrue())
+		})
+
+		It("Checkpoint after Release returns ErrLeaseExpired and leaves exit_mode and expires_at unchanged", func() {
+			record, err := b.Acquire(ctx, "w8b", "holder", 30*time.Second)
+			Expect(err).NotTo(HaveOccurred())
+			Expect(b.Release(ctx, record, backend.ExitFinished)).To(Succeed())
+
+			Expect(b.Checkpoint(ctx, record, []byte("late"), 30*time.Second)).To(MatchError(worklease.ErrLeaseExpired))
+
+			var exitMode string
+			var expired bool
+			var checkpoint []byte
+			err = db.QueryRowContext(ctx,
+				"SELECT exit_mode, expires_at < NOW(), checkpoint FROM worklease_leases WHERE work_id = $1", "w8b",
+			).Scan(&exitMode, &expired, &checkpoint)
+			Expect(err).NotTo(HaveOccurred())
+			Expect(exitMode).To(Equal("finished"))
+			Expect(expired).To(BeTrue())
+			Expect(checkpoint).To(BeNil())
 		})
 
 		It("fencing token stale → returns ErrFenced", func() {
@@ -185,7 +206,7 @@ var _ = Describe("Backend (postgres)", func() {
 			Expect(err).NotTo(HaveOccurred())
 
 			// Now the original record's token is stale
-			err = b.Release(ctx, record)
+			err = b.Release(ctx, record, backend.ExitFinished)
 			Expect(errors.Is(err, worklease.ErrFenced)).To(BeTrue())
 		})
 	})
@@ -196,10 +217,10 @@ var _ = Describe("Backend (postgres)", func() {
 			record, err := b.Acquire(ctx, "w10", "holder", 30*time.Second)
 			Expect(err).NotTo(HaveOccurred())
 
-			checkpoint, cleanHandoff, err := b.ReadCheckpoint(ctx, record)
+			cp, err := b.ReadCheckpoint(ctx, record)
 			Expect(err).NotTo(HaveOccurred())
-			Expect(checkpoint).To(BeNil())
-			Expect(cleanHandoff).To(BeFalse())
+			Expect(cp.State).To(BeNil())
+			Expect(cp.PrevExit).To(Equal(backend.ExitNone))
 		})
 
 		It("fencing token stale → returns ErrFenced", func() {
@@ -211,26 +232,80 @@ var _ = Describe("Backend (postgres)", func() {
 				"UPDATE worklease_leases SET fencing_token = fencing_token + 1 WHERE work_id = $1", "w12")
 			Expect(err).NotTo(HaveOccurred())
 
-			_, _, err = b.ReadCheckpoint(ctx, record)
+			_, err = b.ReadCheckpoint(ctx, record)
 			Expect(errors.Is(err, worklease.ErrFenced)).To(BeTrue())
 		})
 
-		It("checkpoint exists → returns correct bytes and cleanHandoff value", func() {
-			// Acquire a lease and checkpoint it
+		It("ReadCheckpoint returns ErrFenced when no row exists", func() {
+			_, err := b.ReadCheckpoint(ctx, backend.LeaseRecord{WorkID: "w-missing", HolderID: "holder", FencingToken: 1})
+			Expect(err).To(MatchError(worklease.ErrFenced))
+		})
+
+		It("ReadCheckpoint returns the checkpoint bytes and PrevExit after release and reacquire", func() {
 			record, err := b.Acquire(ctx, "w11", "holder", 30*time.Second)
 			Expect(err).NotTo(HaveOccurred())
+			Expect(b.Checkpoint(ctx, record, []byte("saved-state"), 30*time.Second)).To(Succeed())
+			Expect(b.Release(ctx, record, backend.ExitFinished)).To(Succeed())
 
-			err = b.Checkpoint(ctx, record, []byte("saved-state"), 30*time.Second)
+			rec2, err := b.Acquire(ctx, "w11", "holder-2", 30*time.Second)
+			Expect(err).NotTo(HaveOccurred())
+			cp, err := b.ReadCheckpoint(ctx, rec2)
+			Expect(err).NotTo(HaveOccurred())
+			Expect(cp.State).To(Equal([]byte("saved-state")))
+			Expect(cp.PrevExit).To(Equal(backend.ExitFinished))
+			Expect(cp.PrevHolderID).To(Equal("holder"))
+		})
+	})
+
+	Describe("exit columns", func() {
+		It("Acquire on a released row sets prev_exit_mode and prev_holder_id and clears exit_mode", func() {
+			record, err := b.Acquire(ctx, "x1", "holder-a", 30*time.Second)
+			Expect(err).NotTo(HaveOccurred())
+			Expect(b.Release(ctx, record, backend.ExitRetired)).To(Succeed())
+			_, err = b.Acquire(ctx, "x1", "holder-b", 30*time.Second)
 			Expect(err).NotTo(HaveOccurred())
 
-			// Release to set clean_handoff=true
-			err = b.Release(ctx, record)
+			var exitMode sql.NullString
+			var prevExit string
+			var prevHolder sql.NullString
+			err = db.QueryRowContext(ctx,
+				"SELECT exit_mode, prev_exit_mode, prev_holder_id FROM worklease_leases WHERE work_id = $1", "x1",
+			).Scan(&exitMode, &prevExit, &prevHolder)
+			Expect(err).NotTo(HaveOccurred())
+			Expect(exitMode.Valid).To(BeFalse())
+			Expect(prevExit).To(Equal("retired"))
+			Expect(prevHolder.String).To(Equal("holder-a"))
+		})
+
+		It("Acquire never writes clean_handoff: the column keeps its value across Acquire, Checkpoint, and Release", func() {
+			record, err := b.Acquire(ctx, "x2", "holder-a", 30*time.Second)
+			Expect(err).NotTo(HaveOccurred())
+			_, err = db.ExecContext(ctx, "UPDATE worklease_leases SET clean_handoff = TRUE WHERE work_id = $1", "x2")
 			Expect(err).NotTo(HaveOccurred())
 
-			checkpoint, cleanHandoff, err := b.ReadCheckpoint(ctx, record)
+			Expect(b.Checkpoint(ctx, record, []byte("s"), 30*time.Second)).To(Succeed())
+			Expect(b.Release(ctx, record, backend.ExitAbandoned)).To(Succeed())
+			_, err = b.Acquire(ctx, "x2", "holder-b", 30*time.Second)
 			Expect(err).NotTo(HaveOccurred())
-			Expect(checkpoint).To(Equal([]byte("saved-state")))
+
+			var cleanHandoff bool
+			err = db.QueryRowContext(ctx, "SELECT clean_handoff FROM worklease_leases WHERE work_id = $1", "x2").Scan(&cleanHandoff)
+			Expect(err).NotTo(HaveOccurred())
 			Expect(cleanHandoff).To(BeTrue())
+		})
+
+		It("schema rejects exit_mode = 'bogus' with a check violation", func() {
+			_, err := b.Acquire(ctx, "x3", "holder", 30*time.Second)
+			Expect(err).NotTo(HaveOccurred())
+			_, err = db.ExecContext(ctx, "UPDATE worklease_leases SET exit_mode = 'bogus' WHERE work_id = $1", "x3")
+			Expect(err).To(MatchError(ContainSubstring("worklease_leases_exit_mode_check")))
+		})
+
+		It("schema rejects prev_exit_mode = 'bogus' with a check violation", func() {
+			_, err := b.Acquire(ctx, "x4", "holder", 30*time.Second)
+			Expect(err).NotTo(HaveOccurred())
+			_, err = db.ExecContext(ctx, "UPDATE worklease_leases SET prev_exit_mode = 'bogus' WHERE work_id = $1", "x4")
+			Expect(err).To(MatchError(ContainSubstring("worklease_leases_prev_exit_mode_check")))
 		})
 	})
 })

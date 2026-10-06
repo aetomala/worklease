@@ -2,6 +2,7 @@ package postgres_test
 
 import (
 	"database/sql"
+	_ "embed"
 	"os"
 	"testing"
 
@@ -11,6 +12,12 @@ import (
 )
 
 var db *sql.DB
+
+// schemaSQL is the canonical schema, applied verbatim so the suite cannot drift
+// from backend/postgres/schema.sql (ADR-0017).
+//
+//go:embed schema.sql
+var schemaSQL string
 
 func TestPostgres(t *testing.T) {
 	RegisterFailHandler(Fail)
@@ -32,21 +39,9 @@ var _ = BeforeSuite(func() {
 	Expect(err).NotTo(HaveOccurred())
 	Expect(db.Ping()).To(Succeed())
 
-	_, err = db.Exec(`
-		DROP TABLE IF EXISTS worklease_leases;
-		DROP SEQUENCE IF EXISTS worklease_fencing_seq;
-		CREATE SEQUENCE worklease_fencing_seq;
-		CREATE TABLE worklease_leases (
-			work_id         TEXT PRIMARY KEY,
-			holder_id       TEXT        NOT NULL,
-			fencing_token   BIGINT      NOT NULL DEFAULT nextval('worklease_fencing_seq'),
-			expires_at      TIMESTAMPTZ NOT NULL,
-			checkpoint      BYTEA,
-			clean_handoff   BOOLEAN     NOT NULL DEFAULT FALSE,
-			acquired_at     TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-			updated_at      TIMESTAMPTZ NOT NULL DEFAULT NOW()
-		);
-		CREATE INDEX idx_worklease_leases_updated_at ON worklease_leases (updated_at);`)
+	_, err = db.Exec("DROP TABLE IF EXISTS worklease_leases; DROP SEQUENCE IF EXISTS worklease_fencing_seq;")
+	Expect(err).NotTo(HaveOccurred())
+	_, err = db.Exec(schemaSQL)
 	Expect(err).NotTo(HaveOccurred())
 })
 

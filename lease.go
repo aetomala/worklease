@@ -5,6 +5,8 @@ import (
 	"errors"
 	"fmt"
 	"time"
+
+	"github.com/aetomala/worklease/backend"
 )
 
 // Error message constants for lease operations.
@@ -29,6 +31,52 @@ var (
 	ErrLeaseWindowExhausted = errors.New(msgLeaseWindowExhausted)
 )
 
+// ExitMode records how a lease holder left a lease. It is an alias for
+// backend.ExitMode; the canonical definition lives in package backend because
+// package backend cannot import package worklease.
+type ExitMode = backend.ExitMode
+
+// Exit modes. Callers treat any mode they do not recognize as ExitExpired.
+const (
+	// ExitNone means there was no previous holder. Release never accepts it.
+	ExitNone = backend.ExitNone
+
+	// ExitFinished means the run completed; the checkpoint is final state.
+	ExitFinished = backend.ExitFinished
+
+	// ExitAbandoned means the holder stopped deliberately without completing.
+	ExitAbandoned = backend.ExitAbandoned
+
+	// ExitRetired means the work ID is complete permanently.
+	ExitRetired = backend.ExitRetired
+
+	// ExitExpired means the lease expired with no recorded exit. Release never
+	// accepts it.
+	ExitExpired = backend.ExitExpired
+)
+
+// Checkpoint is the last checkpointed state plus how the immediately previous
+// holder exited. It is an alias for backend.Checkpoint.
+type Checkpoint = backend.Checkpoint
+
+// Error message constants for the exit-mode sentinels.
+const (
+	msgInvalidExitMode = "worklease: invalid exit mode"
+	msgRetire          = "worklease: retire work ID"
+)
+
+var (
+	// ErrInvalidExitMode is returned by Release when mode is not ExitFinished,
+	// ExitAbandoned, or ExitRetired.
+	ErrInvalidExitMode = errors.New(msgInvalidExitMode)
+
+	// ErrRetire is returned, or wrapped, by a work function to declare that its
+	// work ID is complete permanently. Runner.Run in package worker, Elect in
+	// package leader, and Pool in package pool release the lease with
+	// ExitRetired and report success. Pool also stops the slot.
+	ErrRetire = errors.New(msgRetire)
+)
+
 // Default backoff parameters for the renewal goroutine retry policy.
 const (
 	defaultBackoffInitial = 100 * time.Millisecond
@@ -48,6 +96,9 @@ type Lease interface {
 	// Checkpoint persists state associated with the current lease. The caller must
 	// pass a valid Token obtained from Acquire. Returns ErrFenced if the
 	// token's fencing token no longer matches the stored lease.
+	// Checkpoint returns ErrLeaseExpired, without writing, once this holder has
+	// declared an exit with Release; a declared exit cannot be undone by a late
+	// write. Stop any background checkpoint loop when it sees ErrLeaseExpired.
 	Checkpoint(ctx context.Context, token Token, state []byte) error
 
 	// Renew extends the lease expiration time. Returns ErrFenced if the token's
@@ -55,21 +106,32 @@ type Lease interface {
 	// lease has already expired.
 	Renew(ctx context.Context, token Token) error
 
-	// Release surrenders the lease and expires it immediately, making the work item
-	// available for acquisition by a successor without waiting for the TTL. Sets
-	// clean_handoff so the successor knows the previous owner finished intentionally.
-	// Returns ErrFenced if the fencing token no longer matches the stored lease.
-	Release(ctx context.Context, token Token) error
+	// Release records mode as this holder's exit and expires the lease
+	// immediately, so a successor can acquire without waiting for the TTL. The
+	// successor reads mode as Checkpoint.PrevExit. Mode must be ExitFinished,
+	// ExitAbandoned, or ExitRetired; any other value returns ErrInvalidExitMode
+	// without calling the backend or the observer. Returns ErrFenced if the
+	// lease was acquired by another holder, and ErrLeaseExpired if the lease has
+	// expired, even when no successor has acquired it. A lapsed holder cannot
+	// record an exit, so its successor sees ExitExpired. Call Release with the
+	// original ctx or a cleanup context, never the renewal context.
+	Release(ctx context.Context, token Token, mode ExitMode) error
 
-	// ReadCheckpoint retrieves persisted state and the clean handoff flag for the
-	// given lease. The caller must pass a valid Token. Returns ErrFenced if the
-	// token's fencing token no longer matches the stored lease.
-	ReadCheckpoint(ctx context.Context, token Token) (state []byte, cleanHandoff bool, err error)
+	// ReadCheckpoint returns the last checkpointed state and how the
+	// immediately previous holder exited. On a first acquisition State is nil
+	// and PrevExit is ExitNone. PrevExit and PrevHolderID are fixed for the life
+	// of the lease. Returns ErrFenced if the token no longer matches the stored
+	// lease or if no row exists for the work ID, for example after Forget or
+	// Sweep.
+	ReadCheckpoint(ctx context.Context, token Token) (Checkpoint, error)
 
 	// StartRenewal begins automatic renewal of the lease at regular intervals. Returns
 	// a derived context and a stop function. Calling stop cancels the renewal context
 	// and terminates the renewal loop. The renewal context is cancelled if the underlying
 	// context is cancelled or if the lease is lost.
+	// If Renew returns ErrLeaseExpired, storage has found the lease lapsed:
+	// renewal stops at once without retrying, and the renewal context's cause
+	// matches both ErrLeaseWindowExhausted and ErrLeaseExpired.
 	StartRenewal(ctx context.Context, token Token, opts ...RenewalOption) (renewCtx context.Context, stopRenewal func())
 
 	// Forget permanently deletes the lease record for token's workID. Returns
@@ -289,19 +351,24 @@ type RenewEvent struct {
 	Err      error
 }
 
-// ReleaseEvent carries the result of a Release call.
+// ReleaseEvent carries the result of a Release call. Mode is the exit the
+// caller declared. OnRelease is not called when Release rejects the mode with
+// ErrInvalidExitMode.
 type ReleaseEvent struct {
 	Token    Token
 	Duration time.Duration
+	Mode     ExitMode
 	Err      error
 }
 
-// ReadCheckpointEvent carries the result of a ReadCheckpoint call.
-// Size is len of the returned state slice; 0 if nil.
+// ReadCheckpointEvent carries the result of a ReadCheckpoint call. Size is the
+// length of the returned state; 0 if nil. PrevExit is ExitNone and
+// PrevHolderID is empty when Err is non-nil.
 type ReadCheckpointEvent struct {
 	Token        Token
 	Duration     time.Duration
-	CleanHandoff bool
+	PrevExit     ExitMode
+	PrevHolderID string
 	Size         int
 	Err          error
 }

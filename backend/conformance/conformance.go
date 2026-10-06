@@ -90,20 +90,23 @@ func RunSuite(newBackend func() backend.Backend) func() {
 					Expect(b.Checkpoint(ctx, rec1, []byte("data"), expiredTTL)).To(Succeed())
 					rec2, err := b.Acquire(ctx, "w1", "h2", normalTTL)
 					Expect(err).NotTo(HaveOccurred())
-					state, _, err := b.ReadCheckpoint(ctx, rec2)
+					cp2, err := b.ReadCheckpoint(ctx, rec2)
 					Expect(err).NotTo(HaveOccurred())
-					Expect(state).To(Equal([]byte("data")))
+					Expect(cp2.State).To(Equal([]byte("data")))
 				})
 
-				It("preserves cleanHandoff from the expired record on reacquisition", func() {
-					rec1, err := b.Acquire(ctx, "w1", "h", expiredTTL)
+				It("captures the previous holder's declared exit and holder ID on reacquisition", func() {
+					rec1, err := b.Acquire(ctx, "acq-prev-1", "holder-a", normalTTL)
 					Expect(err).NotTo(HaveOccurred())
-					Expect(b.Release(ctx, rec1)).To(Succeed())
-					rec2, err := b.Acquire(ctx, "w1", "h2", normalTTL)
+					Expect(b.Release(ctx, rec1, backend.ExitAbandoned)).To(Succeed())
+
+					rec2, err := b.Acquire(ctx, "acq-prev-1", "holder-b", normalTTL)
 					Expect(err).NotTo(HaveOccurred())
-					_, cleanHandoff, err := b.ReadCheckpoint(ctx, rec2)
+
+					cp, err := b.ReadCheckpoint(ctx, rec2)
 					Expect(err).NotTo(HaveOccurred())
-					Expect(cleanHandoff).To(BeTrue())
+					Expect(cp.PrevExit).To(Equal(backend.ExitAbandoned))
+					Expect(cp.PrevHolderID).To(Equal("holder-a"))
 				})
 			})
 
@@ -112,9 +115,9 @@ func RunSuite(newBackend func() backend.Backend) func() {
 					rec, err := b.Acquire(ctx, "w1", "h", normalTTL)
 					Expect(err).NotTo(HaveOccurred())
 					Expect(b.Checkpoint(ctx, rec, []byte("payload"), normalTTL)).To(Succeed())
-					state, _, err := b.ReadCheckpoint(ctx, rec)
+					cp, err := b.ReadCheckpoint(ctx, rec)
 					Expect(err).NotTo(HaveOccurred())
-					Expect(state).To(Equal([]byte("payload")))
+					Expect(cp.State).To(Equal([]byte("payload")))
 				})
 
 				It("returns ErrFenced when FencingToken does not match the stored token", func() {
@@ -129,16 +132,47 @@ func RunSuite(newBackend func() backend.Backend) func() {
 					Expect(errors.Is(err, worklease.ErrFenced)).To(BeTrue())
 				})
 
-				It("sets cleanHandoff to false after a successful checkpoint", func() {
-					rec1, err := b.Acquire(ctx, "w1", "h", expiredTTL)
+				It("does not change PrevExit or PrevHolderID", func() {
+					rec1, err := b.Acquire(ctx, "cp-prev-1", "holder-a", normalTTL)
 					Expect(err).NotTo(HaveOccurred())
-					Expect(b.Release(ctx, rec1)).To(Succeed()) // cleanHandoff = true
-					rec2, err := b.Acquire(ctx, "w1", "h2", normalTTL)
+					Expect(b.Release(ctx, rec1, backend.ExitFinished)).To(Succeed())
+
+					rec2, err := b.Acquire(ctx, "cp-prev-1", "holder-b", normalTTL)
 					Expect(err).NotTo(HaveOccurred())
 					Expect(b.Checkpoint(ctx, rec2, []byte("x"), normalTTL)).To(Succeed())
-					_, cleanHandoff, err := b.ReadCheckpoint(ctx, rec2)
+
+					cp, err := b.ReadCheckpoint(ctx, rec2)
 					Expect(err).NotTo(HaveOccurred())
-					Expect(cleanHandoff).To(BeFalse())
+					Expect(cp.State).To(Equal([]byte("x")))
+					Expect(cp.PrevExit).To(Equal(backend.ExitFinished))
+					Expect(cp.PrevHolderID).To(Equal("holder-a"))
+				})
+
+				It("returns ErrLeaseExpired after the holder released, and the successor acquires at once and reads the declared mode", func() {
+					rec, err := b.Acquire(ctx, "cp-after-release", "holder-a", normalTTL)
+					Expect(err).NotTo(HaveOccurred())
+					Expect(b.Checkpoint(ctx, rec, []byte("final"), normalTTL)).To(Succeed())
+					Expect(b.Release(ctx, rec, backend.ExitFinished)).To(Succeed())
+
+					Expect(b.Checkpoint(ctx, rec, []byte("late"), normalTTL)).To(MatchError(worklease.ErrLeaseExpired))
+
+					rec2, err := b.Acquire(ctx, "cp-after-release", "holder-b", normalTTL)
+					Expect(err).NotTo(HaveOccurred())
+					cp, err := b.ReadCheckpoint(ctx, rec2)
+					Expect(err).NotTo(HaveOccurred())
+					Expect(cp.State).To(Equal([]byte("final")))
+					Expect(cp.PrevExit).To(Equal(backend.ExitFinished))
+					Expect(cp.PrevHolderID).To(Equal("holder-a"))
+				})
+
+				It("revives a lease that lapsed with no declared exit and no successor", func() {
+					rec, err := b.Acquire(ctx, "cp-revive", "holder-a", expiredTTL)
+					Expect(err).NotTo(HaveOccurred())
+
+					Expect(b.Checkpoint(ctx, rec, []byte("revived"), normalTTL)).To(Succeed())
+
+					_, err = b.Acquire(ctx, "cp-revive", "holder-b", normalTTL)
+					Expect(err).To(MatchError(worklease.ErrLeaseHeld))
 				})
 			})
 
@@ -170,19 +204,24 @@ func RunSuite(newBackend func() backend.Backend) func() {
 			})
 
 			Context("Release", func() {
-				It("succeeds with a valid LeaseRecord and sets cleanHandoff to true", func() {
-					rec, err := b.Acquire(ctx, "w1", "h", normalTTL)
+				It("succeeds with a valid LeaseRecord and records the declared exit for the successor", func() {
+					rec, err := b.Acquire(ctx, "rel-1", "holder-a", normalTTL)
 					Expect(err).NotTo(HaveOccurred())
-					Expect(b.Release(ctx, rec)).To(Succeed())
-					_, cleanHandoff, err := b.ReadCheckpoint(ctx, rec)
+					Expect(b.Release(ctx, rec, backend.ExitFinished)).To(Succeed())
+
+					rec2, err := b.Acquire(ctx, "rel-1", "holder-b", normalTTL)
 					Expect(err).NotTo(HaveOccurred())
-					Expect(cleanHandoff).To(BeTrue())
+
+					cp, err := b.ReadCheckpoint(ctx, rec2)
+					Expect(err).NotTo(HaveOccurred())
+					Expect(cp.PrevExit).To(Equal(backend.ExitFinished))
+					Expect(cp.PrevHolderID).To(Equal("holder-a"))
 				})
 
 				It("makes the work ID immediately acquirable after Release — no TTL wait required", func() {
 					rec, err := b.Acquire(ctx, "w1", "h", normalTTL)
 					Expect(err).NotTo(HaveOccurred())
-					Expect(b.Release(ctx, rec)).To(Succeed())
+					Expect(b.Release(ctx, rec, backend.ExitFinished)).To(Succeed())
 					_, err = b.Acquire(ctx, "w1", "h2", normalTTL)
 					Expect(err).NotTo(HaveOccurred())
 				})
@@ -190,42 +229,158 @@ func RunSuite(newBackend func() backend.Backend) func() {
 				It("returns ErrFenced when FencingToken does not match the stored token", func() {
 					rec, err := b.Acquire(ctx, "w1", "h", normalTTL)
 					Expect(err).NotTo(HaveOccurred())
-					err = b.Release(ctx, stale(rec))
+					err = b.Release(ctx, stale(rec), backend.ExitFinished)
 					Expect(errors.Is(err, worklease.ErrFenced)).To(BeTrue())
+				})
+
+				It("returns ErrLeaseExpired in every declared mode once the lease has expired, even with no successor, and records nothing", func() {
+					for _, mode := range []backend.ExitMode{backend.ExitFinished, backend.ExitAbandoned, backend.ExitRetired} {
+						workID := "rel-exp-" + mode.String()
+						rec, err := b.Acquire(ctx, workID, "holder-a", expiredTTL)
+						Expect(err).NotTo(HaveOccurred())
+
+						Expect(b.Release(ctx, rec, mode)).To(MatchError(worklease.ErrLeaseExpired))
+
+						rec2, err := b.Acquire(ctx, workID, "holder-b", normalTTL)
+						Expect(err).NotTo(HaveOccurred())
+						cp, err := b.ReadCheckpoint(ctx, rec2)
+						Expect(err).NotTo(HaveOccurred())
+						Expect(cp.PrevExit).To(Equal(backend.ExitExpired))
+						Expect(cp.PrevHolderID).To(Equal("holder-a"))
+					}
+				})
+
+				It("checks fencing before expiry: a superseded expired record returns ErrFenced", func() {
+					rec, err := b.Acquire(ctx, "rel-order", "holder-a", expiredTTL)
+					Expect(err).NotTo(HaveOccurred())
+					_, err = b.Acquire(ctx, "rel-order", "holder-b", normalTTL)
+					Expect(err).NotTo(HaveOccurred())
+
+					Expect(b.Release(ctx, rec, backend.ExitFinished)).To(MatchError(worklease.ErrFenced))
+				})
+
+				It("returns ErrInvalidExitMode for a mode Release does not accept and leaves the lease held", func() {
+					rec, err := b.Acquire(ctx, "rel-invalid", "holder-a", normalTTL)
+					Expect(err).NotTo(HaveOccurred())
+
+					for _, mode := range []backend.ExitMode{backend.ExitNone, backend.ExitExpired, backend.ExitMode(99)} {
+						Expect(b.Release(ctx, rec, mode)).To(MatchError(worklease.ErrInvalidExitMode))
+					}
+
+					_, err = b.Acquire(ctx, "rel-invalid", "holder-b", normalTTL)
+					Expect(err).To(MatchError(worklease.ErrLeaseHeld))
+				})
+
+				It("returns ErrLeaseExpired on a second Release, and the successor reads the first declared mode", func() {
+					rec, err := b.Acquire(ctx, "rel-twice", "holder-a", normalTTL)
+					Expect(err).NotTo(HaveOccurred())
+					Expect(b.Release(ctx, rec, backend.ExitRetired)).To(Succeed())
+
+					Expect(b.Release(ctx, rec, backend.ExitAbandoned)).To(MatchError(worklease.ErrLeaseExpired))
+
+					rec2, err := b.Acquire(ctx, "rel-twice", "holder-b", normalTTL)
+					Expect(err).NotTo(HaveOccurred())
+					cp, err := b.ReadCheckpoint(ctx, rec2)
+					Expect(err).NotTo(HaveOccurred())
+					Expect(cp.PrevExit).To(Equal(backend.ExitRetired))
 				})
 			})
 
 			Context("ReadCheckpoint", func() {
-				It("returns cleanHandoff false after a crash — no Release was called", func() {
-					rec, err := b.Acquire(ctx, "w1", "h", normalTTL)
+				It("returns ExitNone, an empty PrevHolderID, and nil State on a first acquisition", func() {
+					rec, err := b.Acquire(ctx, "rc-first", "holder-a", normalTTL)
 					Expect(err).NotTo(HaveOccurred())
-					Expect(b.Checkpoint(ctx, rec, []byte("partial"), normalTTL)).To(Succeed())
-					_, cleanHandoff, err := b.ReadCheckpoint(ctx, rec)
+
+					cp, err := b.ReadCheckpoint(ctx, rec)
 					Expect(err).NotTo(HaveOccurred())
-					Expect(cleanHandoff).To(BeFalse())
+					Expect(cp.State).To(BeNil())
+					Expect(cp.PrevExit).To(Equal(backend.ExitNone))
+					Expect(cp.PrevHolderID).To(BeEmpty())
 				})
 
-				It("returns cleanHandoff true after an explicit Release", func() {
-					rec, err := b.Acquire(ctx, "w1", "h", normalTTL)
+				It("returns ExitExpired, the crashed holder's ID, and its last checkpoint after a crash", func() {
+					rec1, err := b.Acquire(ctx, "rc-crash", "holder-a", normalTTL)
 					Expect(err).NotTo(HaveOccurred())
-					Expect(b.Release(ctx, rec)).To(Succeed())
-					_, cleanHandoff, err := b.ReadCheckpoint(ctx, rec)
+					// Checkpoint with a non-positive TTL, then no Release: the lease lapses with no declared exit.
+					Expect(b.Checkpoint(ctx, rec1, []byte("partial"), expiredTTL)).To(Succeed())
+
+					rec2, err := b.Acquire(ctx, "rc-crash", "holder-b", normalTTL)
 					Expect(err).NotTo(HaveOccurred())
-					Expect(cleanHandoff).To(BeTrue())
+					cp, err := b.ReadCheckpoint(ctx, rec2)
+					Expect(err).NotTo(HaveOccurred())
+					Expect(cp.State).To(Equal([]byte("partial")))
+					Expect(cp.PrevExit).To(Equal(backend.ExitExpired))
+					Expect(cp.PrevHolderID).To(Equal("holder-a"))
+				})
+
+				It("returns the same PrevExit and PrevHolderID on every read for the life of the lease", func() {
+					rec1, err := b.Acquire(ctx, "rc-stable", "holder-a", normalTTL)
+					Expect(err).NotTo(HaveOccurred())
+					Expect(b.Release(ctx, rec1, backend.ExitRetired)).To(Succeed())
+					rec2, err := b.Acquire(ctx, "rc-stable", "holder-b", normalTTL)
+					Expect(err).NotTo(HaveOccurred())
+
+					first, err := b.ReadCheckpoint(ctx, rec2)
+					Expect(err).NotTo(HaveOccurred())
+					Expect(b.Renew(ctx, rec2, normalTTL)).To(Succeed())
+					second, err := b.ReadCheckpoint(ctx, rec2)
+					Expect(err).NotTo(HaveOccurred())
+					Expect(second.PrevExit).To(Equal(first.PrevExit))
+					Expect(second.PrevHolderID).To(Equal(first.PrevHolderID))
+					Expect(first.PrevExit).To(Equal(backend.ExitRetired))
+				})
+
+				It("returns ErrFenced for a work ID that was never acquired", func() {
+					_, err := b.ReadCheckpoint(ctx, neverAcquired)
+					Expect(err).To(MatchError(worklease.ErrFenced))
+				})
+
+				It("returns ErrFenced after Forget removed the row", func() {
+					rec, err := b.Acquire(ctx, "rc-forget", "holder-a", normalTTL)
+					Expect(err).NotTo(HaveOccurred())
+					Expect(b.Forget(ctx, rec)).To(Succeed())
+
+					_, err = b.ReadCheckpoint(ctx, rec)
+					Expect(err).To(MatchError(worklease.ErrFenced))
+				})
+
+				It("returns ErrFenced after Sweep removed the row", func() {
+					rec, err := b.Acquire(ctx, "rc-sweep", "holder-a", normalTTL)
+					Expect(err).NotTo(HaveOccurred())
+					Expect(b.Release(ctx, rec, backend.ExitRetired)).To(Succeed())
+					n, err := b.Sweep(ctx, backend.SweepOptions{Retention: time.Nanosecond})
+					Expect(err).NotTo(HaveOccurred())
+					Expect(n).To(BeNumerically(">=", 1))
+
+					_, err = b.ReadCheckpoint(ctx, rec)
+					Expect(err).To(MatchError(worklease.ErrFenced))
+				})
+
+				It("returns ExitNone after Forget and a fresh Acquire", func() {
+					rec, err := b.Acquire(ctx, "rc-forget-new", "holder-a", normalTTL)
+					Expect(err).NotTo(HaveOccurred())
+					Expect(b.Forget(ctx, rec)).To(Succeed())
+
+					rec2, err := b.Acquire(ctx, "rc-forget-new", "holder-b", normalTTL)
+					Expect(err).NotTo(HaveOccurred())
+					cp, err := b.ReadCheckpoint(ctx, rec2)
+					Expect(err).NotTo(HaveOccurred())
+					Expect(cp.PrevExit).To(Equal(backend.ExitNone))
+					Expect(cp.PrevHolderID).To(BeEmpty())
 				})
 
 				It("returns nil state when no checkpoint has been written", func() {
 					rec, err := b.Acquire(ctx, "w1", "h", normalTTL)
 					Expect(err).NotTo(HaveOccurred())
-					state, _, err := b.ReadCheckpoint(ctx, rec)
+					cp, err := b.ReadCheckpoint(ctx, rec)
 					Expect(err).NotTo(HaveOccurred())
-					Expect(state).To(BeNil())
+					Expect(cp.State).To(BeNil())
 				})
 
 				It("returns ErrFenced when FencingToken does not match the stored token", func() {
 					rec, err := b.Acquire(ctx, "w1", "h", normalTTL)
 					Expect(err).NotTo(HaveOccurred())
-					_, _, err = b.ReadCheckpoint(ctx, stale(rec))
+					_, err = b.ReadCheckpoint(ctx, stale(rec))
 					Expect(errors.Is(err, worklease.ErrFenced)).To(BeTrue())
 				})
 			})
@@ -243,21 +398,23 @@ func RunSuite(newBackend func() backend.Backend) func() {
 					Expect(err).To(MatchError(context.Canceled))
 					Expect(b.Checkpoint(cancelled, rec, []byte("after"), normalTTL)).To(MatchError(context.Canceled))
 					Expect(b.Renew(cancelled, rec, normalTTL)).To(MatchError(context.Canceled))
-					Expect(b.Release(cancelled, rec)).To(MatchError(context.Canceled))
-					_, _, err = b.ReadCheckpoint(cancelled, rec)
+					Expect(b.Release(cancelled, rec, backend.ExitFinished)).To(MatchError(context.Canceled))
+					_, err = b.ReadCheckpoint(cancelled, rec)
 					Expect(err).To(MatchError(context.Canceled))
 					Expect(b.Forget(cancelled, rec)).To(MatchError(context.Canceled))
-					_, err = b.Sweep(cancelled, backend.SweepOptions{Retention: time.Nanosecond, IncludeCrashed: true})
+					_, err = b.Sweep(cancelled, backend.SweepOptions{Retention: time.Nanosecond, IncludeExpired: true})
 					Expect(err).To(MatchError(context.Canceled))
 
 					// Nothing changed: no lease was created for w-new, and w1 is still
-					// held with its original checkpoint and no clean handoff.
+					// held with its original checkpoint and no declared exit.
 					_, err = b.Acquire(ctx, "w-new", "h2", normalTTL)
 					Expect(err).NotTo(HaveOccurred())
-					state, cleanHandoff, err := b.ReadCheckpoint(ctx, rec)
+					cp, err := b.ReadCheckpoint(ctx, rec)
 					Expect(err).NotTo(HaveOccurred())
-					Expect(state).To(Equal([]byte("before")))
-					Expect(cleanHandoff).To(BeFalse())
+					Expect(cp.State).To(Equal([]byte("before")))
+					Expect(cp.PrevExit).To(Equal(backend.ExitNone))
+					_, err = b.Acquire(ctx, rec.WorkID, "other-holder", normalTTL)
+					Expect(err).To(MatchError(worklease.ErrLeaseHeld))
 				})
 			})
 
@@ -270,13 +427,15 @@ func RunSuite(newBackend func() backend.Backend) func() {
 
 					Expect(b.Checkpoint(ctx, other, []byte("x"), normalTTL)).To(MatchError(worklease.ErrFenced))
 					Expect(b.Renew(ctx, other, normalTTL)).To(MatchError(worklease.ErrFenced))
-					Expect(b.Release(ctx, other)).To(MatchError(worklease.ErrFenced))
+					Expect(b.Release(ctx, other, backend.ExitFinished)).To(MatchError(worklease.ErrFenced))
 					Expect(b.Forget(ctx, other)).To(MatchError(worklease.ErrFenced))
 
 					// The rightful holder's lease is untouched.
-					_, cleanHandoff, err := b.ReadCheckpoint(ctx, rec)
+					cp, err := b.ReadCheckpoint(ctx, rec)
 					Expect(err).NotTo(HaveOccurred())
-					Expect(cleanHandoff).To(BeFalse())
+					Expect(cp.PrevExit).To(Equal(backend.ExitNone))
+					_, err = b.Acquire(ctx, rec.WorkID, "third-holder", normalTTL)
+					Expect(err).To(MatchError(worklease.ErrLeaseHeld))
 					Expect(b.Renew(ctx, rec, normalTTL)).To(Succeed())
 				})
 			})
@@ -286,12 +445,12 @@ func RunSuite(newBackend func() backend.Backend) func() {
 					rec, err := b.Acquire(ctx, "w1", "h", normalTTL)
 					Expect(err).NotTo(HaveOccurred())
 					Expect(b.Checkpoint(ctx, rec, []byte("abc"), normalTTL)).To(Succeed())
-					got, _, err := b.ReadCheckpoint(ctx, rec)
+					got, err := b.ReadCheckpoint(ctx, rec)
 					Expect(err).NotTo(HaveOccurred())
-					got[0] = 'X'
-					again, _, err := b.ReadCheckpoint(ctx, rec)
+					got.State[0] = 'X'
+					again, err := b.ReadCheckpoint(ctx, rec)
 					Expect(err).NotTo(HaveOccurred())
-					Expect(again).To(Equal([]byte("abc")))
+					Expect(again.State).To(Equal([]byte("abc")))
 				})
 
 				It("does not retain caller's slice after Checkpoint — mutation of state after call does not affect stored checkpoint", func() {
@@ -300,9 +459,9 @@ func RunSuite(newBackend func() backend.Backend) func() {
 					state := []byte("abc")
 					Expect(b.Checkpoint(ctx, rec, state, normalTTL)).To(Succeed())
 					state[0] = 'X'
-					got, _, err := b.ReadCheckpoint(ctx, rec)
+					got, err := b.ReadCheckpoint(ctx, rec)
 					Expect(err).NotTo(HaveOccurred())
-					Expect(got).To(Equal([]byte("abc")))
+					Expect(got.State).To(Equal([]byte("abc")))
 				})
 			})
 
@@ -330,53 +489,182 @@ func RunSuite(newBackend func() backend.Backend) func() {
 				It("returns ErrFenced when no record exists for the work ID", func() {
 					Expect(b.Forget(ctx, neverAcquired)).To(MatchError(worklease.ErrFenced))
 				})
+
+				It("succeeds after the holder released, and the next Acquire reports ExitNone", func() {
+					rec, err := b.Acquire(ctx, "forget-after-release", "holder-a", normalTTL)
+					Expect(err).NotTo(HaveOccurred())
+					Expect(b.Release(ctx, rec, backend.ExitRetired)).To(Succeed())
+
+					Expect(b.Forget(ctx, rec)).To(Succeed())
+
+					rec2, err := b.Acquire(ctx, "forget-after-release", "holder-b", normalTTL)
+					Expect(err).NotTo(HaveOccurred())
+					cp, err := b.ReadCheckpoint(ctx, rec2)
+					Expect(err).NotTo(HaveOccurred())
+					Expect(cp.PrevExit).To(Equal(backend.ExitNone))
+				})
 			})
 
 			Context("Vacuum.Sweep (via Backend.Sweep)", func() {
-				It("deletes a cleanly-released row once Retention has elapsed and returns a count of at least 1", func() {
-					rec, err := b.Acquire(ctx, "sweep-1", "h", normalTTL)
+				It("deletes a retired row once Retention has elapsed and a fresh Acquire sees ExitNone", func() {
+					rec, err := b.Acquire(ctx, "sweep-retired", "holder-a", normalTTL)
 					Expect(err).NotTo(HaveOccurred())
-					Expect(b.Release(ctx, rec)).To(Succeed())
+					Expect(b.Release(ctx, rec, backend.ExitRetired)).To(Succeed())
 
-					n, err := b.Sweep(ctx, backend.SweepOptions{Retention: time.Nanosecond, IncludeCrashed: false})
+					n, err := b.Sweep(ctx, backend.SweepOptions{Retention: time.Nanosecond})
 					Expect(err).NotTo(HaveOccurred())
 					Expect(n).To(BeNumerically(">=", 1))
 
-					rec2, err := b.Acquire(ctx, "sweep-1", "h", normalTTL)
+					rec2, err := b.Acquire(ctx, "sweep-retired", "holder-b", normalTTL)
 					Expect(err).NotTo(HaveOccurred())
 					Expect(rec2.FencingToken).To(BeNumerically(">", rec.FencingToken))
+					cp, err := b.ReadCheckpoint(ctx, rec2)
+					Expect(err).NotTo(HaveOccurred())
+					Expect(cp.PrevExit).To(Equal(backend.ExitNone))
 				})
 
-				It("does not delete a row still within the retention window", func() {
-					rec, err := b.Acquire(ctx, "sweep-2", "h", normalTTL)
+				It("never deletes a finished or abandoned row, even with IncludeExpired", func() {
+					recF, err := b.Acquire(ctx, "sweep-finished", "holder-a", normalTTL)
 					Expect(err).NotTo(HaveOccurred())
-					Expect(b.Release(ctx, rec)).To(Succeed())
+					Expect(b.Release(ctx, recF, backend.ExitFinished)).To(Succeed())
+					recA, err := b.Acquire(ctx, "sweep-abandoned", "holder-a", normalTTL)
+					Expect(err).NotTo(HaveOccurred())
+					Expect(b.Release(ctx, recA, backend.ExitAbandoned)).To(Succeed())
 
-					n, err := b.Sweep(ctx, backend.SweepOptions{Retention: time.Hour, IncludeCrashed: false})
+					n, err := b.Sweep(ctx, backend.SweepOptions{Retention: time.Nanosecond, IncludeExpired: true})
 					Expect(err).NotTo(HaveOccurred())
 					Expect(n).To(BeZero())
 				})
 
-				It("does not delete a crashed (non-clean-handoff) row unless IncludeCrashed is true", func() {
-					_, err := b.Acquire(ctx, "sweep-3", "h", expiredTTL)
+				It("deletes an expired row with no declared exit only when IncludeExpired is set", func() {
+					_, err := b.Acquire(ctx, "sweep-expired", "holder-a", expiredTTL)
 					Expect(err).NotTo(HaveOccurred())
 
-					n, err := b.Sweep(ctx, backend.SweepOptions{Retention: time.Nanosecond, IncludeCrashed: false})
+					n, err := b.Sweep(ctx, backend.SweepOptions{Retention: time.Nanosecond})
 					Expect(err).NotTo(HaveOccurred())
 					Expect(n).To(BeZero())
 
-					n, err = b.Sweep(ctx, backend.SweepOptions{Retention: time.Nanosecond, IncludeCrashed: true})
+					n, err = b.Sweep(ctx, backend.SweepOptions{Retention: time.Nanosecond, IncludeExpired: true})
 					Expect(err).NotTo(HaveOccurred())
 					Expect(n).To(BeNumerically(">=", 1))
 				})
 
-				It("does not delete a row that is currently held (unexpired), regardless of IncludeCrashed", func() {
-					_, err := b.Acquire(ctx, "sweep-4", "h", normalTTL)
+				It("does not delete a retired row still within the retention window, and reacquiring it reports ExitRetired", func() {
+					rec, err := b.Acquire(ctx, "sweep-window", "holder-a", normalTTL)
 					Expect(err).NotTo(HaveOccurred())
+					Expect(b.Release(ctx, rec, backend.ExitRetired)).To(Succeed())
 
-					n, err := b.Sweep(ctx, backend.SweepOptions{Retention: time.Nanosecond, IncludeCrashed: true})
+					n, err := b.Sweep(ctx, backend.SweepOptions{Retention: time.Hour})
 					Expect(err).NotTo(HaveOccurred())
 					Expect(n).To(BeZero())
+
+					rec2, err := b.Acquire(ctx, "sweep-window", "holder-b", normalTTL)
+					Expect(err).NotTo(HaveOccurred())
+					cp, err := b.ReadCheckpoint(ctx, rec2)
+					Expect(err).NotTo(HaveOccurred())
+					Expect(cp.PrevExit).To(Equal(backend.ExitRetired))
+					Expect(cp.PrevHolderID).To(Equal("holder-a"))
+				})
+
+				It("does not delete a row that is currently held, regardless of IncludeExpired", func() {
+					_, err := b.Acquire(ctx, "sweep-held", "holder-a", normalTTL)
+					Expect(err).NotTo(HaveOccurred())
+
+					n, err := b.Sweep(ctx, backend.SweepOptions{Retention: time.Nanosecond, IncludeExpired: true})
+					Expect(err).NotTo(HaveOccurred())
+					Expect(n).To(BeZero())
+				})
+			})
+
+			Context("handoff across three holders", func() {
+				It("release then crash: C observes B's expiry, not A's release, and default Sweep keeps the row", func() {
+					recA, err := b.Acquire(ctx, "seq-1", "holder-a", normalTTL)
+					Expect(err).NotTo(HaveOccurred())
+					Expect(b.Checkpoint(ctx, recA, []byte("a-state"), normalTTL)).To(Succeed())
+					Expect(b.Release(ctx, recA, backend.ExitFinished)).To(Succeed())
+
+					// B acquires and crashes before its first checkpoint: its lease is already expired.
+					_, err = b.Acquire(ctx, "seq-1", "holder-b", expiredTTL)
+					Expect(err).NotTo(HaveOccurred())
+
+					n, err := b.Sweep(ctx, backend.SweepOptions{Retention: time.Nanosecond})
+					Expect(err).NotTo(HaveOccurred())
+					Expect(n).To(BeZero())
+
+					recC, err := b.Acquire(ctx, "seq-1", "holder-c", normalTTL)
+					Expect(err).NotTo(HaveOccurred())
+					cp, err := b.ReadCheckpoint(ctx, recC)
+					Expect(err).NotTo(HaveOccurred())
+					Expect(cp.PrevExit).To(Equal(backend.ExitExpired))
+					Expect(cp.PrevHolderID).To(Equal("holder-b"))
+					Expect(cp.State).To(Equal([]byte("a-state")))
+				})
+
+				It("#74 reproduction: after a release then a crash, default Sweep keeps the row and IncludeExpired deletes it", func() {
+					recA, err := b.Acquire(ctx, "seq-74", "holder-a", normalTTL)
+					Expect(err).NotTo(HaveOccurred())
+					Expect(b.Checkpoint(ctx, recA, []byte("a-state"), normalTTL)).To(Succeed())
+					Expect(b.Release(ctx, recA, backend.ExitFinished)).To(Succeed())
+
+					_, err = b.Acquire(ctx, "seq-74", "holder-b", expiredTTL)
+					Expect(err).NotTo(HaveOccurred())
+
+					n, err := b.Sweep(ctx, backend.SweepOptions{Retention: time.Nanosecond})
+					Expect(err).NotTo(HaveOccurred())
+					Expect(n).To(BeZero())
+
+					n, err = b.Sweep(ctx, backend.SweepOptions{Retention: time.Nanosecond, IncludeExpired: true})
+					Expect(err).NotTo(HaveOccurred())
+					Expect(n).To(BeNumerically(">=", 1))
+				})
+
+				It("crash then release: C observes B's declared exit, and Sweep keeps the abandoned row", func() {
+					_, err := b.Acquire(ctx, "seq-2", "holder-a", expiredTTL)
+					Expect(err).NotTo(HaveOccurred())
+
+					recB, err := b.Acquire(ctx, "seq-2", "holder-b", normalTTL)
+					Expect(err).NotTo(HaveOccurred())
+					cpB, err := b.ReadCheckpoint(ctx, recB)
+					Expect(err).NotTo(HaveOccurred())
+					Expect(cpB.PrevExit).To(Equal(backend.ExitExpired))
+					Expect(cpB.PrevHolderID).To(Equal("holder-a"))
+					Expect(b.Release(ctx, recB, backend.ExitAbandoned)).To(Succeed())
+
+					n, err := b.Sweep(ctx, backend.SweepOptions{Retention: time.Nanosecond, IncludeExpired: true})
+					Expect(err).NotTo(HaveOccurred())
+					Expect(n).To(BeZero())
+
+					recC, err := b.Acquire(ctx, "seq-2", "holder-c", normalTTL)
+					Expect(err).NotTo(HaveOccurred())
+					cp, err := b.ReadCheckpoint(ctx, recC)
+					Expect(err).NotTo(HaveOccurred())
+					Expect(cp.PrevExit).To(Equal(backend.ExitAbandoned))
+					Expect(cp.PrevHolderID).To(Equal("holder-b"))
+				})
+
+				It("release then release: C observes B's exit, and A's retirement does not reach C or Sweep", func() {
+					recA, err := b.Acquire(ctx, "seq-3", "holder-a", normalTTL)
+					Expect(err).NotTo(HaveOccurred())
+					Expect(b.Release(ctx, recA, backend.ExitRetired)).To(Succeed())
+
+					recB, err := b.Acquire(ctx, "seq-3", "holder-b", normalTTL)
+					Expect(err).NotTo(HaveOccurred())
+					cpB, err := b.ReadCheckpoint(ctx, recB)
+					Expect(err).NotTo(HaveOccurred())
+					Expect(cpB.PrevExit).To(Equal(backend.ExitRetired))
+					Expect(cpB.PrevHolderID).To(Equal("holder-a"))
+					Expect(b.Release(ctx, recB, backend.ExitFinished)).To(Succeed())
+
+					n, err := b.Sweep(ctx, backend.SweepOptions{Retention: time.Nanosecond})
+					Expect(err).NotTo(HaveOccurred())
+					Expect(n).To(BeZero())
+
+					recC, err := b.Acquire(ctx, "seq-3", "holder-c", normalTTL)
+					Expect(err).NotTo(HaveOccurred())
+					cp, err := b.ReadCheckpoint(ctx, recC)
+					Expect(err).NotTo(HaveOccurred())
+					Expect(cp.PrevExit).To(Equal(backend.ExitFinished))
+					Expect(cp.PrevHolderID).To(Equal("holder-b"))
 				})
 			})
 		})

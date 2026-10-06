@@ -19,7 +19,9 @@ import (
 //     ErrFenced and exits, after emitting OnRenew then OnFenced. No retry.
 //   - Lease window exhausted: a non-fencing Renew error is retried with exponential
 //     backoff until the lease window closes. The goroutine then cancels renewCtx
-//     with cause ErrLeaseWindowExhausted and exits.
+//     with cause ErrLeaseWindowExhausted and exits. Exception: ErrLeaseExpired
+//     from Renew cancels at once, without backoff, with cause
+//     errors.Join(ErrLeaseWindowExhausted, ErrLeaseExpired).
 //
 // The lease window starts as the earlier of token.ExpiresAt() and the local
 // start time of the acquiring backend call plus TTL. After every successful
@@ -111,6 +113,10 @@ func (c *leaseClient) renewCycle(ctx context.Context, token Token, rcfg renewalC
 		case errors.Is(err, ErrFenced):
 			c.obs.OnFenced(ctx, FencedEvent{Token: token, Operation: OperationRenew})
 			cancelCause(ErrFenced) // Path 2
+			return false
+		case errors.Is(err, ErrLeaseExpired):
+			// Storage has found the lease lapsed; retrying cannot help (#84).
+			cancelCause(errors.Join(ErrLeaseWindowExhausted, ErrLeaseExpired)) // Path 3, terminal
 			return false
 		case err == nil:
 			*window = start.Add(c.cfg.TTL)

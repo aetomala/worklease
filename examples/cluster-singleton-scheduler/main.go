@@ -132,7 +132,7 @@ func scenario3FencedLeader(ctx context.Context, b backend.Backend) {
 	time.Sleep(2 * time.Second)
 
 	wg.Wait()
-	_ = leaseF.Release(ctx, tokenF)
+	_ = leaseF.Release(ctx, tokenF, worklease.ExitFinished)
 	log.Println("  node-F: released leadership")
 	log.Println()
 }

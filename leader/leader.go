@@ -108,7 +108,7 @@ func Elect(ctx context.Context, lease worklease.Lease, workID string, cfg Config
 	}
 
 	// ===== STEP 10: Release =====
-	releaseErr := lease.Release(ctx, token)
+	releaseErr := lease.Release(ctx, token, worklease.ExitFinished)
 	if errors.Is(releaseErr, worklease.ErrFenced) {
 		return worklease.ErrFenced
 	}

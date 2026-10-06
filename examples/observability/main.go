@@ -192,7 +192,7 @@ func main() {
 	_ = leaseA.Checkpoint(ctx, tokenA, []byte("page=1"))
 	_ = leaseA.Checkpoint(ctx, tokenA, []byte("page=2"))
 	_ = leaseA.Renew(ctx, tokenA)
-	_, _, _ = leaseA.ReadCheckpoint(ctx, tokenA)
+	_, _ = leaseA.ReadCheckpoint(ctx, tokenA)
 
 	// ===== Fencing scenario =====
 	// Holder A stops renewing and its lease expires; holder B acquires the same work
@@ -207,7 +207,7 @@ func main() {
 	}
 
 	// Holder B finishes cleanly — completes its hold-duration correlation.
-	_ = leaseB.Release(ctx, tokenB)
+	_ = leaseB.Release(ctx, tokenB, worklease.ExitFinished)
 
 	obs.report()
 }

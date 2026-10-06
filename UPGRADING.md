@@ -17,7 +17,63 @@
   Sweep(ctx context.Context, opts SweepOptions) (int64, error)
   ```
 
-  Callers who only use the shipped PostgreSQL or in-memory backends through `worklease.New` are unaffected — no schema change, no runtime behavior change to existing methods.
+  See "Migrate the PostgreSQL schema" below.
+
+### 1. Migrate the PostgreSQL schema before deploying
+
+Run this idempotent SQL against every database that holds `worklease_leases`. It is safe to run more than once.
+
+```sql
+ALTER TABLE worklease_leases ADD COLUMN IF NOT EXISTS exit_mode      TEXT;
+ALTER TABLE worklease_leases ADD COLUMN IF NOT EXISTS prev_exit_mode TEXT NOT NULL DEFAULT 'expired';
+ALTER TABLE worklease_leases ADD COLUMN IF NOT EXISTS prev_holder_id TEXT;
+ALTER TABLE worklease_leases ALTER COLUMN prev_exit_mode SET DEFAULT 'none';
+
+DO $$
+BEGIN
+    IF NOT EXISTS (
+        SELECT 1 FROM pg_constraint
+        WHERE conname = 'worklease_leases_exit_mode_check'
+          AND conrelid = 'worklease_leases'::regclass
+    ) THEN
+        ALTER TABLE worklease_leases
+            ADD CONSTRAINT worklease_leases_exit_mode_check
+            CHECK (exit_mode IS NULL OR exit_mode IN ('finished', 'abandoned', 'retired'))
+            NOT VALID;
+    END IF;
+END $$;
+ALTER TABLE worklease_leases VALIDATE CONSTRAINT worklease_leases_exit_mode_check;
+
+DO $$
+BEGIN
+    IF NOT EXISTS (
+        SELECT 1 FROM pg_constraint
+        WHERE conname = 'worklease_leases_prev_exit_mode_check'
+          AND conrelid = 'worklease_leases'::regclass
+    ) THEN
+        ALTER TABLE worklease_leases
+            ADD CONSTRAINT worklease_leases_prev_exit_mode_check
+            CHECK (prev_exit_mode IN ('none', 'expired', 'finished', 'abandoned', 'retired'))
+            NOT VALID;
+    END IF;
+END $$;
+ALTER TABLE worklease_leases VALIDATE CONSTRAINT worklease_leases_prev_exit_mode_check;
+```
+
+Existing rows get `exit_mode = NULL` and `prev_exit_mode = 'expired'`. The v0.5 `clean_handoff` value may be stale, so it is not trusted: the next holder of each existing row sees `ExitExpired` once and re-validates its partial state. That costs at most some unnecessary work, never an incorrect resume. Because existing rows have no declared exit, default `Vacuum.Sweep` never removes a row last released before v0.6; only `IncludeExpired: true` does, and it also removes rows whose holder genuinely crashed. Without this migration, every v0.6 `Acquire` fails with a `column … does not exist` error.
+
+`clean_handoff` stays in the table, unread and unwritten by v0.6, so a rollback to v0.5 still works. A later release drops it with its own step here.
+
+### 2. Rolling upgrades
+
+Fencing is unaffected while v0.5 and v0.6 processes share the table: both draw tokens from `worklease_fencing_seq` and fence on holder ID and token. Handoff information is degraded until the rollout finishes:
+
+- A v0.6 successor of a v0.5 holder sees `ExitExpired`, because v0.5 never writes `exit_mode`. This is conservative.
+- A v0.5 `Acquire` does not capture `prev_exit_mode` or clear `exit_mode`, so a later v0.6 successor can see the exit of the holder before the v0.5 one. This is the same class of error as in v0.5.
+- A v0.5 successor of a v0.6 holder reads a frozen `clean_handoff`.
+- **Do not run `Vacuum.Sweep` until no v0.5 process remains.** A v0.5 holder can reacquire a row whose `exit_mode` is still `'retired'`.
+
+Finish the rollout promptly. To keep exact handoff information throughout, drain every v0.5 process before starting v0.6.
 
 ### New in v0.6.0
 
