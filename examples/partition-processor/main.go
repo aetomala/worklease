@@ -32,7 +32,7 @@ func scenario1Distribution(ctx context.Context, b backend.Backend) {
 	lease, _ := worklease.New(b, worklease.Config{TTL: 30 * time.Second, HolderID: "pool-A"})
 
 	// Each slot processes once and exits permanently so the pool completes cleanly.
-	fn := func(ctx context.Context, workID string, _ worklease.Token, _ []byte, _ bool) ([]byte, error) {
+	fn := func(ctx context.Context, workID string, _ worklease.Token, _ worklease.Checkpoint) ([]byte, error) {
 		time.Sleep(200 * time.Millisecond)
 		log.Printf("  [pool-A] processing %s", workID)
 		return nil, &slotDone{"done"}
@@ -66,7 +66,7 @@ func scenario2CheckpointResume(ctx context.Context, b backend.Backend) {
 	// The short TTL means the leases expire quickly so pool-B can acquire.
 	leaseA, _ := worklease.New(b, worklease.Config{TTL: 1 * time.Second, HolderID: "pool-A"})
 
-	aFn := func(ctx context.Context, workID string, _ worklease.Token, _ []byte, _ bool) ([]byte, error) {
+	aFn := func(ctx context.Context, workID string, _ worklease.Token, _ worklease.Checkpoint) ([]byte, error) {
 		time.Sleep(100 * time.Millisecond)
 		progress := PartitionProgress{LastOffset: 100}
 		data, err := checkpoint.Encode(checkpoint.JSON(), &progress)
@@ -86,7 +86,8 @@ func scenario2CheckpointResume(ctx context.Context, b backend.Backend) {
 
 	leaseB, _ := worklease.New(b, worklease.Config{TTL: 30 * time.Second, HolderID: "pool-B"})
 
-	bFn := func(ctx context.Context, workID string, _ worklease.Token, prior []byte, cleanHandoff bool) ([]byte, error) {
+	bFn := func(ctx context.Context, workID string, _ worklease.Token, cp worklease.Checkpoint) ([]byte, error) {
+		prior, cleanHandoff := cp.State, cp.PrevExit == worklease.ExitFinished
 		progress, err := checkpoint.Decode[PartitionProgress](checkpoint.JSON(), prior)
 		if err != nil {
 			return nil, err
@@ -122,7 +123,7 @@ func scenario3PermanentError(ctx context.Context, b backend.Backend) {
 		offsets = map[string]int{"queue-0": 0, "queue-1": 0}
 	)
 
-	fn := func(ctx context.Context, workID string, _ worklease.Token, _ []byte, _ bool) ([]byte, error) {
+	fn := func(ctx context.Context, workID string, _ worklease.Token, _ worklease.Checkpoint) ([]byte, error) {
 		if workID == "queue-2" {
 			log.Printf("  [pool-C] %s: decommissioned — dropping slot permanently", workID)
 			return nil, &slotDone{"decommissioned"}

@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"time"
 
 	"github.com/aetomala/worklease"
 )
@@ -15,20 +16,39 @@ var (
 )
 
 // WorkFn is the work function signature accepted by Runner.Run.
-// The ctx parameter is the renewal context — it is cancelled when the lease is
-// fenced or lost, so fencing propagates into the work automatically. The prior
-// parameter contains the last checkpointed state from the previous holder (nil
-// on first run). The cleanHandoff flag is true when the previous holder released
-// intentionally. Return the final state to checkpoint after the work completes
-// (nil skips the final checkpoint) and any error.
-type WorkFn func(ctx context.Context, token worklease.Token, prior []byte, cleanHandoff bool) ([]byte, error)
+// The ctx argument is the renewal context; it is cancelled on fencing, when the
+// lease window is exhausted, or when the caller's context is cancelled. The
+// prior argument carries the last checkpointed state and how the immediately
+// previous holder exited; PrevExit is ExitNone on a first run. Return final
+// state to checkpoint, or nil to skip the final checkpoint. Return nil to
+// release with ExitFinished, an error wrapping worklease.ErrRetire to release
+// with ExitRetired, or any other error to release with ExitAbandoned.
+type WorkFn func(ctx context.Context, token worklease.Token, prior worklease.Checkpoint) ([]byte, error)
+
+// defaultCleanupTimeout bounds the final Checkpoint and Release when
+// RunnerConfig.CleanupTimeout is zero or negative.
+const defaultCleanupTimeout = 5 * time.Second
 
 // RunnerConfig holds configuration for a Runner instance.
 type RunnerConfig struct {
-	Lease          worklease.Lease           // Required.
-	WorkFn         WorkFn                    // Required.
-	AcquireOptions []worklease.AcquireOption // Optional; nil uses defaults.
-	RenewalOptions []worklease.RenewalOption // Optional; nil uses defaults.
+	// Lease is the lease client. Required; nil returns ErrLeaseRequired from
+	// NewRunner.
+	Lease worklease.Lease
+
+	// WorkFn is the work function. Required; nil returns ErrWorkFnRequired from
+	// NewRunner.
+	WorkFn WorkFn
+
+	// AcquireOptions are passed to Lease.Acquire. Optional.
+	AcquireOptions []worklease.AcquireOption
+
+	// RenewalOptions are passed to Lease.StartRenewal. Optional.
+	RenewalOptions []worklease.RenewalOption
+
+	// CleanupTimeout bounds the final Checkpoint and Release, which run on a
+	// context that survives cancellation of the caller's context. Zero or
+	// negative means 5s.
+	CleanupTimeout time.Duration
 }
 
 // Runner manages the acquire/checkpoint/release lifecycle for a WorkFn.
@@ -39,6 +59,7 @@ type Runner struct {
 	fn             WorkFn
 	acquireOptions []worklease.AcquireOption
 	renewalOptions []worklease.RenewalOption
+	cleanupTimeout time.Duration // Always positive after NewRunner
 }
 
 // NewRunner returns a new Runner. Returns ErrLeaseRequired if cfg.Lease is nil,
@@ -52,25 +73,32 @@ func NewRunner(cfg RunnerConfig) (*Runner, error) {
 		return nil, ErrWorkFnRequired
 	}
 
-	// ===== STEP 2: Initialize and Return =====
+	// ===== STEP 2: Apply Defaults for Zero Values =====
+	cleanupTimeout := cfg.CleanupTimeout
+	if cleanupTimeout <= 0 {
+		cleanupTimeout = defaultCleanupTimeout
+	}
+
+	// ===== STEP 3: Initialize and Return =====
 	return &Runner{
 		lease:          cfg.Lease,
 		fn:             cfg.WorkFn,
 		acquireOptions: cfg.AcquireOptions,
 		renewalOptions: cfg.RenewalOptions,
+		cleanupTimeout: cleanupTimeout,
 	}, nil
 }
 
-// Run acquires the lease for workID, reads prior checkpoint state, starts
-// automatic renewal, calls the WorkFn with the renewal context, checkpoints
-// any returned final state, stops renewal, and releases the lease. If the
-// WorkFn panics, renewal is stopped, the lease is not released, and the panic
-// propagates — the lease then expires after its TTL. Returns
-// worklease.ErrFenced if the lease is superseded at any point — in that case
-// Release is not called. Returns the WorkFn error on non-fencing work failure
-// after checkpointing any partial state and releasing the lease. Returns
-// worklease.ErrLeaseHeld if the lease is already held and WithWaitForLease was
-// not configured.
+// Run acquires the lease for workID, reads the prior Checkpoint, starts
+// automatic renewal, calls WorkFn with the renewal context, checkpoints any
+// returned final state, and releases the lease with the exit mode that
+// matches WorkFn's outcome. The final Checkpoint and Release run on a context
+// that survives cancellation of ctx, bounded by CleanupTimeout. Run returns
+// nil when WorkFn returns nil or an error wrapping worklease.ErrRetire and the
+// exit is recorded. Run returns worklease.ErrFenced, without releasing, if a
+// successor holds the lease. Run does not release when the lease window was
+// exhausted; the successor sees ExitExpired. If WorkFn panics, renewal is
+// stopped, the lease is not released, and the panic propagates.
 func (r *Runner) Run(ctx context.Context, workID string) error {
 	// ===== STEP 1: Acquire =====
 	token, err := r.lease.Acquire(ctx, workID, r.acquireOptions...)
@@ -79,49 +107,72 @@ func (r *Runner) Run(ctx context.Context, workID string) error {
 	}
 
 	// ===== STEP 2: Read Prior Checkpoint =====
+	// No Release on failure: the lease expires after its TTL and the successor
+	// sees ExitExpired with this holder as PrevHolderID.
 	cp, err := r.lease.ReadCheckpoint(ctx, token)
 	if err != nil {
 		if errors.Is(err, worklease.ErrFenced) {
 			return worklease.ErrFenced
 		}
-		_ = r.lease.Release(ctx, token, worklease.ExitFinished)
 		return fmt.Errorf("worker: read checkpoint: %w", err)
 	}
-	// Group A bridge (seed D8): Group B replaces this with the exit-mode mapping.
-	prior, cleanHandoff := cp.State, cp.PrevExit == worklease.ExitFinished
 
 	// ===== STEP 3: Start Renewal =====
 	renewCtx, stopRenewal := r.lease.StartRenewal(ctx, token, r.renewalOptions...)
 	defer stopRenewal() // panic-safety net; stopRenewal is idempotent
 
 	// ===== STEP 4: Call WorkFn =====
-	finalState, workErr := r.fn(renewCtx, token, prior, cleanHandoff)
+	finalState, workErr := r.fn(renewCtx, token, cp)
 
-	// ===== STEP 5: Checkpoint Final State =====
-	if finalState != nil && !errors.Is(workErr, worklease.ErrFenced) {
-		if cpErr := r.lease.Checkpoint(ctx, token, finalState); cpErr != nil {
-			stopRenewal()
+	// ===== STEP 5: Stop Renewal and Read Its Cause =====
+	stopRenewal()
+	cause := context.Cause(renewCtx)
+
+	// ===== STEP 6: Classify the Outcome =====
+	if errors.Is(workErr, worklease.ErrFenced) || errors.Is(cause, worklease.ErrFenced) {
+		return worklease.ErrFenced
+	}
+	if errors.Is(cause, worklease.ErrLeaseWindowExhausted) {
+		if workErr != nil {
+			return workErr
+		}
+		return fmt.Errorf("worker: %w", cause)
+	}
+	mode, result := worklease.ExitAbandoned, workErr
+	switch {
+	case errors.Is(workErr, worklease.ErrRetire):
+		mode, result = worklease.ExitRetired, nil
+	case workErr == nil:
+		mode = worklease.ExitFinished
+	}
+	successClass := result == nil
+
+	// ===== STEP 7: Derive the Cleanup Context =====
+	cleanupCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), r.cleanupTimeout)
+	defer cancel()
+
+	// ===== STEP 8: Checkpoint Final State =====
+	if finalState != nil {
+		if cpErr := r.lease.Checkpoint(cleanupCtx, token, finalState); cpErr != nil {
 			if errors.Is(cpErr, worklease.ErrFenced) {
 				return worklease.ErrFenced
 			}
-			_ = r.lease.Release(ctx, token, worklease.ExitFinished)
-			return fmt.Errorf("worker: checkpoint: %w", cpErr)
+			mode = worklease.ExitAbandoned
+			if successClass {
+				result = fmt.Errorf("worker: checkpoint: %w", cpErr)
+			}
 		}
 	}
 
-	// ===== STEP 6: Stop Renewal =====
-	stopRenewal()
-
-	// ===== STEP 7: Release (unless fenced) =====
-	if errors.Is(workErr, worklease.ErrFenced) {
-		return worklease.ErrFenced
-	}
-	if relErr := r.lease.Release(ctx, token, worklease.ExitFinished); relErr != nil {
+	// ===== STEP 9: Release With the Exit Mode =====
+	if relErr := r.lease.Release(cleanupCtx, token, mode); relErr != nil {
 		if errors.Is(relErr, worklease.ErrFenced) {
 			return worklease.ErrFenced
 		}
-		return fmt.Errorf("worker: release: %w", relErr)
+		if result == nil {
+			return fmt.Errorf("worker: release: %w", relErr)
+		}
 	}
 
-	return workErr
+	return result
 }

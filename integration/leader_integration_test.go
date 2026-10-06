@@ -138,4 +138,32 @@ var _ = Describe("leader.Elect", func() {
 			Expect(errors.Is(electErr, worklease.ErrFenced)).To(BeTrue())
 		})
 	})
+
+	// ===== PHASE 4: Cancellation =====
+	Describe("Phase 4: Cancellation", func() {
+		It("when the parent context is cancelled mid-fn, the lease is released and the next leader acquires immediately and sees ExitAbandoned (Rule 34)", func() {
+			b := memory.New()
+
+			leaseG, err := worklease.New(b, worklease.Config{TTL: 30 * time.Second, HolderID: "node-g"})
+			Expect(err).NotTo(HaveOccurred())
+			parent, cancelParent := context.WithCancel(ctx)
+			defer cancelParent()
+			err = leader.Elect(parent, leaseG, "leader-work", leader.Config{}, func(c context.Context) error {
+				cancelParent()
+				<-c.Done()
+				return c.Err()
+			})
+			Expect(err).To(MatchError(context.Canceled))
+
+			// No clock advance: Elect released on its cleanup context.
+			leaseH, err := worklease.New(b, worklease.Config{TTL: 30 * time.Second, HolderID: "node-h"})
+			Expect(err).NotTo(HaveOccurred())
+			tokenH, err := leaseH.Acquire(ctx, "leader-work")
+			Expect(err).NotTo(HaveOccurred())
+			cp, err := leaseH.ReadCheckpoint(ctx, tokenH)
+			Expect(err).NotTo(HaveOccurred())
+			Expect(cp.PrevExit).To(Equal(worklease.ExitAbandoned))
+			Expect(cp.PrevHolderID).To(Equal("node-g"))
+		})
+	})
 })

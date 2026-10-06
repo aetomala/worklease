@@ -69,7 +69,7 @@ func scenario1HappyPath(ctx context.Context, b backend.Backend) {
 	lease, _ := worklease.New(b, worklease.Config{TTL: 30 * time.Second, HolderID: "worker-A"})
 	r, _ := worker.NewRunner(worker.RunnerConfig{
 		Lease: lease,
-		WorkFn: func(renewCtx context.Context, token worklease.Token, _ []byte, _ bool) ([]byte, error) {
+		WorkFn: func(renewCtx context.Context, token worklease.Token, _ worklease.Checkpoint) ([]byte, error) {
 			progress := CancellationProgress{}
 
 			if err := runStep(renewCtx, lease, token, "cancel billing", func() { cancelBilling("tenant-alpha") }, &progress.BillingCancelled, &progress); err != nil {
@@ -121,7 +121,8 @@ func scenario2CrashRecovery(ctx context.Context, b backend.Backend) {
 	leaseC, _ := worklease.New(b, worklease.Config{TTL: 30 * time.Second, HolderID: "worker-C"})
 	r, _ := worker.NewRunner(worker.RunnerConfig{
 		Lease: leaseC,
-		WorkFn: func(renewCtx context.Context, token worklease.Token, prior []byte, cleanHandoff bool) ([]byte, error) {
+		WorkFn: func(renewCtx context.Context, token worklease.Token, cp worklease.Checkpoint) ([]byte, error) {
+			prior, cleanHandoff := cp.State, cp.PrevExit == worklease.ExitFinished
 			progress, err := checkpoint.Decode[CancellationProgress](checkpoint.JSON(), prior)
 			if err != nil {
 				return nil, err
@@ -181,7 +182,7 @@ func scenario3ZombieFencing(ctx context.Context, b backend.Backend) {
 	leaseE, _ := worklease.New(b, worklease.Config{TTL: 30 * time.Second, HolderID: "worker-E"})
 	rE, _ := worker.NewRunner(worker.RunnerConfig{
 		Lease: leaseE,
-		WorkFn: func(renewCtx context.Context, token worklease.Token, _ []byte, _ bool) ([]byte, error) {
+		WorkFn: func(renewCtx context.Context, token worklease.Token, _ worklease.Checkpoint) ([]byte, error) {
 			log.Printf("  worker-E: acquired lease (fencing token %d)", token.FencingToken())
 
 			// Worker D wakes up and tries to checkpoint — rejected.

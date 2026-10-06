@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"math/rand/v2"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -51,18 +52,30 @@ func (e *permanentErr) Error() string   { return e.cause.Error() }
 func (e *permanentErr) Permanent() bool { return true }
 func (e *permanentErr) Unwrap() error   { return e.cause }
 
-// Observer receives callbacks on slot lifecycle transitions. All methods are
-// called synchronously. Implementations must not block or panic. The zero value
-// of Config.Observer is nil; the library substitutes a no-op observer.
+// Observer receives callbacks on slot lifecycle transitions.
+// All methods are called synchronously. Implementations must not block or panic.
+// The zero value of Config.Observer is nil; the library substitutes a no-op.
 type Observer interface {
 	// OnSlotAcquired is called when a slot's Runner.Run begins executing WorkFn.
 	OnSlotAcquired(ctx context.Context, e SlotAcquiredEvent)
+
 	// OnSlotLost is called when a slot loses its lease via fencing.
+	// The slot attempts reacquisition at the next loop iteration.
 	OnSlotLost(ctx context.Context, e SlotLostEvent)
-	// OnSlotBackoff is called when a slot enters backoff after a non-permanent, non-fencing error.
+
+	// OnSlotBackoff is called when a slot waits BackoffInterval after a
+	// non-permanent error other than ErrFenced and ErrLeaseHeld. The
+	// e.Duration field is the effective BackoffInterval.
 	OnSlotBackoff(ctx context.Context, e SlotBackoffEvent)
+
 	// OnSlotDead is called when a slot exits permanently via PermanentError.
+	// The slot does not reacquire.
 	OnSlotDead(ctx context.Context, e SlotDeadEvent)
+
+	// OnSlotRetired is called when a slot's WorkFn retires its work ID with
+	// worklease.ErrRetire and the lease is released with ExitRetired. The slot
+	// does not reacquire.
+	OnSlotRetired(ctx context.Context, e SlotRetiredEvent)
 }
 
 // SlotAcquiredEvent carries the context of a slot acquisition.
@@ -84,6 +97,11 @@ type SlotDeadEvent struct {
 	Err    error
 }
 
+// SlotRetiredEvent carries the context of a slot whose work ID was retired.
+type SlotRetiredEvent struct {
+	WorkID string
+}
+
 // noopPoolObserver is a pool.Observer that discards all slot lifecycle events.
 // Substituted when Config.Observer is nil.
 type noopPoolObserver struct{}
@@ -92,41 +110,68 @@ func (noopPoolObserver) OnSlotAcquired(_ context.Context, _ SlotAcquiredEvent) {
 func (noopPoolObserver) OnSlotLost(_ context.Context, _ SlotLostEvent)         {}
 func (noopPoolObserver) OnSlotBackoff(_ context.Context, _ SlotBackoffEvent)   {}
 func (noopPoolObserver) OnSlotDead(_ context.Context, _ SlotDeadEvent)         {}
+func (noopPoolObserver) OnSlotRetired(_ context.Context, _ SlotRetiredEvent)   {}
 
 // WorkFn is the work function executed per slot.
-// The ctx argument is the renewal context — cancelled on fencing or renewal failure.
-// The workID argument identifies which slot is executing.
-// The token argument is the current lease token — use it for mid-work Checkpoint calls.
-// The prior argument contains the last checkpointed state from the previous holder, or nil.
-// The cleanHandoff argument is true if the previous holder released explicitly.
-// Return (checkpoint []byte, error): checkpoint is written as final state if
-// non-nil and error is not ErrFenced. Return a PermanentError to drop the slot
-// without reacquisition.
-type WorkFn func(ctx context.Context, workID string, token worklease.Token, prior []byte, cleanHandoff bool) ([]byte, error)
+// The workID argument identifies the slot. The token argument is the current
+// lease token; use it for mid-work Checkpoint calls. The prior argument
+// carries the last checkpointed state and how the immediately previous holder
+// exited. Return final state to checkpoint, or nil to skip it. Return nil to
+// release with ExitFinished and run again after RerunInterval, an error wrapping
+// worklease.ErrRetire to release with ExitRetired and stop the slot, a
+// PermanentError to release with ExitAbandoned and drop the slot, or any other
+// error to release with ExitAbandoned and back off.
+type WorkFn func(ctx context.Context, workID string, token worklease.Token, prior worklease.Checkpoint) ([]byte, error)
+
+// Pacing defaults applied by New when the matching Config field is zero or
+// negative, and the jitter fraction for IdleInterval and RerunInterval waits.
+const (
+	defaultIdleInterval    = time.Second
+	defaultRerunInterval   = time.Second
+	defaultBackoffInterval = time.Second
+	idleJitter             = 0.20
+)
 
 // Config holds construction parameters for a Pool.
 type Config struct {
 	// WorkIDs is the fixed set of work IDs this pool competes for.
-	// Required — empty slice returns ErrEmptyWorkIDs from New.
+	// Required; an empty slice returns ErrEmptyWorkIDs from New.
 	WorkIDs []string
 
-	// AcquireOptions are passed to each slot's internal Runner. Optional; nil
-	// passes no options to each slot's Runner.
-	// Must not include worklease.WithWaitForLease — pool manages its own
-	// acquisition loop; blocking inside Runner prevents clean ctx cancellation.
-	// Passing WithWaitForLease returns ErrWithWaitForLeaseProhibited from New.
+	// AcquireOptions are passed to each slot's internal Runner. Passing
+	// worklease.WithWaitForLease returns ErrWithWaitForLeaseProhibited from New.
 	AcquireOptions []worklease.AcquireOption
 
-	// RenewalOptions are passed to each slot's internal Runner. Optional; nil
-	// uses the Runner default renewal interval (TTL/2).
+	// RenewalOptions are passed to each slot's internal Runner. Optional.
 	RenewalOptions []worklease.RenewalOption
 
-	// BackoffInterval is the wait before reacquiring a slot after WorkFn
-	// returns a non-permanent, non-fencing error. Zero means immediate retry.
+	// IdleInterval is the wait before retrying a slot whose work ID another
+	// holder holds, meaning Runner.Run returned ErrLeaseHeld. Zero or negative
+	// means 1s. Each wait is drawn uniformly from
+	// [IdleInterval, 1.2*IdleInterval). OnSlotBackoff is not called for these
+	// waits.
+	IdleInterval time.Duration
+
+	// RerunInterval is the wait before reacquiring a slot after its WorkFn
+	// returned nil and the lease was released with ExitFinished. Zero or
+	// negative means 1s. Each wait is drawn uniformly from
+	// [RerunInterval, 1.2*RerunInterval), which also gives peer processes a
+	// chance to acquire the work ID. OnSlotBackoff is not called for these
+	// waits.
+	RerunInterval time.Duration
+
+	// BackoffInterval is the wait before reacquiring a slot after Runner.Run
+	// returns a non-permanent error other than ErrFenced and ErrLeaseHeld.
+	// Zero or negative means 1s. No jitter.
 	BackoffInterval time.Duration
 
+	// CleanupTimeout is passed to each slot's Runner. It bounds the final
+	// Checkpoint and Release, which survive cancellation of Run's context.
+	// Zero or negative means 5s.
+	CleanupTimeout time.Duration
+
 	// Observer receives callbacks on slot lifecycle transitions.
-	// Optional — zero value (nil) installs a no-op observer. Never panics on nil.
+	// Optional; nil installs a no-op observer.
 	Observer Observer
 }
 
@@ -163,7 +208,18 @@ func New(lease worklease.Lease, cfg Config, fn WorkFn) (*Pool, error) {
 		return nil, ErrWithWaitForLeaseProhibited
 	}
 
-	// ===== STEP 4: Inject NoOp observer when nil =====
+	// ===== STEP 4: Apply pacing defaults for zero or negative values =====
+	if cfg.IdleInterval <= 0 {
+		cfg.IdleInterval = defaultIdleInterval
+	}
+	if cfg.RerunInterval <= 0 {
+		cfg.RerunInterval = defaultRerunInterval
+	}
+	if cfg.BackoffInterval <= 0 {
+		cfg.BackoffInterval = defaultBackoffInterval
+	}
+
+	// ===== STEP 5: Inject NoOp observer when nil =====
 	obs := cfg.Observer
 	if obs == nil {
 		obs = noopPoolObserver{}
@@ -179,10 +235,13 @@ func New(lease worklease.Lease, cfg Config, fn WorkFn) (*Pool, error) {
 }
 
 // Run starts acquisition loops for all configured work IDs and blocks until
-// ctx is cancelled or all slots are permanently dead. Returns ErrAllSlotsDead if
-// every slot exited via PermanentError before ctx was cancelled; returns nil on
-// clean shutdown. All active slots complete or release before Run returns.
-// Run is not safe to call concurrently on the same Pool.
+// ctx is cancelled or every slot has exited. A slot exits when its WorkFn
+// retires the work ID with worklease.ErrRetire or returns a PermanentError.
+// Run returns ErrAllSlotsDead only if every slot exited through a
+// PermanentError. It returns nil if ctx was cancelled or at least one slot
+// retired. Every active slot completes its final Checkpoint and Release,
+// bounded by CleanupTimeout, before Run returns. Run is not safe to call
+// concurrently on the same Pool.
 func (p *Pool) Run(ctx context.Context) error {
 	// Internal context so the last dying slot can unblock idle siblings.
 	runCtx, cancel := context.WithCancel(ctx)
@@ -204,7 +263,8 @@ func (p *Pool) Run(ctx context.Context) error {
 				// ===== Construct runner — new per iteration =====
 				// Active marking and OnSlotAcquired fire at WorkFn ENTRY, inside
 				// the adapter — not around r.Run, which also spans acquisition.
-				slotFn := func(wfCtx context.Context, token worklease.Token, prior []byte, cleanHandoff bool) ([]byte, error) {
+				retired := false
+				slotFn := func(wfCtx context.Context, token worklease.Token, prior worklease.Checkpoint) ([]byte, error) {
 					p.obs.OnSlotAcquired(wfCtx, SlotAcquiredEvent{WorkID: workID})
 					p.mu.Lock()
 					p.active[workID] = struct{}{}
@@ -214,13 +274,16 @@ func (p *Pool) Run(ctx context.Context) error {
 						delete(p.active, workID)
 						p.mu.Unlock()
 					}()
-					return p.fn(wfCtx, workID, token, prior, cleanHandoff)
+					state, err := p.fn(wfCtx, workID, token, prior)
+					retired = errors.Is(err, worklease.ErrRetire)
+					return state, err
 				}
 				r, err := worker.NewRunner(worker.RunnerConfig{
 					Lease:          p.lease,
 					WorkFn:         slotFn,
 					AcquireOptions: p.cfg.AcquireOptions,
 					RenewalOptions: p.cfg.RenewalOptions,
+					CleanupTimeout: p.cfg.CleanupTimeout,
 				})
 				if err != nil {
 					// NewRunner only fails on nil Lease or nil WorkFn — both guaranteed non-nil here.
@@ -230,35 +293,37 @@ func (p *Pool) Run(ctx context.Context) error {
 				// ===== Execute =====
 				runErr := r.Run(runCtx, workID)
 
-				// ===== Decide next action =====
-				if runCtx.Err() != nil {
-					return // ctx cancelled (external or all-dead) — exit goroutine
-				}
-				if errors.Is(runErr, worklease.ErrFenced) {
-					p.obs.OnSlotLost(runCtx, SlotLostEvent{WorkID: workID})
-					continue // reacquire immediately, no backoff
-				}
+				// ===== Decide next action — first match wins =====
 				var pe PermanentError
-				if errors.As(runErr, &pe) && pe.Permanent() {
+				switch {
+				case runErr == nil && retired:
+					p.obs.OnSlotRetired(runCtx, SlotRetiredEvent{WorkID: workID})
+					return // retired — exit goroutine; does not count toward dead
+				case runCtx.Err() != nil:
+					return // ctx cancelled (external or all-dead) — exit goroutine
+				case runErr == nil:
+					if !sleep(runCtx, jitterWait(p.cfg.RerunInterval)) {
+						return
+					}
+				case errors.Is(runErr, worklease.ErrFenced):
+					p.obs.OnSlotLost(runCtx, SlotLostEvent{WorkID: workID})
+					// reacquire immediately, no wait
+				case errors.As(runErr, &pe) && pe.Permanent():
 					p.obs.OnSlotDead(runCtx, SlotDeadEvent{WorkID: workID, Err: runErr})
 					if dead.Add(1) == total {
 						cancel() // last slot dead — unblock idle siblings
 					}
 					return // exit goroutine permanently
-				}
-				if runErr != nil {
-					// non-permanent error — wait BackoffInterval then retry
-					p.obs.OnSlotBackoff(runCtx, SlotBackoffEvent{WorkID: workID, Err: runErr, Duration: p.cfg.BackoffInterval})
-					if p.cfg.BackoffInterval > 0 {
-						select {
-						case <-runCtx.Done():
-							return
-						case <-time.After(p.cfg.BackoffInterval):
-						}
+				case errors.Is(runErr, worklease.ErrLeaseHeld):
+					if !sleep(runCtx, jitterWait(p.cfg.IdleInterval)) {
+						return
 					}
-					continue
+				default:
+					p.obs.OnSlotBackoff(runCtx, SlotBackoffEvent{WorkID: workID, Err: runErr, Duration: p.cfg.BackoffInterval})
+					if !sleep(runCtx, p.cfg.BackoffInterval) {
+						return
+					}
 				}
-				// nil return — reacquire immediately
 			}
 		}()
 	}
@@ -268,6 +333,23 @@ func (p *Pool) Run(ctx context.Context) error {
 		return ErrAllSlotsDead
 	}
 	return nil
+}
+
+// jitterWait returns base plus additive jitter drawn uniformly from [0, idleJitter*base).
+func jitterWait(base time.Duration) time.Duration {
+	return base + time.Duration(rand.Float64()*idleJitter*float64(base))
+}
+
+// sleep waits for d or until ctx is done. It returns false if ctx ended first.
+func sleep(ctx context.Context, d time.Duration) bool {
+	t := time.NewTimer(d)
+	defer t.Stop()
+	select {
+	case <-ctx.Done():
+		return false
+	case <-t.C:
+		return true
+	}
 }
 
 // ActiveSlots returns the work IDs currently held by this Pool instance.

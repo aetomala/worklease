@@ -13,6 +13,8 @@ import (
 	"github.com/aetomala/worklease/backend"
 	"github.com/aetomala/worklease/backend/conformance"
 	wlpostgres "github.com/aetomala/worklease/backend/postgres"
+	"github.com/aetomala/worklease/leader"
+	"github.com/aetomala/worklease/worker"
 )
 
 var _ = Describe("conformance", conformance.RunSuite(func() backend.Backend {
@@ -306,6 +308,76 @@ var _ = Describe("Backend (postgres)", func() {
 			Expect(err).NotTo(HaveOccurred())
 			_, err = db.ExecContext(ctx, "UPDATE worklease_leases SET prev_exit_mode = 'bogus' WHERE work_id = $1", "x4")
 			Expect(err).To(MatchError(ContainSubstring("worklease_leases_prev_exit_mode_check")))
+		})
+	})
+
+	Describe("worker.Runner on PostgreSQL (#80; Group B)", func() {
+		// runCancelledMidWork runs holder-a's Runner on "w-run", cancels the parent
+		// context while WorkFn is running, and returns Run's error. WorkFn
+		// returns its final state together with the context error.
+		runCancelledMidWork := func() error {
+			leaseA, err := worklease.New(b, worklease.Config{TTL: 30 * time.Second, HolderID: "holder-a"})
+			Expect(err).NotTo(HaveOccurred())
+			parent, cancelParent := context.WithCancel(ctx)
+			defer cancelParent()
+			r, err := worker.NewRunner(worker.RunnerConfig{
+				Lease: leaseA,
+				WorkFn: func(wctx context.Context, _ worklease.Token, _ worklease.Checkpoint) ([]byte, error) {
+					cancelParent()
+					<-wctx.Done()
+					return []byte("final-a"), wctx.Err()
+				},
+			})
+			Expect(err).NotTo(HaveOccurred())
+			return r.Run(parent, "w-run")
+		}
+
+		It("when the parent context is cancelled mid-WorkFn, Run returns the WorkFn error, the final state is stored, and a successor acquires without waiting for the TTL", func() {
+			Expect(runCancelledMidWork()).To(MatchError(context.Canceled))
+
+			leaseB, err := worklease.New(b, worklease.Config{TTL: 30 * time.Second, HolderID: "holder-b"})
+			Expect(err).NotTo(HaveOccurred())
+			tokenB, err := leaseB.Acquire(ctx, "w-run") // fail-fast: ErrLeaseHeld if A did not release
+			Expect(err).NotTo(HaveOccurred())
+			cp, err := leaseB.ReadCheckpoint(ctx, tokenB)
+			Expect(err).NotTo(HaveOccurred())
+			Expect(cp.State).To(Equal([]byte("final-a")))
+		})
+
+		It("the successor reads PrevExit == ExitAbandoned, the cancelled holder's ID, and its final state", func() {
+			Expect(runCancelledMidWork()).To(HaveOccurred())
+
+			leaseB, err := worklease.New(b, worklease.Config{TTL: 30 * time.Second, HolderID: "holder-b"})
+			Expect(err).NotTo(HaveOccurred())
+			tokenB, err := leaseB.Acquire(ctx, "w-run")
+			Expect(err).NotTo(HaveOccurred())
+			cp, err := leaseB.ReadCheckpoint(ctx, tokenB)
+			Expect(err).NotTo(HaveOccurred())
+			Expect(cp).To(Equal(worklease.Checkpoint{State: []byte("final-a"), PrevExit: worklease.ExitAbandoned, PrevHolderID: "holder-a"}))
+		})
+	})
+
+	Describe("leader.Elect on PostgreSQL (#80; Group B)", func() {
+		It("when the parent context is cancelled mid-fn, the lease is released and a successor acquires without waiting for the TTL and reads ExitAbandoned", func() {
+			leaseA, err := worklease.New(b, worklease.Config{TTL: 30 * time.Second, HolderID: "leader-a"})
+			Expect(err).NotTo(HaveOccurred())
+			parent, cancelParent := context.WithCancel(ctx)
+			defer cancelParent()
+			err = leader.Elect(parent, leaseA, "w-elect", leader.Config{}, func(c context.Context) error {
+				cancelParent()
+				<-c.Done()
+				return c.Err()
+			})
+			Expect(err).To(MatchError(context.Canceled))
+
+			leaseB, err := worklease.New(b, worklease.Config{TTL: 30 * time.Second, HolderID: "leader-b"})
+			Expect(err).NotTo(HaveOccurred())
+			tokenB, err := leaseB.Acquire(ctx, "w-elect") // fail-fast: ErrLeaseHeld if A did not release
+			Expect(err).NotTo(HaveOccurred())
+			cp, err := leaseB.ReadCheckpoint(ctx, tokenB)
+			Expect(err).NotTo(HaveOccurred())
+			Expect(cp.PrevExit).To(Equal(worklease.ExitAbandoned))
+			Expect(cp.PrevHolderID).To(Equal("leader-a"))
 		})
 	})
 })
