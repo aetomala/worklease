@@ -67,7 +67,7 @@ func scenario1HappyPath(ctx context.Context, b backend.Backend, tenants []string
 	lease, _ := worklease.New(b, worklease.Config{TTL: 30 * time.Second, HolderID: "coordinator-A"})
 	r, _ := worker.NewRunner(worker.RunnerConfig{
 		Lease: lease,
-		WorkFn: func(renewCtx context.Context, token worklease.Token, _ []byte, _ bool) ([]byte, error) {
+		WorkFn: func(renewCtx context.Context, token worklease.Token, _ worklease.Checkpoint) ([]byte, error) {
 			if err := migrateTenants(renewCtx, lease, token, tenants, &MigrationProgress{}); err != nil {
 				return nil, err
 			}
@@ -115,7 +115,8 @@ func scenario2CrashRecovery(ctx context.Context, b backend.Backend, tenants []st
 	leaseC, _ := worklease.New(b, worklease.Config{TTL: 30 * time.Second, HolderID: "coordinator-C"})
 	r, _ := worker.NewRunner(worker.RunnerConfig{
 		Lease: leaseC,
-		WorkFn: func(renewCtx context.Context, token worklease.Token, prior []byte, cleanHandoff bool) ([]byte, error) {
+		WorkFn: func(renewCtx context.Context, token worklease.Token, cp worklease.Checkpoint) ([]byte, error) {
+			prior, cleanHandoff := cp.State, cp.PrevExit == worklease.ExitFinished
 			progress, err := checkpoint.Decode[MigrationProgress](checkpoint.JSON(), prior)
 			if err != nil {
 				return nil, err
@@ -176,7 +177,8 @@ func scenario3ZombieFencing(ctx context.Context, b backend.Backend, tenants []st
 	leaseE, _ := worklease.New(b, worklease.Config{TTL: 30 * time.Second, HolderID: "coordinator-E"})
 	rE, _ := worker.NewRunner(worker.RunnerConfig{
 		Lease: leaseE,
-		WorkFn: func(renewCtx context.Context, token worklease.Token, prior []byte, cleanHandoff bool) ([]byte, error) {
+		WorkFn: func(renewCtx context.Context, token worklease.Token, cp worklease.Checkpoint) ([]byte, error) {
+			prior, cleanHandoff := cp.State, cp.PrevExit == worklease.ExitFinished
 			log.Printf("  coordinator-E: acquired (token %d)", token.FencingToken())
 
 			// Coordinator D wakes up and tries to checkpoint tenant 3 — rejected.
