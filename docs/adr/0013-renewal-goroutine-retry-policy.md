@@ -97,3 +97,9 @@ without a side channel.
   `renewalConfig` backoff fields
 - `docs/adr/0004-renewal-loop-managed-goroutine.md` — the ADR this amends
 - `UPGRADING.md` — v0.4.x → v0.5.0 renewal behavioral change
+
+## Amendment (2026-10-06) — lease window tracking and terminal `ErrLeaseExpired`
+
+**Lease window (v0.6, PR #83).** The retry bound is no longer `token.ExpiresAt()`. The window starts as the earlier of `token.ExpiresAt()` and the local monotonic acquire start plus TTL, and advances to the local start of each successful `Renew` plus TTL. Bounding by the acquisition-time expiry made the first transient error after one TTL fatal while the lease was still valid in storage. The local cap stops a backend clock running ahead of the local clock from extending retries past the true expiry.
+
+**`ErrLeaseExpired` is terminal (v0.6, #84).** When `Renew` returns `ErrLeaseExpired`, storage has evaluated the lease and found it lapsed, so retrying cannot help. The goroutine cancels the renewal context immediately, with no backoff and no further attempts. The cancel cause is `errors.Join(ErrLeaseWindowExhausted, ErrLeaseExpired)`, so `errors.Is` matches both sentinels and existing checks for `ErrLeaseWindowExhausted` keep working. `OnRenew` fires once for that attempt.

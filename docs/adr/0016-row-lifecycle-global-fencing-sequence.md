@@ -106,6 +106,19 @@ Both operations bypass `LeaseObserver` entirely — no `OnForget` or sweep-relat
 
 Global fencing-sequence monotonicity (the decision above) is the safety property that makes both operations sound: because tokens never reset on deletion, a fresh `Acquire` after a `Forget` or a `Sweep` always draws a strictly greater token than any the deleted row held, so a zombie holding the old token is correctly fenced on its next write.
 
+## Amendment (2026-10-06) — ADR-0018: retention keys on declared exits
+
+The retention component's `Sweep` predicate is replaced. `Backend.Sweep` deletes rows that are expired, last updated more than `Retention` ago, and either:
+
+- were released with `ExitRetired` (always); or
+- have no declared exit, meaning the lease expired, and `SweepOptions.IncludeExpired` is set.
+
+Rows released with `ExitFinished` or `ExitAbandoned` are never deleted. They are the resume points that successors read. `SweepOptions.IncludeCrashed` is renamed `IncludeExpired`; it had not shipped in a tag.
+
+`Retention` is redefined as how long a retired or expired row is kept after its last update. It is not tied to the TTL, and held rows are never eligible whatever `Retention` is. The earlier guidance that `Retention` must exceed the maximum TTL is withdrawn.
+
+`ReadCheckpoint` returns `ErrFenced` when the row is missing, on both backends (#75), so a holder whose row was removed by `Forget` or `Sweep` is told so instead of reading empty state.
+
 ## References
 
 - `backend/postgres/postgres.go` — `queryAcquire` (`nextval` + `RETURNING`), single-statement `Acquire`

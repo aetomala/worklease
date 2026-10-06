@@ -1,10 +1,10 @@
 # ADR-0018: Lease holders record an explicit exit mode; successors read the previous holder's exit
 
-**Status:** Proposed
+**Status:** Accepted
 **Date:** 2026-10-02
 **Amends:** ADR-0012 (Release semantics), ADR-0016 (retention component)
 **Affects:** ADR-0007 (observer events), ADR-0010 / ADR-0011 (work function signatures), ADR-0015 (conformance), ADR-0017 (schema migration)
-**Issues:** #73, #74, #76, #79, #80
+**Issues:** #73, #74, #75, #76, #79, #80, #81, #84
 
 ## Context
 
@@ -43,17 +43,17 @@ Release(ctx context.Context, token Token, mode ExitMode) error
 
 **Unknown modes are treated as `ExitExpired`.** This is a documented, permanent rule: any mode a caller does not recognize must be handled as expired, which is the conservative interpretation. It lets a mode be added after 1.0 without silently changing the meaning of existing caller code.
 
-`Release` accepts only `ExitFinished`, `ExitAbandoned`, or `ExitRetired`. Any other value returns `ErrInvalidExitMode` without calling the backend.
+`Release` accepts only `ExitFinished`, `ExitAbandoned`, or `ExitRetired`. Any other value returns `ErrInvalidExitMode` without calling the backend. Backends apply the same check first, without side effects, so a direct `Backend.Release` call cannot store an undeclarable mode.
 
 Every mode keeps ADR-0012's behavior: `Release` expires the lease immediately, so a successor acquires without waiting for the TTL. A retired work ID can still be acquired. The new holder sees `PrevExit == ExitRetired` and decides what to do.
 
-`ExitAbandoned` releases immediately, the same as every other mode. A work function that fails persistently is therefore retried as fast as the next acquirer polls. This release does not add an exit-specific delay. For `pool`, the bound is the idle and backoff intervals defined by #81. For direct `Lease`, `worker.Runner`, and `leader.Elect` callers, the retry rate is the caller's responsibility, consistent with R7.
+`ExitAbandoned` releases immediately, the same as every other mode. A work function that fails persistently is therefore retried as fast as the next acquirer polls. This release does not add an exit-specific delay. For `pool`, the bound is `IdleInterval`, `RerunInterval`, and `BackoffInterval`, each defaulting to 1s. `leader.Elect` callers are paced by `leader.Config.BackoffInterval`, which applies on every non-fencing return, including `ExitAbandoned`. Direct `Lease` and `worker.Runner` callers own their retry pacing, as described in the ARCHITECTURE residual risk "leader.Elect retry loops have no built-in backoff".
 
 ### 2. A lapsed holder cannot record an exit
 
 `Release`, in any mode, returns `ErrLeaseExpired` once the lease has expired, even if no successor has acquired it yet. A holder that lost its lease cannot vouch for how the work ended, so the successor sees `ExitExpired`. The checks run in order: fencing first (`ErrFenced`), then expiry (`ErrLeaseExpired`). This matches `Renew`.
 
-`Checkpoint` is unchanged: a slow but live holder may still revive a lapsed, unclaimed lease by checkpointing. `Forget` is unchanged.
+`Checkpoint` returns `ErrLeaseExpired`, without writing, once the holder has declared an exit with `Release`; a declared exit cannot be undone by a late write. A slow but live holder whose lease lapsed with no declared exit and no successor may still revive it by checkpointing. After any declared exit, every further write from that holder — `Checkpoint`, `Release`, `Renew` — returns `ErrLeaseExpired`. `Forget` is unchanged.
 
 ### 3. The previous holder's exit is captured at Acquire
 
@@ -75,7 +75,7 @@ exit_mode      = NULL
 
 On the insert path, a new row gets `prev_exit_mode = 'none'` and `prev_holder_id = NULL`.
 
-`Checkpoint` no longer touches any exit column. The old "Checkpoint resets the flag" rule existed only because one flag was shared between the current and the previous holder.
+`Checkpoint` never writes an exit column; it reads `exit_mode` only to refuse writes after a declared exit. The old "Checkpoint resets the flag" rule existed only because one flag was shared between the current and the previous holder.
 
 The values are stored as text for operator readability. Other backends — memory now, Redis or etcd later — must perform the same copy-and-reset atomically with token issuance, using a Lua script or a transaction. Conformance enforces this.
 
@@ -97,6 +97,8 @@ ReadCheckpoint(ctx context.Context, record LeaseRecord) (Checkpoint, error) // B
 
 `ExitMode` and `Checkpoint` are defined in `package backend` and re-exported from `package worklease` as type aliases, with the constants re-declared. This follows the precedent of `SweepOptions`: `backend` cannot import `worklease`.
 
+`ExitMode.String()` returns the SQL text value — `"none"`, `"finished"`, `"abandoned"`, `"retired"`, `"expired"` — and formats any other value as `ExitMode(<n>)`. The memory backend stores a SQL `NULL` (no declared exit) as `ExitNone` in its current-exit field. `ExitNone` is never declarable, so the encoding is unambiguous.
+
 ### 5. Work functions receive the `Checkpoint`; `ErrRetire` retires the work ID
 
 The `worker.WorkFn` and `pool.WorkFn` signatures replace `(prior []byte, cleanHandoff bool)` with `(prior worklease.Checkpoint)`. Their return type stays `([]byte, error)`.
@@ -110,18 +112,23 @@ A new root sentinel, `worklease.ErrRetire`, lets a work function declare permane
 | `WorkFn` returns `nil` | checkpointed | `ExitFinished` | `nil` |
 | `WorkFn` returns an error wrapping `ErrRetire` | checkpointed | `ExitRetired` | `nil` |
 | `WorkFn` returns another non-fencing error, including after parent-context cancellation | checkpointed | `ExitAbandoned` | the error |
-| `ReadCheckpoint` fails with a non-fencing error | — | `ExitAbandoned` | the wrapped error |
+| `ReadCheckpoint` fails with a non-fencing error | — | none (the work function never saw the state; the successor sees `ExitExpired` after the TTL) | the wrapped error |
 | Fenced, from `WorkFn`, `Checkpoint`, or renewal | — | none (a successor already holds the lease) | `ErrFenced` |
-| `renewCtx` cancelled with `ErrLeaseWindowExhausted` | — | none (lease lapsed; successor sees `ExitExpired`) | the `WorkFn` error |
+| `renewCtx` cancelled with `ErrLeaseWindowExhausted` (including the #84 join with `ErrLeaseExpired`) | — | none (lease lapsed; successor sees `ExitExpired`) | the `WorkFn` error, or the wrapped cause if `WorkFn` returned `nil` |
 | `WorkFn` panics | — | none (successor sees `ExitExpired` after the TTL) | the panic propagates |
+| The final `Checkpoint` fails with a non-fencing error | not stored | `ExitAbandoned` | `worker: checkpoint: …` if `WorkFn` succeeded, else the `WorkFn` error |
+| `Release` returns `ErrLeaseExpired` after `WorkFn` returned `nil` or `ErrRetire` | checkpointed | none (successor sees `ExitExpired`) | `worker: release: …` wrapping `ErrLeaseExpired` |
+| `Release` returns `ErrLeaseExpired` after `WorkFn` returned another error | checkpointed | none (successor sees `ExitExpired`) | the `WorkFn` error |
+| `Release` returns `ErrFenced` | checkpointed | none (a successor holds the lease) | `ErrFenced` |
 
 The final `Checkpoint` and the `Release` on these paths run under a cleanup context, `context.WithTimeout(context.WithoutCancel(ctx), CleanupTimeout)`. It survives cancellation of the caller's context but cannot hang shutdown. `CleanupTimeout` is a new field on `worker.RunnerConfig`, `leader.Config`, and `pool.Config`; zero means 5s (#80).
 
-`leader.Elect` applies the same mapping to `fn`'s return value.
+`leader.Elect` applies the same mapping to `fn`'s return value. Precedence is fenced, then lease window exhausted, then `ErrRetire`, then `nil`, then any other error. `OnRelinquished` fires after a successful `Release` with `ExitFinished` or `ExitRetired`; it does not fire for `ExitAbandoned`.
 
 `pool` treats `ErrRetire` as successful, permanent completion of a slot:
 - The slot goroutine exits without reacquiring and without backoff.
 - `pool.Observer` gains `OnSlotRetired(ctx, SlotRetiredEvent{WorkID})`. `OnSlotDead` stays reserved for `PermanentError`.
+- A slot whose work function returned `nil` waits `RerunInterval` (default 1s, up to 20% jitter) before reacquiring, so a finished slot neither spins nor starves peer processes.
 - `Run` returns once every slot has exited, whether retired or dead, or when `ctx` is cancelled.
 - `Run` returns `ErrAllSlotsDead` only if every slot exited through `PermanentError`. If at least one slot retired, it returns `nil`.
 
@@ -225,7 +232,7 @@ The audit's reproductions are all expressible: a crash before the first checkpoi
 
 **A lapsed holder's word is not trusted.** Once expired, the holder cannot know whether its last step completed relative to any successor. Refusing its exit keeps the record at `Expired`, which is the conservative answer.
 
-**`Checkpoint` stays free of exit concerns.** Separating the current exit from the previous exit removes the need for `Checkpoint` to reset a flag. `Checkpoint` once again means only "state plus lease extension, atomically".
+**`Checkpoint` never writes an exit.** Separating the current exit from the previous exit removes the need for `Checkpoint` to reset a flag. `Checkpoint` means "state plus lease extension, atomically", and it refuses once the holder has declared an exit, so the successor reads the exit that was actually declared. Clearing the exit on a late checkpoint was rejected: it would revive a released lease, delay the successor by a TTL, and downgrade a declared `ExitFinished` to `ExitExpired`.
 
 ## Consequences
 

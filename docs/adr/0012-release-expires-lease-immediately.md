@@ -105,3 +105,14 @@ offset.
 - `docs/adr/0008-clock-interface-memory-backend.md` — fake clock pattern used in tests
 - PR #32 — integration tests that first revealed the gap
 - Issue #33 — bug report with observable evidence
+
+## Amendment (2026-10-06) — ADR-0018: declared exit modes
+
+`Release` now takes a required exit mode, `Release(ctx, token, mode)`, and records it in `exit_mode` instead of setting `clean_handoff`. The immediate-expiry behavior in this ADR is unchanged for every mode: `Release` sets `expires_at` one millisecond in the past, so a successor acquires without waiting for the TTL.
+
+Two behaviors change:
+
+- `Release` checks fencing first and then expiry. Once the lease has expired, `Release` returns `ErrLeaseExpired` in every mode, even if no successor has acquired the work ID, and records nothing. The successor sees `ExitExpired`.
+- `clean_handoff` is no longer read or written. The column stays in the schema, deprecated, until a later release drops it (#86).
+
+The note that `clean_handoff` disambiguates intent after `Release` is superseded: `exit_mode`, and the `prev_exit_mode` that `Acquire` captures from it, carry that information. See ADR-0018.
