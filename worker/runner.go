@@ -79,14 +79,16 @@ func (r *Runner) Run(ctx context.Context, workID string) error {
 	}
 
 	// ===== STEP 2: Read Prior Checkpoint =====
-	prior, cleanHandoff, err := r.lease.ReadCheckpoint(ctx, token)
+	cp, err := r.lease.ReadCheckpoint(ctx, token)
 	if err != nil {
 		if errors.Is(err, worklease.ErrFenced) {
 			return worklease.ErrFenced
 		}
-		_ = r.lease.Release(ctx, token)
+		_ = r.lease.Release(ctx, token, worklease.ExitFinished)
 		return fmt.Errorf("worker: read checkpoint: %w", err)
 	}
+	// Group A bridge (seed D8): Group B replaces this with the exit-mode mapping.
+	prior, cleanHandoff := cp.State, cp.PrevExit == worklease.ExitFinished
 
 	// ===== STEP 3: Start Renewal =====
 	renewCtx, stopRenewal := r.lease.StartRenewal(ctx, token, r.renewalOptions...)
@@ -102,7 +104,7 @@ func (r *Runner) Run(ctx context.Context, workID string) error {
 			if errors.Is(cpErr, worklease.ErrFenced) {
 				return worklease.ErrFenced
 			}
-			_ = r.lease.Release(ctx, token)
+			_ = r.lease.Release(ctx, token, worklease.ExitFinished)
 			return fmt.Errorf("worker: checkpoint: %w", cpErr)
 		}
 	}
@@ -114,7 +116,7 @@ func (r *Runner) Run(ctx context.Context, workID string) error {
 	if errors.Is(workErr, worklease.ErrFenced) {
 		return worklease.ErrFenced
 	}
-	if relErr := r.lease.Release(ctx, token); relErr != nil {
+	if relErr := r.lease.Release(ctx, token, worklease.ExitFinished); relErr != nil {
 		if errors.Is(relErr, worklease.ErrFenced) {
 			return worklease.ErrFenced
 		}

@@ -176,7 +176,7 @@ var _ = Describe("worker.Runner", func() {
 
 			tokenB, err := leaseB.Acquire(ctx, "work-1")
 			Expect(err).NotTo(HaveOccurred())
-			defer leaseB.Release(ctx, tokenB) //nolint:errcheck
+			defer leaseB.Release(ctx, tokenB, worklease.ExitFinished) //nolint:errcheck
 
 			// Worker A's next renewal (fires within 50ms real time) sees a fencing
 			// token mismatch and cancels the renewal context. WorkFn unblocks, and

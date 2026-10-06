@@ -307,6 +307,28 @@ var _ = Describe("worklease", func() {
 		})
 	})
 
+	Describe("ExitMode", func() {
+		It("String returns none, finished, abandoned, retired, expired for the five modes", func() {
+			Expect(worklease.ExitNone.String()).To(Equal("none"))
+			Expect(worklease.ExitFinished.String()).To(Equal("finished"))
+			Expect(worklease.ExitAbandoned.String()).To(Equal("abandoned"))
+			Expect(worklease.ExitRetired.String()).To(Equal("retired"))
+			Expect(worklease.ExitExpired.String()).To(Equal("expired"))
+		})
+
+		It("String formats an undefined value as ExitMode(<n>)", func() {
+			Expect(worklease.ExitMode(42).String()).To(Equal("ExitMode(42)"))
+		})
+
+		It("worklease constants equal the backend constants", func() {
+			Expect(worklease.ExitNone).To(Equal(backend.ExitNone))
+			Expect(worklease.ExitFinished).To(Equal(backend.ExitFinished))
+			Expect(worklease.ExitAbandoned).To(Equal(backend.ExitAbandoned))
+			Expect(worklease.ExitRetired).To(Equal(backend.ExitRetired))
+			Expect(worklease.ExitExpired).To(Equal(backend.ExitExpired))
+		})
+	})
+
 	Describe("Release", func() {
 		It("fencing token current → nil", func() {
 			lease, _ := worklease.New(mockB, cfg)
@@ -319,8 +341,8 @@ var _ = Describe("worklease", func() {
 			mockB.EXPECT().Acquire(gomock.Any(), "w1", "test-worker", 30*time.Second).Return(record, nil)
 			token, _ := lease.Acquire(ctx, "w1")
 
-			mockB.EXPECT().Release(gomock.Any(), record).Return(nil)
-			err := lease.Release(ctx, token)
+			mockB.EXPECT().Release(gomock.Any(), record, backend.ExitFinished).Return(nil)
+			err := lease.Release(ctx, token, worklease.ExitFinished)
 			Expect(err).To(BeNil())
 		})
 
@@ -335,16 +357,87 @@ var _ = Describe("worklease", func() {
 			mockB.EXPECT().Acquire(gomock.Any(), "w1", "test-worker", 30*time.Second).Return(record, nil)
 			token, _ := lease.Acquire(ctx, "w1")
 
-			mockB.EXPECT().Release(gomock.Any(), record).Return(worklease.ErrFenced)
-			err := lease.Release(ctx, token)
+			mockB.EXPECT().Release(gomock.Any(), record, backend.ExitFinished).Return(worklease.ErrFenced)
+			err := lease.Release(ctx, token, worklease.ExitFinished)
 			Expect(errors.Is(err, worklease.ErrFenced)).To(BeTrue())
 			Expect(err.Error()).To(ContainSubstring("w1"))
 			Expect(err.Error()).To(ContainSubstring("test-worker"))
 		})
+
+		Context("when mode is ExitNone, ExitExpired, or an undefined value", func() {
+			It("returns an error matching ErrInvalidExitMode, does not call Backend.Release, and calls no observer method", func() {
+				spy := &spyObserver{}
+				spyCfg := cfg
+				spyCfg.Observer = spy
+				lease, _ := worklease.New(mockB, spyCfg)
+				record := backend.LeaseRecord{WorkID: "w1", HolderID: "test-worker", FencingToken: 1, ExpiresAt: time.Now().Add(30 * time.Second)}
+				mockB.EXPECT().Acquire(gomock.Any(), "w1", "test-worker", 30*time.Second).Return(record, nil)
+				token, _ := lease.Acquire(ctx, "w1")
+				mockB.EXPECT().Release(gomock.Any(), gomock.Any(), gomock.Any()).Times(0)
+
+				spy.mu.Lock()
+				before := len(spy.order)
+				spy.mu.Unlock()
+				for _, mode := range []worklease.ExitMode{worklease.ExitNone, worklease.ExitExpired, worklease.ExitMode(99)} {
+					err := lease.Release(ctx, token, mode)
+					Expect(errors.Is(err, worklease.ErrInvalidExitMode)).To(BeTrue())
+				}
+				spy.mu.Lock()
+				after := len(spy.order)
+				spy.mu.Unlock()
+				Expect(after).To(Equal(before))
+			})
+		})
+
+		Context("when mode is ExitFinished, ExitAbandoned, or ExitRetired", func() {
+			It("passes the mode to Backend.Release and reports it in ReleaseEvent.Mode", func() {
+				spy := &spyObserver{}
+				spyCfg := cfg
+				spyCfg.Observer = spy
+				lease, _ := worklease.New(mockB, spyCfg)
+				for i, mode := range []worklease.ExitMode{worklease.ExitFinished, worklease.ExitAbandoned, worklease.ExitRetired} {
+					record := backend.LeaseRecord{WorkID: "w1", HolderID: "test-worker", FencingToken: uint64(i + 1), ExpiresAt: time.Now().Add(30 * time.Second)}
+					mockB.EXPECT().Acquire(gomock.Any(), "w1", "test-worker", 30*time.Second).Return(record, nil)
+					token, _ := lease.Acquire(ctx, "w1")
+					mockB.EXPECT().Release(gomock.Any(), record, mode).Return(nil)
+					Expect(lease.Release(ctx, token, mode)).To(Succeed())
+				}
+				spy.mu.Lock()
+				calls := append([]worklease.ReleaseEvent(nil), spy.releaseCalls...)
+				spy.mu.Unlock()
+				Expect(calls).To(HaveLen(3))
+				Expect(calls[0].Mode).To(Equal(worklease.ExitFinished))
+				Expect(calls[1].Mode).To(Equal(worklease.ExitAbandoned))
+				Expect(calls[2].Mode).To(Equal(worklease.ExitRetired))
+			})
+		})
+
+		Context("when the backend returns ErrLeaseExpired", func() {
+			It("calls OnRelease with the error, does not call OnFenced, and wraps with the worklease: Release: prefix", func() {
+				spy := &spyObserver{}
+				spyCfg := cfg
+				spyCfg.Observer = spy
+				lease, _ := worklease.New(mockB, spyCfg)
+				record := backend.LeaseRecord{WorkID: "w1", HolderID: "test-worker", FencingToken: 1, ExpiresAt: time.Now().Add(30 * time.Second)}
+				mockB.EXPECT().Acquire(gomock.Any(), "w1", "test-worker", 30*time.Second).Return(record, nil)
+				token, _ := lease.Acquire(ctx, "w1")
+				mockB.EXPECT().Release(gomock.Any(), record, backend.ExitFinished).Return(worklease.ErrLeaseExpired)
+
+				err := lease.Release(ctx, token, worklease.ExitFinished)
+				Expect(errors.Is(err, worklease.ErrLeaseExpired)).To(BeTrue())
+				Expect(err.Error()).To(HavePrefix("worklease: Release: "))
+
+				spy.mu.Lock()
+				defer spy.mu.Unlock()
+				Expect(spy.releaseCalls).To(HaveLen(1))
+				Expect(errors.Is(spy.releaseCalls[0].Err, worklease.ErrLeaseExpired)).To(BeTrue())
+				Expect(spy.fencedCalls).To(BeEmpty())
+			})
+		})
 	})
 
 	Describe("ReadCheckpoint", func() {
-		It("fresh acquisition (nil state from backend) → nil state, cleanHandoff=false, nil error", func() {
+		It("returns ExitNone and nil State for a first acquisition", func() {
 			lease, _ := worklease.New(mockB, cfg)
 			record := backend.LeaseRecord{
 				WorkID:       "w1",
@@ -355,14 +448,14 @@ var _ = Describe("worklease", func() {
 			mockB.EXPECT().Acquire(gomock.Any(), "w1", "test-worker", 30*time.Second).Return(record, nil)
 			token, _ := lease.Acquire(ctx, "w1")
 
-			mockB.EXPECT().ReadCheckpoint(gomock.Any(), record).Return(nil, false, nil)
-			state, cleanHandoff, err := lease.ReadCheckpoint(ctx, token)
+			mockB.EXPECT().ReadCheckpoint(gomock.Any(), record).Return(backend.Checkpoint{}, nil)
+			cp, err := lease.ReadCheckpoint(ctx, token)
 			Expect(err).To(BeNil())
-			Expect(state).To(BeNil())
-			Expect(cleanHandoff).To(BeFalse())
+			Expect(cp.State).To(BeNil())
+			Expect(cp.PrevExit).To(Equal(worklease.ExitNone))
 		})
 
-		It("prior Release → cleanHandoff=true, last checkpoint bytes returned", func() {
+		It("returns the backend Checkpoint unchanged on success", func() {
 			lease, _ := worklease.New(mockB, cfg)
 			record := backend.LeaseRecord{
 				WorkID:       "w1",
@@ -374,14 +467,14 @@ var _ = Describe("worklease", func() {
 			token, _ := lease.Acquire(ctx, "w1")
 
 			checkpointData := []byte("checkpoint-data")
-			mockB.EXPECT().ReadCheckpoint(gomock.Any(), record).Return(checkpointData, true, nil)
-			state, cleanHandoff, err := lease.ReadCheckpoint(ctx, token)
+			want := backend.Checkpoint{State: checkpointData, PrevExit: backend.ExitFinished, PrevHolderID: "prev-holder"}
+			mockB.EXPECT().ReadCheckpoint(gomock.Any(), record).Return(want, nil)
+			cp, err := lease.ReadCheckpoint(ctx, token)
 			Expect(err).To(BeNil())
-			Expect(state).To(Equal(checkpointData))
-			Expect(cleanHandoff).To(BeTrue())
+			Expect(cp).To(Equal(want))
 		})
 
-		It("expired without Release → cleanHandoff=false, last checkpoint bytes returned", func() {
+		It("returns ExitExpired and the last checkpoint bytes after a predecessor expired", func() {
 			lease, _ := worklease.New(mockB, cfg)
 			record := backend.LeaseRecord{
 				WorkID:       "w1",
@@ -393,11 +486,12 @@ var _ = Describe("worklease", func() {
 			token, _ := lease.Acquire(ctx, "w1")
 
 			checkpointData := []byte("checkpoint-data")
-			mockB.EXPECT().ReadCheckpoint(gomock.Any(), record).Return(checkpointData, false, nil)
-			state, cleanHandoff, err := lease.ReadCheckpoint(ctx, token)
+			mockB.EXPECT().ReadCheckpoint(gomock.Any(), record).Return(backend.Checkpoint{State: checkpointData, PrevExit: backend.ExitExpired, PrevHolderID: "crashed"}, nil)
+			cp, err := lease.ReadCheckpoint(ctx, token)
 			Expect(err).To(BeNil())
-			Expect(state).To(Equal(checkpointData))
-			Expect(cleanHandoff).To(BeFalse())
+			Expect(cp.State).To(Equal(checkpointData))
+			Expect(cp.PrevExit).To(Equal(worklease.ExitExpired))
+			Expect(cp.PrevHolderID).To(Equal("crashed"))
 		})
 
 		It("fencing token stale → ErrFenced; error wraps workID and holderID", func() {
@@ -406,8 +500,9 @@ var _ = Describe("worklease", func() {
 			mockB.EXPECT().Acquire(gomock.Any(), "w1", "test-worker", 30*time.Second).Return(record, nil)
 			token, _ := lease.Acquire(ctx, "w1")
 
-			mockB.EXPECT().ReadCheckpoint(gomock.Any(), record).Return(nil, false, worklease.ErrFenced)
-			_, _, err := lease.ReadCheckpoint(ctx, token)
+			mockB.EXPECT().ReadCheckpoint(gomock.Any(), record).Return(backend.Checkpoint{State: []byte("x")}, worklease.ErrFenced)
+			cp, err := lease.ReadCheckpoint(ctx, token)
+			Expect(cp).To(Equal(worklease.Checkpoint{}))
 			Expect(errors.Is(err, worklease.ErrFenced)).To(BeTrue())
 			Expect(err.Error()).To(ContainSubstring(`worklease: ReadCheckpoint: workID="w1" holderID="test-worker"`))
 		})
@@ -419,8 +514,9 @@ var _ = Describe("worklease", func() {
 			token, _ := lease.Acquire(ctx, "w1")
 
 			backendErr := errors.New("connection reset")
-			mockB.EXPECT().ReadCheckpoint(gomock.Any(), record).Return(nil, false, backendErr)
-			_, _, err := lease.ReadCheckpoint(ctx, token)
+			mockB.EXPECT().ReadCheckpoint(gomock.Any(), record).Return(backend.Checkpoint{}, backendErr)
+			cp, err := lease.ReadCheckpoint(ctx, token)
+			Expect(cp).To(Equal(worklease.Checkpoint{}))
 			Expect(errors.Is(err, backendErr)).To(BeTrue())
 			Expect(err.Error()).To(HavePrefix("worklease: ReadCheckpoint: "))
 		})
@@ -805,13 +901,13 @@ var _ = Describe("worklease", func() {
 				mockB.EXPECT().Acquire(gomock.Any(), "w1", "test-worker", 30*time.Second).Return(record, nil)
 				mockB.EXPECT().Checkpoint(gomock.Any(), record, []byte("s"), 30*time.Second).Return(nil)
 				mockB.EXPECT().Renew(gomock.Any(), record, 30*time.Second).Return(nil)
-				mockB.EXPECT().Release(gomock.Any(), record).Return(nil)
+				mockB.EXPECT().Release(gomock.Any(), record, backend.ExitFinished).Return(nil)
 
 				Expect(func() {
 					token, _ := lease.Acquire(ctx, "w1")
 					_ = lease.Checkpoint(ctx, token, []byte("s"))
 					_ = lease.Renew(ctx, token)
-					_ = lease.Release(ctx, token)
+					_ = lease.Release(ctx, token, worklease.ExitFinished)
 				}).NotTo(Panic())
 			})
 		})
@@ -930,10 +1026,10 @@ var _ = Describe("worklease", func() {
 				lease, _ := worklease.New(mockB, cfg)
 				record := backend.LeaseRecord{WorkID: "w1", HolderID: "test-worker", FencingToken: 1, ExpiresAt: time.Now().Add(30 * time.Second)}
 				mockB.EXPECT().Acquire(gomock.Any(), "w1", "test-worker", 30*time.Second).Return(record, nil)
-				mockB.EXPECT().Release(gomock.Any(), record).Return(nil)
+				mockB.EXPECT().Release(gomock.Any(), record, backend.ExitFinished).Return(nil)
 
 				token, _ := lease.Acquire(ctx, "w1")
-				err := lease.Release(ctx, token)
+				err := lease.Release(ctx, token, worklease.ExitFinished)
 				Expect(err).NotTo(HaveOccurred())
 
 				spy.mu.Lock()
@@ -1149,53 +1245,64 @@ var _ = Describe("worklease", func() {
 		Context("Release", func() {
 			It("calls OnRelease before OnFenced when the backend returns ErrFenced", func() {
 				token := acquire()
-				mockB.EXPECT().Release(gomock.Any(), record).Return(worklease.ErrFenced)
-				_ = lease.Release(ctx, token)
+				mockB.EXPECT().Release(gomock.Any(), record, backend.ExitFinished).Return(worklease.ErrFenced)
+				_ = lease.Release(ctx, token, worklease.ExitFinished)
 				Expect(spy.order).To(Equal([]string{"OnAcquire", "OnRelease", "OnFenced"}))
 				Expect(spy.fencedCalls[0].Operation).To(Equal(worklease.OperationRelease))
 			})
 			It("calls OnRelease with correct Duration measured from the backend call", func() {
 				token := acquire()
-				mockB.EXPECT().Release(gomock.Any(), record).DoAndReturn(
-					func(context.Context, backend.LeaseRecord) error {
+				mockB.EXPECT().Release(gomock.Any(), record, backend.ExitFinished).DoAndReturn(
+					func(context.Context, backend.LeaseRecord, backend.ExitMode) error {
 						time.Sleep(5 * time.Millisecond)
 						return nil
 					})
-				_ = lease.Release(ctx, token)
+				_ = lease.Release(ctx, token, worklease.ExitFinished)
 				Expect(spy.releaseCalls[0].Duration).To(BeNumerically(">=", 5*time.Millisecond))
 			})
 			It("does not call OnFenced when the backend returns nil", func() {
 				token := acquire()
-				mockB.EXPECT().Release(gomock.Any(), record).Return(nil)
-				_ = lease.Release(ctx, token)
+				mockB.EXPECT().Release(gomock.Any(), record, backend.ExitFinished).Return(nil)
+				_ = lease.Release(ctx, token, worklease.ExitFinished)
 				Expect(spy.fencedCalls).To(BeEmpty())
 			})
 		})
 
 		Context("ReadCheckpoint", func() {
-			It("calls OnReadCheckpoint with CleanHandoff true when the backend returns true", func() {
+			It("calls OnReadCheckpoint with PrevExit, PrevHolderID, and Size from the backend result", func() {
 				token := acquire()
-				mockB.EXPECT().ReadCheckpoint(gomock.Any(), record).Return([]byte("prior"), true, nil)
-				_, _, _ = lease.ReadCheckpoint(ctx, token)
+				mockB.EXPECT().ReadCheckpoint(gomock.Any(), record).Return(backend.Checkpoint{State: []byte("prior"), PrevExit: backend.ExitAbandoned, PrevHolderID: "h-prev"}, nil)
+				_, _ = lease.ReadCheckpoint(ctx, token)
 				Expect(spy.readCheckpointCalls).To(HaveLen(1))
-				Expect(spy.readCheckpointCalls[0].CleanHandoff).To(BeTrue())
+				Expect(spy.readCheckpointCalls[0].PrevExit).To(Equal(worklease.ExitAbandoned))
+				Expect(spy.readCheckpointCalls[0].PrevHolderID).To(Equal("h-prev"))
+				Expect(spy.readCheckpointCalls[0].Size).To(Equal(5))
+			})
+			It("calls OnReadCheckpoint with ExitNone, empty PrevHolderID, and Size 0 when Err is non-nil", func() {
+				token := acquire()
+				mockB.EXPECT().ReadCheckpoint(gomock.Any(), record).Return(backend.Checkpoint{State: []byte("leak"), PrevExit: backend.ExitFinished, PrevHolderID: "x"}, errors.New("boom"))
+				_, _ = lease.ReadCheckpoint(ctx, token)
+				Expect(spy.readCheckpointCalls).To(HaveLen(1))
+				Expect(spy.readCheckpointCalls[0].PrevExit).To(Equal(worklease.ExitNone))
+				Expect(spy.readCheckpointCalls[0].PrevHolderID).To(BeEmpty())
+				Expect(spy.readCheckpointCalls[0].Size).To(BeZero())
 			})
 			It("calls OnReadCheckpoint with Size equal to len of the returned state", func() {
 				token := acquire()
-				mockB.EXPECT().ReadCheckpoint(gomock.Any(), record).Return([]byte("prior"), false, nil)
-				_, _, _ = lease.ReadCheckpoint(ctx, token)
+				mockB.EXPECT().ReadCheckpoint(gomock.Any(), record).Return(backend.Checkpoint{State: []byte("prior")}, nil)
+				_, _ = lease.ReadCheckpoint(ctx, token)
 				Expect(spy.readCheckpointCalls[0].Size).To(Equal(5))
 			})
 			It("calls OnReadCheckpoint with the error when the backend returns ErrFenced", func() {
 				token := acquire()
-				mockB.EXPECT().ReadCheckpoint(gomock.Any(), record).Return(nil, false, worklease.ErrFenced)
-				_, _, _ = lease.ReadCheckpoint(ctx, token)
+				mockB.EXPECT().ReadCheckpoint(gomock.Any(), record).Return(backend.Checkpoint{}, worklease.ErrFenced)
+				_, _ = lease.ReadCheckpoint(ctx, token)
 				Expect(errors.Is(spy.readCheckpointCalls[0].Err, worklease.ErrFenced)).To(BeTrue())
 			})
 			It("does not call OnFenced when ReadCheckpoint returns ErrFenced", func() {
 				token := acquire()
-				mockB.EXPECT().ReadCheckpoint(gomock.Any(), record).Return(nil, false, worklease.ErrFenced)
-				_, _, _ = lease.ReadCheckpoint(ctx, token)
+				mockB.EXPECT().ReadCheckpoint(gomock.Any(), record).Return(backend.Checkpoint{}, worklease.ErrFenced)
+				_, _ = lease.ReadCheckpoint(ctx, token)
 				Expect(spy.fencedCalls).To(BeEmpty())
 			})
 		})
@@ -1294,7 +1401,7 @@ var _ = Describe("worklease", func() {
 		Context("when opts.Retention is positive", func() {
 			It("delegates to Backend.Sweep and returns its result unchanged, success case", func() {
 				v := worklease.NewVacuum(mockB)
-				opts := worklease.SweepOptions{Retention: time.Hour, IncludeCrashed: true}
+				opts := worklease.SweepOptions{Retention: time.Hour, IncludeExpired: true}
 				mockB.EXPECT().Sweep(gomock.Any(), opts).Return(int64(3), nil)
 				n, err := v.Sweep(ctx, opts)
 				Expect(err).To(BeNil())

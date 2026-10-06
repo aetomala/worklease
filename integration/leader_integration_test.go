@@ -129,7 +129,7 @@ var _ = Describe("leader.Elect", func() {
 
 			tokenF, err := leaseF.Acquire(ctx, "leader-work")
 			Expect(err).NotTo(HaveOccurred())
-			defer leaseF.Release(ctx, tokenF) //nolint:errcheck
+			defer leaseF.Release(ctx, tokenF, worklease.ExitFinished) //nolint:errcheck
 
 			// Node E's next renewal (fires within 50ms real time) sees a fencing
 			// token mismatch. Elect surfaces ErrFenced via the Release path.

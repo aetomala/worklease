@@ -85,11 +85,19 @@ type Checkpoint struct {
 type Backend interface {
 	// Acquire attempts to acquire a lease for the given work. Returns ErrLeaseHeld
 	// if the lease for this workID is held and has not expired.
+	// On reacquisition of an expired row, Acquire records the row's declared
+	// exit (ExitExpired if none was declared) and holder ID as the new lease's
+	// previous exit and previous holder, and clears the declared exit, in the
+	// same atomic step that issues the fencing token. A new row records ExitNone.
 	Acquire(ctx context.Context, workID, holderID string, ttl time.Duration) (LeaseRecord, error)
 
 	// Checkpoint persists state associated with the current lease. The caller must
 	// pass a valid LeaseRecord obtained from Acquire. Returns ErrFenced
 	// if the record's holder ID or fencing token no longer matches the stored lease.
+	// Checkpoint never writes an exit field. Once the holder has declared an
+	// exit with Release, Checkpoint returns ErrLeaseExpired without writing. A
+	// lease that lapsed with no declared exit and no successor can still be
+	// revived by Checkpoint.
 	Checkpoint(ctx context.Context, record LeaseRecord, state []byte, ttl time.Duration) error
 
 	// Renew extends the lease expiration time. Returns ErrFenced if the record's
@@ -97,27 +105,34 @@ type Backend interface {
 	// ErrLeaseExpired if the lease has already expired.
 	Renew(ctx context.Context, record LeaseRecord, ttl time.Duration) error
 
-	// Release surrenders the lease. Returns ErrFenced if the record's holder ID
-	// or fencing token no longer matches the stored lease.
-	// Implementations must set expires_at to a value strictly less than NOW() so
-	// that a successor's immediately following Acquire call satisfies the expiry
-	// condition. A one-millisecond past offset satisfies this for any backend with
-	// at least millisecond clock resolution.
-	Release(ctx context.Context, record LeaseRecord) error
+	// Release records mode as the holder's declared exit and expires the lease
+	// immediately by setting expires_at to a value strictly less than NOW(), so
+	// a successor can acquire without waiting for the TTL. Mode must be
+	// ExitFinished, ExitAbandoned, or ExitRetired; any other value returns
+	// ErrInvalidExitMode before any other check and without side effects.
+	// Returns ErrFenced if WorkID, HolderID, or FencingToken does not match the
+	// stored lease, or if no row exists. Returns ErrLeaseExpired if the lease
+	// matches but has already expired, even when no successor has acquired it.
+	// Fencing is checked before expiry.
+	Release(ctx context.Context, record LeaseRecord, mode ExitMode) error
 
-	// ReadCheckpoint retrieves persisted state and the clean handoff flag for the
-	// given lease. The caller must pass a valid LeaseRecord. Returns ErrFenced if
-	// the record's fencing token no longer matches the stored lease.
-	ReadCheckpoint(ctx context.Context, record LeaseRecord) (state []byte, cleanHandoff bool, err error)
+	// ReadCheckpoint returns the checkpoint state and the immediately previous
+	// holder's exit for the lease identified by record. The returned State is a
+	// fresh allocation owned by the caller. Returns ErrFenced if no row exists
+	// for record.WorkID or if record.FencingToken does not match the stored lease.
+	ReadCheckpoint(ctx context.Context, record LeaseRecord) (Checkpoint, error)
 
 	// Forget permanently deletes the row identified by record. Returns ErrFenced
 	// if record.HolderID or record.FencingToken no longer matches the stored
 	// lease, or if no row exists for record.WorkID.
 	Forget(ctx context.Context, record LeaseRecord) error
 
-	// Sweep deletes rows older than opts.Retention that are not currently held,
-	// returning the number of rows deleted. Does not validate opts.Retention —
-	// worklease.Vacuum.Sweep validates before calling this.
+	// Sweep deletes rows that are not currently held, were last updated more
+	// than opts.Retention ago, and either were released with ExitRetired or,
+	// when opts.IncludeExpired is set, have no declared exit. Rows released with
+	// ExitFinished or ExitAbandoned are never deleted. Returns the number of
+	// rows deleted. Does not validate opts.Retention; Vacuum.Sweep in package
+	// worklease validates before calling this.
 	Sweep(ctx context.Context, opts SweepOptions) (int64, error)
 }
 
@@ -141,22 +156,18 @@ type LeaseRecord struct {
 
 // SweepOptions configures a Sweep call. The canonical definition lives here in
 // package backend. Package worklease re-exports it as a type alias
-// (worklease.SweepOptions) so callers never need to import package backend
-// directly for this type. It lives here rather than in worklease because
-// package backend cannot import package worklease (worklease already imports
-// backend) — defining it in worklease and having backend reference it would be
-// an import cycle.
+// (worklease.SweepOptions) because package backend cannot import package
+// worklease.
 type SweepOptions struct {
-	// Retention is the minimum age since a lease row was last updated before
-	// it becomes eligible for deletion. Backend.Sweep does not validate this —
-	// worklease.Vacuum.Sweep validates Retention > 0 before calling Backend.Sweep.
-	// Retention must exceed the maximum TTL configured across all Lease clients
-	// sharing this backend — this is a caller responsibility, not enforced here.
+	// Retention is how long a retired or expired row is kept after its last
+	// update. It is not tied to the TTL; held rows are never eligible.
+	// Backend.Sweep does not validate it. Vacuum.Sweep in package worklease
+	// returns ErrRetentionRequired if it is not positive.
 	Retention time.Duration
 
-	// IncludeCrashed, if true, also sweeps rows where the previous holder's
-	// lease expired without an explicit Release (clean handoff false). Default
-	// false — only cleanly-released rows are swept. Enabling this permanently
-	// discards crash-recovery checkpoint data for swept rows.
-	IncludeCrashed bool
+	// IncludeExpired, if true, also deletes rows with no declared exit: the
+	// lease expired after a crash, a partition, or an exhausted renewal window.
+	// Default false. Enabling it discards the partial state a successor would
+	// have recovered from.
+	IncludeExpired bool
 }

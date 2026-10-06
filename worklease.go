@@ -131,19 +131,30 @@ func (c *leaseClient) Renew(ctx context.Context, token Token) error {
 	return nil
 }
 
-// Release surrenders the lease. Returns ErrFenced if the token's fencing token
-// no longer matches the stored lease.
-func (c *leaseClient) Release(ctx context.Context, token Token) error {
-	// ===== Validate and Delegate =====
+// Release records mode as this holder's exit and expires the lease
+// immediately. Returns ErrInvalidExitMode, without calling the backend or the
+// observer, if mode is not ExitFinished, ExitAbandoned, or ExitRetired.
+// Returns ErrFenced if the lease was acquired by another holder, and
+// ErrLeaseExpired if the lease has expired or an exit was already declared.
+func (c *leaseClient) Release(ctx context.Context, token Token, mode ExitMode) error {
+	// ===== STEP 1: Validate Mode =====
+	if mode != ExitFinished && mode != ExitAbandoned && mode != ExitRetired {
+		return fmt.Errorf("worklease: Release: workID=%q holderID=%q mode=%s: %w", token.WorkID(), token.HolderID(), mode, ErrInvalidExitMode)
+	}
+
+	// ===== STEP 2: Delegate to Backend =====
 	record := toRecord(token)
 	start := time.Now()
-	err := c.b.Release(ctx, record)
+	err := c.b.Release(ctx, record, mode)
 	dur := time.Since(start)
-	c.obs.OnRelease(ctx, ReleaseEvent{Token: token, Duration: dur, Err: err})
+
+	// ===== STEP 3: Observe =====
+	c.obs.OnRelease(ctx, ReleaseEvent{Token: token, Duration: dur, Mode: mode, Err: err})
 	if errors.Is(err, ErrFenced) {
 		c.obs.OnFenced(ctx, FencedEvent{Token: token, Operation: OperationRelease})
 	}
 
+	// ===== STEP 4: Wrap =====
 	if errors.Is(err, ErrFenced) {
 		return fmt.Errorf("worklease: Release: workID=%q holderID=%q: %w", token.WorkID(), token.HolderID(), ErrFenced)
 	}
@@ -155,26 +166,29 @@ func (c *leaseClient) Release(ctx context.Context, token Token) error {
 	return nil
 }
 
-// ReadCheckpoint retrieves persisted state and the clean handoff flag for the
-// given lease. The caller must pass a valid Token. Returns ErrFenced if the
-// token's fencing token no longer matches the stored lease.
-func (c *leaseClient) ReadCheckpoint(ctx context.Context, token Token) ([]byte, bool, error) {
+// ReadCheckpoint returns the last checkpointed state and how the immediately
+// previous holder exited. Returns ErrFenced if the token no longer matches the
+// stored lease or if no row exists for the work ID.
+func (c *leaseClient) ReadCheckpoint(ctx context.Context, token Token) (Checkpoint, error) {
 	// ===== Delegate to Backend =====
 	record := toRecord(token)
 	start := time.Now()
-	state, cleanHandoff, err := c.b.ReadCheckpoint(ctx, record)
+	cp, err := c.b.ReadCheckpoint(ctx, record)
 	dur := time.Since(start)
-	c.obs.OnReadCheckpoint(ctx, ReadCheckpointEvent{Token: token, Duration: dur, CleanHandoff: cleanHandoff, Size: len(state), Err: err})
+	if err != nil {
+		cp = Checkpoint{}
+	}
+	c.obs.OnReadCheckpoint(ctx, ReadCheckpointEvent{Token: token, Duration: dur, PrevExit: cp.PrevExit, PrevHolderID: cp.PrevHolderID, Size: len(cp.State), Err: err})
 
 	if errors.Is(err, ErrFenced) {
-		return nil, false, fmt.Errorf("worklease: ReadCheckpoint: workID=%q holderID=%q: %w", token.WorkID(), token.HolderID(), ErrFenced)
+		return Checkpoint{}, fmt.Errorf("worklease: ReadCheckpoint: workID=%q holderID=%q: %w", token.WorkID(), token.HolderID(), ErrFenced)
 	}
 
 	if err != nil {
-		return nil, false, fmt.Errorf("worklease: ReadCheckpoint: %w", err)
+		return Checkpoint{}, fmt.Errorf("worklease: ReadCheckpoint: %w", err)
 	}
 
-	return state, cleanHandoff, nil
+	return cp, nil
 }
 
 // Forget permanently deletes the lease record for token's workID. Returns

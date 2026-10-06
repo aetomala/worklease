@@ -86,10 +86,10 @@ var _ = Describe("Runner", func() {
 	Describe("Phase 2: Run — Happy Path", func() {
 		It("WorkFn returns (finalState, nil) → Checkpoint called, Release called, Run returns nil", func() {
 			mockB.EXPECT().Acquire(gomock.Any(), "w1", "test-worker", 30*time.Second).Return(record, nil)
-			mockB.EXPECT().ReadCheckpoint(gomock.Any(), record).Return(nil, false, nil)
+			mockB.EXPECT().ReadCheckpoint(gomock.Any(), record).Return(backend.Checkpoint{}, nil)
 			mockB.EXPECT().Renew(gomock.Any(), record, 30*time.Second).Return(nil).AnyTimes()
 			mockB.EXPECT().Checkpoint(gomock.Any(), record, []byte("done"), 30*time.Second).Return(nil)
-			mockB.EXPECT().Release(gomock.Any(), record).Return(nil)
+			mockB.EXPECT().Release(gomock.Any(), record, backend.ExitFinished).Return(nil)
 
 			r, err := worker.NewRunner(worker.RunnerConfig{
 				Lease: lease,
@@ -105,9 +105,9 @@ var _ = Describe("Runner", func() {
 
 		It("WorkFn returns (nil, nil) → no Checkpoint, Release called, Run returns nil", func() {
 			mockB.EXPECT().Acquire(gomock.Any(), "w1", "test-worker", 30*time.Second).Return(record, nil)
-			mockB.EXPECT().ReadCheckpoint(gomock.Any(), record).Return(nil, false, nil)
+			mockB.EXPECT().ReadCheckpoint(gomock.Any(), record).Return(backend.Checkpoint{}, nil)
 			mockB.EXPECT().Renew(gomock.Any(), record, 30*time.Second).Return(nil).AnyTimes()
-			mockB.EXPECT().Release(gomock.Any(), record).Return(nil)
+			mockB.EXPECT().Release(gomock.Any(), record, backend.ExitFinished).Return(nil)
 
 			r, err := worker.NewRunner(worker.RunnerConfig{
 				Lease: lease,
@@ -126,9 +126,9 @@ var _ = Describe("Runner", func() {
 	Describe("Phase 3: Run — Crash and Resume", func() {
 		It("ReadCheckpoint returns (priorState, cleanHandoff=false) → fn receives prior bytes and cleanHandoff=false", func() {
 			mockB.EXPECT().Acquire(gomock.Any(), "w1", "test-worker", 30*time.Second).Return(record, nil)
-			mockB.EXPECT().ReadCheckpoint(gomock.Any(), record).Return([]byte("cursor-at-42"), false, nil)
+			mockB.EXPECT().ReadCheckpoint(gomock.Any(), record).Return(backend.Checkpoint{State: []byte("cursor-at-42"), PrevExit: backend.ExitExpired}, nil)
 			mockB.EXPECT().Renew(gomock.Any(), record, 30*time.Second).Return(nil).AnyTimes()
-			mockB.EXPECT().Release(gomock.Any(), record).Return(nil)
+			mockB.EXPECT().Release(gomock.Any(), record, backend.ExitFinished).Return(nil)
 
 			var capturedPrior []byte
 			var capturedHandoff bool
@@ -150,9 +150,9 @@ var _ = Describe("Runner", func() {
 
 		It("ReadCheckpoint returns (priorState, cleanHandoff=true) → fn receives cleanHandoff=true", func() {
 			mockB.EXPECT().Acquire(gomock.Any(), "w1", "test-worker", 30*time.Second).Return(record, nil)
-			mockB.EXPECT().ReadCheckpoint(gomock.Any(), record).Return([]byte("cursor-at-99"), true, nil)
+			mockB.EXPECT().ReadCheckpoint(gomock.Any(), record).Return(backend.Checkpoint{State: []byte("cursor-at-99"), PrevExit: backend.ExitFinished}, nil)
 			mockB.EXPECT().Renew(gomock.Any(), record, 30*time.Second).Return(nil).AnyTimes()
-			mockB.EXPECT().Release(gomock.Any(), record).Return(nil)
+			mockB.EXPECT().Release(gomock.Any(), record, backend.ExitFinished).Return(nil)
 
 			var capturedHandoff bool
 			r, err := worker.NewRunner(worker.RunnerConfig{
@@ -174,7 +174,7 @@ var _ = Describe("Runner", func() {
 	Describe("Phase 4: Run — ErrFenced Propagation", func() {
 		It("WorkFn returns (nil, ErrFenced) → no Checkpoint, no Release, Run returns ErrFenced", func() {
 			mockB.EXPECT().Acquire(gomock.Any(), "w1", "test-worker", 30*time.Second).Return(record, nil)
-			mockB.EXPECT().ReadCheckpoint(gomock.Any(), record).Return(nil, false, nil)
+			mockB.EXPECT().ReadCheckpoint(gomock.Any(), record).Return(backend.Checkpoint{}, nil)
 			mockB.EXPECT().Renew(gomock.Any(), record, 30*time.Second).Return(nil).AnyTimes()
 
 			r, err := worker.NewRunner(worker.RunnerConfig{
@@ -191,7 +191,7 @@ var _ = Describe("Runner", func() {
 
 		It("WorkFn returns (partialState, ErrFenced) → partial state ignored, no Release, Run returns ErrFenced", func() {
 			mockB.EXPECT().Acquire(gomock.Any(), "w1", "test-worker", 30*time.Second).Return(record, nil)
-			mockB.EXPECT().ReadCheckpoint(gomock.Any(), record).Return(nil, false, nil)
+			mockB.EXPECT().ReadCheckpoint(gomock.Any(), record).Return(backend.Checkpoint{}, nil)
 			mockB.EXPECT().Renew(gomock.Any(), record, 30*time.Second).Return(nil).AnyTimes()
 
 			r, err := worker.NewRunner(worker.RunnerConfig{
@@ -208,7 +208,7 @@ var _ = Describe("Runner", func() {
 
 		It("ReadCheckpoint returns ErrFenced → no StartRenewal, no WorkFn call, no Release, Run returns ErrFenced", func() {
 			mockB.EXPECT().Acquire(gomock.Any(), "w1", "test-worker", 30*time.Second).Return(record, nil)
-			mockB.EXPECT().ReadCheckpoint(gomock.Any(), record).Return(nil, false, worklease.ErrFenced)
+			mockB.EXPECT().ReadCheckpoint(gomock.Any(), record).Return(backend.Checkpoint{}, worklease.ErrFenced)
 
 			fnCalled := false
 			r, err := worker.NewRunner(worker.RunnerConfig{
@@ -231,10 +231,10 @@ var _ = Describe("Runner", func() {
 		It("WorkFn returns (partialState, someErr) → Checkpoint called, Release called, Run returns someErr", func() {
 			someErr := errors.New("work failed")
 			mockB.EXPECT().Acquire(gomock.Any(), "w1", "test-worker", 30*time.Second).Return(record, nil)
-			mockB.EXPECT().ReadCheckpoint(gomock.Any(), record).Return(nil, false, nil)
+			mockB.EXPECT().ReadCheckpoint(gomock.Any(), record).Return(backend.Checkpoint{}, nil)
 			mockB.EXPECT().Renew(gomock.Any(), record, 30*time.Second).Return(nil).AnyTimes()
 			mockB.EXPECT().Checkpoint(gomock.Any(), record, []byte("partial"), 30*time.Second).Return(nil)
-			mockB.EXPECT().Release(gomock.Any(), record).Return(nil)
+			mockB.EXPECT().Release(gomock.Any(), record, backend.ExitFinished).Return(nil)
 
 			r, err := worker.NewRunner(worker.RunnerConfig{
 				Lease: lease,
@@ -251,8 +251,8 @@ var _ = Describe("Runner", func() {
 		It("ReadCheckpoint returns non-fencing error → Release called, Run returns wrapped error", func() {
 			readErr := errors.New("storage unavailable")
 			mockB.EXPECT().Acquire(gomock.Any(), "w1", "test-worker", 30*time.Second).Return(record, nil)
-			mockB.EXPECT().ReadCheckpoint(gomock.Any(), record).Return(nil, false, readErr)
-			mockB.EXPECT().Release(gomock.Any(), record).Return(nil)
+			mockB.EXPECT().ReadCheckpoint(gomock.Any(), record).Return(backend.Checkpoint{}, readErr)
+			mockB.EXPECT().Release(gomock.Any(), record, backend.ExitFinished).Return(nil)
 
 			r, err := worker.NewRunner(worker.RunnerConfig{
 				Lease: lease,
@@ -274,9 +274,9 @@ var _ = Describe("Runner", func() {
 			token := worklease.Token{}
 			stopped := false
 			mockLease.EXPECT().Acquire(gomock.Any(), "w1").Return(token, nil)
-			mockLease.EXPECT().ReadCheckpoint(gomock.Any(), token).Return(nil, false, nil)
+			mockLease.EXPECT().ReadCheckpoint(gomock.Any(), token).Return(worklease.Checkpoint{}, nil)
 			mockLease.EXPECT().StartRenewal(gomock.Any(), token).Return(ctx, func() { stopped = true })
-			mockLease.EXPECT().Release(gomock.Any(), gomock.Any()).Times(0)
+			mockLease.EXPECT().Release(gomock.Any(), gomock.Any(), gomock.Any()).Times(0)
 
 			r, err := worker.NewRunner(worker.RunnerConfig{
 				Lease: mockLease,
