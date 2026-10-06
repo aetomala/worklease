@@ -14,6 +14,7 @@ import (
 	"github.com/aetomala/worklease/backend/conformance"
 	wlpostgres "github.com/aetomala/worklease/backend/postgres"
 	"github.com/aetomala/worklease/leader"
+	"github.com/aetomala/worklease/pool"
 	"github.com/aetomala/worklease/worker"
 )
 
@@ -214,7 +215,7 @@ var _ = Describe("Backend (postgres)", func() {
 	})
 
 	Describe("ReadCheckpoint", func() {
-		It("no checkpoint exists → returns nil state, false, nil", func() {
+		It("no checkpoint exists → returns nil State and PrevExit ExitNone", func() {
 			// Acquire a lease without checkpoint
 			record, err := b.Acquire(ctx, "w10", "holder", 30*time.Second)
 			Expect(err).NotTo(HaveOccurred())
@@ -354,6 +355,48 @@ var _ = Describe("Backend (postgres)", func() {
 			cp, err := leaseB.ReadCheckpoint(ctx, tokenB)
 			Expect(err).NotTo(HaveOccurred())
 			Expect(cp).To(Equal(worklease.Checkpoint{State: []byte("final-a"), PrevExit: worklease.ExitAbandoned, PrevHolderID: "holder-a"}))
+		})
+	})
+
+	Describe("pool.Pool on PostgreSQL (#80)", func() {
+		It("when Run's context is cancelled mid-WorkFn, each slot's final state is stored and a successor acquires without waiting for the TTL and reads ExitAbandoned", func() {
+			ids := []string{"p-0", "p-1"}
+			leaseA, err := worklease.New(b, worklease.Config{TTL: 30 * time.Second, HolderID: "pool-a"})
+			Expect(err).NotTo(HaveOccurred())
+
+			started := make(chan string, len(ids))
+			p, err := pool.New(leaseA, pool.Config{
+				WorkIDs:         ids,
+				IdleInterval:    10 * time.Millisecond,
+				RerunInterval:   10 * time.Millisecond,
+				BackoffInterval: 10 * time.Millisecond,
+			}, func(wctx context.Context, workID string, _ worklease.Token, _ worklease.Checkpoint) ([]byte, error) {
+				started <- workID
+				<-wctx.Done()
+				return []byte("final-" + workID), wctx.Err()
+			})
+			Expect(err).NotTo(HaveOccurred())
+
+			runCtx, runCancel := context.WithCancel(ctx)
+			defer runCancel()
+			runDone := make(chan error, 1)
+			go func() { runDone <- p.Run(runCtx) }()
+			for range ids {
+				Eventually(started, "2s").Should(Receive())
+			}
+
+			runCancel()
+			Eventually(runDone, "2s").Should(Receive(BeNil()))
+
+			leaseB, err := worklease.New(b, worklease.Config{TTL: 30 * time.Second, HolderID: "pool-b"})
+			Expect(err).NotTo(HaveOccurred())
+			for _, id := range ids {
+				tokenB, err := leaseB.Acquire(ctx, id) // fail-fast: ErrLeaseHeld if the slot did not release
+				Expect(err).NotTo(HaveOccurred(), "expected %q to be released", id)
+				cp, err := leaseB.ReadCheckpoint(ctx, tokenB)
+				Expect(err).NotTo(HaveOccurred())
+				Expect(cp).To(Equal(worklease.Checkpoint{State: []byte("final-" + id), PrevExit: worklease.ExitAbandoned, PrevHolderID: "pool-a"}))
+			}
 		})
 	})
 

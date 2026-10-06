@@ -269,6 +269,46 @@ var _ = Describe("worklease", func() {
 			Expect(err.Error()).To(ContainSubstring("w1"))
 			Expect(err.Error()).To(ContainSubstring("test-worker"))
 		})
+
+		Context("when the backend returns ErrLeaseExpired (exit already declared)", func() {
+			var (
+				spy   *spyObserver
+				lease worklease.Lease
+				token worklease.Token
+			)
+
+			BeforeEach(func() {
+				spy = &spyObserver{}
+				spyCfg := cfg
+				spyCfg.Observer = spy
+				lease, _ = worklease.New(mockB, spyCfg)
+				record := backend.LeaseRecord{WorkID: "w1", HolderID: "test-worker", FencingToken: 1, ExpiresAt: time.Now().Add(30 * time.Second)}
+				mockB.EXPECT().Acquire(gomock.Any(), "w1", "test-worker", 30*time.Second).Return(record, nil)
+				token, _ = lease.Acquire(ctx, "w1")
+				mockB.EXPECT().Checkpoint(gomock.Any(), record, []byte("late"), 30*time.Second).Return(worklease.ErrLeaseExpired)
+			})
+
+			It("calls OnCheckpoint with Err matching ErrLeaseExpired", func() {
+				_ = lease.Checkpoint(ctx, token, []byte("late"))
+				spy.mu.Lock()
+				defer spy.mu.Unlock()
+				Expect(spy.checkpointCalls).To(HaveLen(1))
+				Expect(errors.Is(spy.checkpointCalls[0].Err, worklease.ErrLeaseExpired)).To(BeTrue())
+			})
+
+			It("does not call OnFenced", func() {
+				_ = lease.Checkpoint(ctx, token, []byte("late"))
+				spy.mu.Lock()
+				defer spy.mu.Unlock()
+				Expect(spy.fencedCalls).To(BeEmpty())
+			})
+
+			It("returns an error matching ErrLeaseExpired with the worklease: Checkpoint: prefix", func() {
+				err := lease.Checkpoint(ctx, token, []byte("late"))
+				Expect(errors.Is(err, worklease.ErrLeaseExpired)).To(BeTrue())
+				Expect(err.Error()).To(HavePrefix("worklease: Checkpoint: "))
+			})
+		})
 	})
 
 	Describe("Renew", func() {
