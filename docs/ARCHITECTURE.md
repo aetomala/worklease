@@ -390,6 +390,7 @@ type Token struct {
     holderID     string
     fencingToken uint64
     expiresAt    time.Time
+    deadline     time.Time // Local monotonic bound — Acquire start plus TTL; zero if unknown
 }
 
 func (t Token) WorkID() string       { return t.workID }
@@ -409,18 +410,33 @@ fields.
 
 ```go
 var (
-    // ErrFenced is returned by Checkpoint or Renew when a higher fencing token has been
-    // issued. This worker has been superseded. Stop immediately.
+    // ErrFenced is returned by Checkpoint, Renew, Release, ReadCheckpoint, or Forget when a
+    // higher fencing token has been issued, or the row no longer exists. This worker has been
+    // superseded. Stop immediately.
     ErrFenced = errors.New("worklease: fenced — lease acquired by another holder")
 
     // ErrLeaseHeld is returned by Acquire when the lease is currently held and
     // WithWaitForLease was not passed, or the context expired while waiting.
     ErrLeaseHeld = errors.New("worklease: lease is currently held")
 
-    // ErrLeaseExpired is returned when the lease expired before the operation completed.
+    // ErrLeaseExpired is returned when the lease expired before the operation completed,
+    // or when the holder writes after declaring an exit with Release.
     ErrLeaseExpired = errors.New("worklease: lease has expired")
+
+    // ErrLeaseWindowExhausted is the cancel cause of the renewal context when renewal fails
+    // for the whole lease window. Inspect it with context.Cause(renewCtx).
+    ErrLeaseWindowExhausted = errors.New("worklease: lease window exhausted before renewal succeeded")
+
+    // ErrInvalidExitMode is returned by Release for any mode other than ExitFinished,
+    // ExitAbandoned, or ExitRetired.
+    ErrInvalidExitMode = errors.New("worklease: invalid exit mode")
+
+    // ErrRetire is returned, or wrapped, by a work function to release with ExitRetired.
+    ErrRetire = errors.New("worklease: retire work ID")
 )
 ```
+
+The block is abridged; `vacuum.go` also declares `ErrRetentionRequired`.
 
 `ErrFenced` is the critical sentinel. When `Checkpoint` or `Renew` returns `ErrFenced`, it
 means a successor has already acquired the lease and this worker is a zombie. The correct
@@ -538,7 +554,7 @@ CREATE INDEX IF NOT EXISTS idx_worklease_leases_updated_at
 As of v0.5, `fencing_token` is sourced from a single global `worklease_fencing_seq` SEQUENCE
 rather than a per-row `+ 1` (ADR-0016). Tokens are therefore strictly increasing across **all**
 work IDs, not just within a single row's history, and they survive row deletion — the property
-that makes the planned v0.6 retention work safe. `checkpoint` is nullable — `NULL` on first
+that makes v0.6 retention (`Forget`, `Vacuum.Sweep`) safe. `checkpoint` is nullable — `NULL` on first
 acquisition means no prior state. `exit_mode` holds the current holder's declared exit (`NULL`
 until it calls `Release`); `prev_exit_mode` and `prev_holder_id` hold the immediately previous
 holder's exit and ID, captured by `Acquire` (ADR-0018). `clean_handoff` is deprecated: it is
@@ -1069,7 +1085,9 @@ The mapping follows `worker.Runner`, first match wins: fenced (from `fn` or the 
 → no release, return `ErrFenced`; lease window exhausted → no release, return `fn`'s error or
 `leader: …` wrapping the cause; an error wrapping `worklease.ErrRetire` → release with
 `ExitRetired` and return `nil`; `nil` → release with `ExitFinished`; any other error → release
-with `ExitAbandoned` and return it. `Release` runs on
+with `ExitAbandoned` and return it. If `fn` panics, renewal is stopped, the lease is not
+released, and the panic propagates; the successor sees `ExitExpired` after the TTL. `Release`
+runs on
 `context.WithTimeout(context.WithoutCancel(ctx), cfg.CleanupTimeout)` (default 5s), so a
 cancelled `ctx` still releases. A non-fenced `Release` error is returned wrapped as
 `leader: release: …` when `fn` succeeded; when `fn` failed, `Elect` returns `fn`'s error.
@@ -1081,8 +1099,9 @@ available.
 **Retry loops and backoff:** Because `Release` expires the lease immediately (ADR-0012), a
 caller wrapping `Elect` in a retry loop with a fast-returning `fn` will see rapid
 acquire/release/reacquire cycling without throttling. Set `cfg.BackoffInterval` to avoid
-this — `Elect` sleeps for that duration before returning on every non-fencing path, including
-`ExitAbandoned` and an exhausted lease window. Fencing paths bypass the sleep:
+this — `Elect` sleeps for that duration before returning on every non-fencing path after a
+successful `Acquire`, including `ExitAbandoned` and an exhausted lease window. Fencing paths
+bypass the sleep, and an `Acquire` error (such as `ErrLeaseHeld`) is returned without it:
 
 ```go
 for {
@@ -1255,8 +1274,10 @@ succeeds. `ActiveSlots()` reflects only slots currently executing `WorkFn`; slot
 acquiring or in backoff are excluded.
 
 **Shutdown signal (v0.4, narrowed in v0.6):** `Run` returns `ErrAllSlotsDead` only when every
-slot exited via a `PermanentError`, even if `ctx` was cancelled at the same moment. It returns
-`nil` when `ctx` was cancelled or at least one slot retired. Supervisors can act on the
+slot exited via a `PermanentError`. The dead count is checked before anything else, so a
+caller cancellation that lands after the last slot died does not hide it; a slot that observes
+the cancellation before reaching its `PermanentError` check exits without counting as dead.
+`Run` returns `nil` when `ctx` was cancelled or at least one slot retired. Supervisors can act on the
 difference without parsing a nil return.
 
 **`WithWaitForLease` is prohibited** in `pool.Config.AcquireOptions`. The pool manages its
@@ -1368,7 +1389,7 @@ make ci   # lint, build, test (all three targets)
 
 **R6 — `pool` and `WithWaitForLease`.** Blocking acquisition inside a pool slot would stop the slot from responding to cancellation. `pool.New` returns `ErrWithWaitForLeaseProhibited` if `WithWaitForLease` is in `AcquireOptions`.
 
-**R7 — `leader.Elect` retry loops have no built-in backoff.** `Release` expires the lease immediately (ADR-0012), in every exit mode. A caller that wraps `Elect` in a tight loop with a fast-failing `fn` cycles through acquire, release, and reacquire. Mitigated by `leader.Config.BackoffInterval`, which applies on every non-fencing return, including `ExitAbandoned`. `pool` waits `IdleInterval`, `RerunInterval`, or `BackoffInterval` (each defaults to 1s) on every looping path except the immediate reacquire after `ErrFenced`. Direct `Lease` and `worker.Runner` callers own their retry pacing.
+**R7 — `leader.Elect` retry loops have no built-in backoff.** `Release` expires the lease immediately (ADR-0012), in every exit mode. A caller that wraps `Elect` in a tight loop with a fast-failing `fn` cycles through acquire, release, and reacquire. Mitigated by `leader.Config.BackoffInterval`, which applies on every non-fencing return after a successful `Acquire`, including `ExitAbandoned`. `pool` waits `IdleInterval`, `RerunInterval`, or `BackoffInterval` (each defaults to 1s) on every looping path except the immediate reacquire after `ErrFenced`. Direct `Lease` and `worker.Runner` callers own their retry pacing.
 
 **R8 — Postgres `Acquire` read-back race.** Resolved in v0.5: `Acquire` is a single `INSERT … ON CONFLICT … RETURNING` statement.
 

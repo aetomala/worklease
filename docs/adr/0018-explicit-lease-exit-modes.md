@@ -47,7 +47,7 @@ Release(ctx context.Context, token Token, mode ExitMode) error
 
 Every mode keeps ADR-0012's behavior: `Release` expires the lease immediately, so a successor acquires without waiting for the TTL. A retired work ID can still be acquired. The new holder sees `PrevExit == ExitRetired` and decides what to do.
 
-`ExitAbandoned` releases immediately, the same as every other mode. A work function that fails persistently is therefore retried as fast as the next acquirer polls. This release does not add an exit-specific delay. For `pool`, the bound is `IdleInterval`, `RerunInterval`, and `BackoffInterval`, each defaulting to 1s. `leader.Elect` callers are paced by `leader.Config.BackoffInterval`, which applies on every non-fencing return, including `ExitAbandoned`. Direct `Lease` and `worker.Runner` callers own their retry pacing, as described in the ARCHITECTURE residual risk "leader.Elect retry loops have no built-in backoff".
+`ExitAbandoned` releases immediately, the same as every other mode. A work function that fails persistently is therefore retried as fast as the next acquirer polls. This release does not add an exit-specific delay. For `pool`, the bound is `IdleInterval`, `RerunInterval`, and `BackoffInterval`, each defaulting to 1s. `leader.Elect` callers are paced by `leader.Config.BackoffInterval`, which applies on every non-fencing return after a successful `Acquire`, including `ExitAbandoned`. Direct `Lease` and `worker.Runner` callers own their retry pacing, as described in the ARCHITECTURE residual risk "leader.Elect retry loops have no built-in backoff".
 
 ### 2. A lapsed holder cannot record an exit
 
