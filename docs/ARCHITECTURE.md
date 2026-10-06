@@ -1452,7 +1452,7 @@ make ci   # lint, build, test (all three targets)
 - `Acquire` with `WithWaitForLease` returns `ctx.Err()` on wait-loop cancellation/deadline (breaking; ADR-0005 amendment, see `UPGRADING.md`)
 - ADR-0013, ADR-0016 (fencing component)
 
-### v0.6 — Unreleased
+### v0.6 — Released (v0.6.0, 2026-10-06)
 
 - `Lease.Forget` / `Vacuum.Sweep` — caller-governed row lifecycle and retention; `Backend` gains `Forget` and `Sweep` (ADR-0016 retention component, Accepted)
 - ADR-0017 — schema migration remains caller-owned
@@ -1512,4 +1512,4 @@ ADR-0012, ADR-0013, and ADR-0016.
 
 ---
 
-*Last updated: June 2026 — v0.5 (v0.5.0)*
+*Last updated: October 2026 — v0.6 (v0.6.0)*
