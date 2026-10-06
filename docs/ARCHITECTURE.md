@@ -1274,9 +1274,10 @@ succeeds. `ActiveSlots()` reflects only slots currently executing `WorkFn`; slot
 acquiring or in backoff are excluded.
 
 **Shutdown signal (v0.4, narrowed in v0.6):** `Run` returns `ErrAllSlotsDead` only when every
-slot exited via a `PermanentError`. The dead count is checked before anything else, so a
-caller cancellation that lands after the last slot died does not hide it; a slot that observes
-the cancellation before reaching its `PermanentError` check exits without counting as dead.
+slot was counted dead through a `PermanentError`. A slot that observes cancellation of `ctx`
+before its `PermanentError` check exits without being counted, so if the caller's `ctx` is
+cancelled at the same moment the last slot fails, `Run` may return `nil` instead of
+`ErrAllSlotsDead`. A cancellation that lands after the last slot was counted does not hide it.
 `Run` returns `nil` when `ctx` was cancelled or at least one slot retired. Supervisors can act on the
 difference without parsing a nil return.
 

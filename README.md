@@ -81,6 +81,19 @@ These are intentional scope boundaries, not gaps.
 ### Acquiring a lease and checkpointing progress
 
 ```go
+backend, err := postgres.New(db)
+if err != nil {
+    return err
+}
+
+lease, err := worklease.New(backend, worklease.Config{
+    TTL:      30 * time.Second,
+    HolderID: os.Getenv("WORKER_ID"),
+})
+if err != nil {
+    return err
+}
+
 token, err := lease.Acquire(ctx, "billing-run-2026-10")
 if err != nil {
     return err // worklease.ErrLeaseHeld: another holder has it
@@ -273,7 +286,7 @@ if err != nil { ... }
 if err := p.Run(ctx); err != nil { ... }
 ```
 
-Return `worklease.ErrRetire` (or wrap it) from the work function to retire the work ID: the slot releases with `ExitRetired`, calls `OnSlotRetired`, and stops. Return a `PermanentError` to drop a slot without reacquisition — implement the interface on a custom type, or wrap an error with `pool.Permanent(err)`; the slot releases with `ExitAbandoned`. When every slot exits through a `PermanentError`, `Run` returns `pool.ErrAllSlotsDead`; if any slot retired, it returns `nil`. A slot whose work ID another process holds waits `Config.IdleInterval` (default 1s, up to 20% jitter); a slot whose work function returned `nil` waits `Config.RerunInterval` (default 1s, up to 20% jitter) before running again; a slot whose work function failed waits `Config.BackoffInterval` (default 1s) and calls `OnSlotBackoff`. Set `pool.Config.Observer` to a `pool.Observer` to receive slot lifecycle events (`OnSlotAcquired` / `OnSlotLost` / `OnSlotBackoff` / `OnSlotDead` / `OnSlotRetired`), and call `ActiveSlots()` for a point-in-time view of slots currently executing their work function. Construction errors are distinct sentinels (`ErrNilLease` / `ErrEmptyWorkIDs` / `ErrWithWaitForLeaseProhibited`) that all satisfy `errors.Is(err, pool.ErrConfigInvalid)`.
+Return `worklease.ErrRetire` (or wrap it) from the work function to retire the work ID: the slot releases with `ExitRetired`, calls `OnSlotRetired`, and stops. Return a `PermanentError` to drop a slot without reacquisition — implement the interface on a custom type, or wrap an error with `pool.Permanent(err)`; the slot releases with `ExitAbandoned`. When every slot exits through a `PermanentError`, `Run` returns `pool.ErrAllSlotsDead`; if any slot retired, it returns `nil`. `ErrAllSlotsDead` requires every slot to be counted dead: a slot that observes cancellation of `ctx` before its `PermanentError` check exits uncounted, so if `ctx` is cancelled at the same moment the last slot fails, `Run` may return `nil` instead. A slot whose work ID another process holds waits `Config.IdleInterval` (default 1s, up to 20% jitter); a slot whose work function returned `nil` waits `Config.RerunInterval` (default 1s, up to 20% jitter) before running again; a slot whose work function failed waits `Config.BackoffInterval` (default 1s) and calls `OnSlotBackoff`. Set `pool.Config.Observer` to a `pool.Observer` to receive slot lifecycle events (`OnSlotAcquired` / `OnSlotLost` / `OnSlotBackoff` / `OnSlotDead` / `OnSlotRetired`), and call `ActiveSlots()` for a point-in-time view of slots currently executing their work function. Construction errors are distinct sentinels (`ErrNilLease` / `ErrEmptyWorkIDs` / `ErrWithWaitForLeaseProhibited`) that all satisfy `errors.Is(err, pool.ErrConfigInvalid)`.
 
 ### checkpoint — Typed serialization helpers
 
@@ -447,7 +460,11 @@ Requires Go 1.25+. PostgreSQL backend requires PostgreSQL 12+.
 
 ## Status
 
-v0.5.0 is the latest release line. The core public API (`Lease`, `Token`, options, sentinels) is stable. v0.5 adds bounded renewal retry (`WithRenewalBackoff`, `ErrLeaseWindowExhausted`, `RenewEvent.Attempt`), a global fencing sequence on both backends, a single-statement Postgres `Acquire` with `RETURNING`, and ctx-aware `Acquire` cancellation under `WithWaitForLease` (a runtime break — see `UPGRADING.md`).
+v0.6.0 is the latest release line. The core lease model (`Lease`, `Token`, fencing, options, sentinels) is stable; v0.6 changes several signatures, so read `UPGRADING.md` before upgrading.
+
+v0.6 adds caller-governed row lifecycle: `Lease.Forget` deletes one row, and `worklease.Vacuum.Sweep` deletes retired rows (and, with `IncludeExpired`, expired rows) older than a retention period. It also replaces the `cleanHandoff` flag with explicit exit modes (ADR-0018). `Release(ctx, token, mode)` records `ExitFinished`, `ExitAbandoned`, or `ExitRetired`; `ReadCheckpoint` returns a `Checkpoint` with `PrevExit` and `PrevHolderID`; and `worker.Runner`, `leader.Elect`, and `pool` record each run's outcome, release on a cleanup context bounded by `CleanupTimeout`, and support retiring a work ID with `worklease.ErrRetire`.
+
+Breaking changes: a PostgreSQL schema migration is required before deploying; `Release` and `ReadCheckpoint` change on both `Lease` and `Backend`, as do the `worker`/`pool` work-function signatures; `ReadCheckpointEvent.CleanHandoff` is replaced by `PrevExit` and `PrevHolderID`; custom `Backend` and `Lease` implementations must add `Forget` (and `Sweep` for backends); custom `pool.Observer` implementations must add `OnSlotRetired`; and `pool.Config.BackoffInterval` zero now means 1s. See `UPGRADING.md` and `CHANGELOG.md`.
 
 ---
 

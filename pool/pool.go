@@ -237,8 +237,11 @@ func New(lease worklease.Lease, cfg Config, fn WorkFn) (*Pool, error) {
 // Run starts acquisition loops for all configured work IDs and blocks until
 // ctx is cancelled or every slot has exited. A slot exits when its WorkFn
 // retires the work ID with worklease.ErrRetire or returns a PermanentError.
-// Run returns ErrAllSlotsDead only if every slot exited through a
-// PermanentError. It returns nil if ctx was cancelled or at least one slot
+// Run returns ErrAllSlotsDead only when every slot was counted dead through a
+// PermanentError. A slot that observes cancellation of ctx before its
+// PermanentError check exits without being counted, so if ctx is cancelled at
+// the same moment the last slot fails, Run may return nil instead of
+// ErrAllSlotsDead. Run returns nil if ctx was cancelled or at least one slot
 // retired. Every active slot completes its final Checkpoint and Release,
 // bounded by CleanupTimeout, before Run returns. Run is not safe to call
 // concurrently on the same Pool.
