@@ -125,13 +125,16 @@ type Lease interface {
 	// Sweep.
 	ReadCheckpoint(ctx context.Context, token Token) (Checkpoint, error)
 
-	// StartRenewal begins automatic renewal of the lease at regular intervals. Returns
-	// a derived context and a stop function. Calling stop cancels the renewal context
-	// and terminates the renewal loop. The renewal context is cancelled if the underlying
-	// context is cancelled or if the lease is lost.
+	// StartRenewal begins automatic renewal of the lease at regular intervals.
+	// Returns a derived context and a stop function. The renewal context is
+	// cancelled if the parent context is cancelled, if the lease is fenced, or
+	// if the lease window closes before a renewal succeeds. Calling the stop
+	// function ends renewal without cancelling the renewal context, and it
+	// returns without waiting for an in-flight Renew call to finish.
 	// If Renew returns ErrLeaseExpired, storage has found the lease lapsed:
 	// renewal stops at once without retrying, and the renewal context's cause
 	// matches both ErrLeaseWindowExhausted and ErrLeaseExpired.
+	// LeaseWindow reports the current lease window from the renewal context.
 	StartRenewal(ctx context.Context, token Token, opts ...RenewalOption) (renewCtx context.Context, stopRenewal func())
 
 	// Forget permanently deletes the lease record for token's workID. Returns
@@ -172,7 +175,8 @@ func (t Token) FencingToken() uint64 {
 }
 
 // ExpiresAt returns the lease expiry recorded at acquisition, as reported by the
-// backend's clock. It is not updated by Renew or Checkpoint.
+// backend's clock. It is not updated by Renew or Checkpoint. For a bound that
+// reflects renewals, call LeaseWindow with the renewal context.
 func (t Token) ExpiresAt() time.Time {
 	return t.expiresAt
 }
@@ -343,7 +347,11 @@ type CheckpointEvent struct {
 // RenewEvent carries the result of a Renew call.
 // Attempt is 1 on the first attempt. The renewal goroutine increments Attempt
 // on each retry attempt within the backoff loop. Direct calls to Renew from
-// caller code always produce Attempt: 1.
+// caller code always produce Attempt: 1. When the renewal goroutine abandons an
+// in-flight attempt, Err is the error of the abandonment: context.Canceled on
+// stopRenewal, the parent context's error on its cancellation, and
+// context.DeadlineExceeded when the lease window closes. Duration then runs to
+// the moment of abandonment.
 type RenewEvent struct {
 	Token    Token
 	Duration time.Duration

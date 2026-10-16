@@ -5,6 +5,7 @@ import (
 	"errors"
 	"math/rand/v2"
 	"sync"
+	"sync/atomic"
 	"time"
 )
 
@@ -19,21 +20,32 @@ import (
 //     ErrFenced and exits, after emitting OnRenew then OnFenced. No retry.
 //   - Lease window exhausted: a non-fencing Renew error is retried with exponential
 //     backoff until the lease window closes. The goroutine then cancels renewCtx
-//     with cause ErrLeaseWindowExhausted and exits. Exception: ErrLeaseExpired
-//     from Renew cancels at once, without backoff, with cause
+//     with cause ErrLeaseWindowExhausted and exits. It cancels when the window
+//     closes, whether it is waiting for the next tick, for a backoff, or for an
+//     in-flight Renew call. Exception: ErrLeaseExpired from Renew cancels at
+//     once, without backoff, with cause
 //     errors.Join(ErrLeaseWindowExhausted, ErrLeaseExpired).
+//   - Parent context cancelled: ctx.Done() fires. The goroutine exits; renewCtx
+//     auto-cancels as a child of ctx and the goroutine sets no cause.
 //
 // The lease window starts as the earlier of token.ExpiresAt() and the local
 // start time of the acquiring backend call plus TTL. After every successful
 // renewal it advances to the local start time of that Renew call plus TTL. The
 // local bounds use the monotonic clock, so they never exceed the true expiry
-// regardless of skew between the local and backend clocks.
-//   - Parent context cancelled: ctx.Done() fires. The goroutine exits; renewCtx
-//     auto-cancels as a child of ctx and the goroutine sets no cause.
+// regardless of skew between the local and backend clocks. LeaseWindow reads
+// the current window from renewCtx.
 //
-// stopRenewal blocks until the goroutine has fully exited and is idempotent.
-// Callers must invoke stopRenewal before Release, and must use the original ctx
-// (not renewCtx) for Release.
+// Each Renew call runs on its own goroutine, with a context derived from ctx
+// whose deadline is the lease window at the time of the call. The renewal
+// goroutine never waits on that call alone: on stopRenewal, on cancellation of
+// ctx, or when the window closes, it cancels the call's context and moves on,
+// and the call's eventual result is discarded. Every attempt is reported to
+// OnRenew exactly once.
+//
+// The stopRenewal function returns once the renewal goroutine has exited,
+// without waiting for an in-flight Renew call, and it is idempotent. Callers
+// must invoke stopRenewal before Release, and must use the original ctx (not
+// renewCtx) for Release.
 func (c *leaseClient) StartRenewal(ctx context.Context, token Token, opts ...RenewalOption) (context.Context, func()) {
 	// ===== STEP 1: Resolve options =====
 	rcfg := renewalConfig{
@@ -46,8 +58,13 @@ func (c *leaseClient) StartRenewal(ctx context.Context, token Token, opts ...Ren
 		o(&rcfg)
 	}
 
-	// ===== STEP 2: Derive cancel-cause context =====
-	renewCtx, cancelCause := context.WithCancelCause(ctx)
+	// ===== STEP 2: Derive cancel-cause context and tracked window =====
+	cancelCtx, cancelCause := context.WithCancelCause(ctx)
+	first := initialWindow(token)
+	tw := &trackedWindow{done: cancelCtx.Done()}
+	tw.end.Store(&first)
+	window := first // owned by the renewal goroutine; tw.end only ever holds copies
+	renewCtx := context.WithValue(cancelCtx, leaseWindowKey{}, tw)
 
 	// ===== STEP 3: Prepare stop channel and wait group =====
 	stopCh := make(chan struct{})
@@ -60,18 +77,30 @@ func (c *leaseClient) StartRenewal(ctx context.Context, token Token, opts ...Ren
 		defer wg.Done()
 		ticker := time.NewTicker(rcfg.renewalInterval)
 		defer ticker.Stop()
-		window := initialWindow(token)
 		for {
+			windowTimer := time.NewTimer(time.Until(window))
 			select {
 			case <-stopCh:
+				windowTimer.Stop()
 				return // Path 1: normal stop — do NOT cancel
 			case <-ctx.Done():
+				windowTimer.Stop()
 				return // Path 4: parent cancelled — renewCtx auto-cancels
+			case <-windowTimer.C:
+				cancelCause(ErrLeaseWindowExhausted) // Path 3: window closed between ticks
+				return
 			case <-ticker.C:
-				if !c.renewCycle(ctx, token, rcfg, cancelCause, stopCh, &window) {
-					return // Path 2 or 3 — cause already set inside renewCycle
-				}
+				windowTimer.Stop()
 			}
+			if !time.Now().Before(window) {
+				cancelCause(ErrLeaseWindowExhausted) // Path 3: window closed as the tick fired
+				return
+			}
+			if !c.renewCycle(ctx, token, rcfg, cancelCause, stopCh, &window) {
+				return // Path 1, 2, 3, or 4 — any cause is already set inside renewCycle
+			}
+			next := window
+			tw.end.Store(&next)
 		}
 	}()
 
@@ -82,6 +111,45 @@ func (c *leaseClient) StartRenewal(ctx context.Context, token Token, opts ...Ren
 	}
 
 	return renewCtx, stopRenewal
+}
+
+// LeaseWindow returns the end of the lease window tracked by the renewal
+// goroutine whose renewal context is ctx or the nearest ancestor of ctx. The
+// window starts as the earlier of the token's ExpiresAt and the local start of
+// the acquiring backend call plus TTL, and advances to the local start of each
+// successful renewal plus TTL. It is measured on the local monotonic clock, so
+// it never exceeds the true expiry. The ok result is false when ctx does not
+// descend from a renewal context, and once that renewal context is done: after
+// fencing, an exhausted window, or cancellation of its parent. After
+// stopRenewal the window stays valid and stops advancing.
+func LeaseWindow(ctx context.Context) (deadline time.Time, ok bool) {
+	// ===== STEP 1: Find the tracked window =====
+	tw, _ := ctx.Value(leaseWindowKey{}).(*trackedWindow)
+	if tw == nil {
+		return time.Time{}, false
+	}
+
+	// ===== STEP 2: Report nothing once the renewal context is done =====
+	select {
+	case <-tw.done:
+		return time.Time{}, false
+	default:
+	}
+
+	// ===== STEP 3: Return the current window =====
+	return *tw.end.Load(), true
+}
+
+// The leaseWindowKey type is the context key under which StartRenewal stores
+// the tracked lease window.
+type leaseWindowKey struct{}
+
+// The trackedWindow type is the value stored under leaseWindowKey. The renewal
+// goroutine writes end; LeaseWindow reads it and reports false once done is
+// closed.
+type trackedWindow struct {
+	end  atomic.Pointer[time.Time]
+	done <-chan struct{}
 }
 
 // initialWindow returns the end of the lease window known at acquisition: the
@@ -104,10 +172,15 @@ func (c *leaseClient) renewCycle(ctx context.Context, token Token, rcfg renewalC
 	attempt := 1
 	base := rcfg.backoffInitial
 	for {
-		start := time.Now()
-		err := c.b.Renew(ctx, toRecord(token), c.cfg.TTL)
-		dur := time.Since(start)
-		c.obs.OnRenew(ctx, RenewEvent{Token: token, Duration: dur, Attempt: attempt, Err: err})
+		start, end, err := c.renewAttempt(ctx, token, attempt, stopCh, *window)
+		switch end {
+		case attemptStopped, attemptParentDone:
+			return false // Path 1 or Path 4 — do NOT cancel
+		case attemptWindowClosed:
+			cancelCause(ErrLeaseWindowExhausted) // Path 3: window closed during the attempt
+			return false
+		case attemptReturned:
+		}
 
 		switch {
 		case errors.Is(err, ErrFenced):
@@ -128,15 +201,23 @@ func (c *leaseClient) renewCycle(ctx context.Context, token Token, rcfg renewalC
 			cancelCause(ErrLeaseWindowExhausted) // Path 3 (before sleep)
 			return false
 		}
-		timer := time.NewTimer(backoffWait(base, rcfg.backoffJitter))
+		backoffTimer := time.NewTimer(backoffWait(base, rcfg.backoffJitter))
+		windowTimer := time.NewTimer(time.Until(*window))
 		select {
 		case <-stopCh:
-			timer.Stop()
+			backoffTimer.Stop()
+			windowTimer.Stop()
 			return false // Path 1
 		case <-ctx.Done():
-			timer.Stop()
+			backoffTimer.Stop()
+			windowTimer.Stop()
 			return false // Path 4
-		case <-timer.C:
+		case <-windowTimer.C:
+			backoffTimer.Stop()
+			cancelCause(ErrLeaseWindowExhausted) // Path 3 (during sleep)
+			return false
+		case <-backoffTimer.C:
+			windowTimer.Stop()
 		}
 		if !time.Now().Before(*window) {
 			cancelCause(ErrLeaseWindowExhausted) // Path 3 (after sleep)
@@ -145,6 +226,67 @@ func (c *leaseClient) renewCycle(ctx context.Context, token Token, rcfg renewalC
 		base = nextBackoff(base, rcfg.backoffMax)
 		attempt++
 	}
+}
+
+// The attemptEnd type records why the renewal goroutine stopped waiting on one
+// Renew attempt.
+type attemptEnd uint8
+
+// The attemptEnd values: the call returned, or the wait ended on W1, W2, or W3.
+const (
+	attemptReturned     attemptEnd = iota // The Renew call returned; its error is the attempt's result
+	attemptStopped                        // W1: stopRenewal was called
+	attemptParentDone                     // W2: the parent context was cancelled
+	attemptWindowClosed                   // W3: the lease window closed
+)
+
+// The renewResult type carries the outcome of one Renew call from its goroutine.
+type renewResult struct {
+	err error
+	dur time.Duration
+}
+
+// renewAttempt runs one Renew call on its own goroutine, with a context derived
+// from ctx whose deadline is window, and waits for the first of: the call's
+// result, stopCh, cancellation of ctx, or the window closing. It reports the
+// attempt to OnRenew exactly once — with the call's error when the result
+// arrives, and otherwise with context.Canceled, ctx.Err(), or
+// context.DeadlineExceeded. An abandoned call's context is cancelled and its
+// late result is discarded; the result channel is buffered so the call's
+// goroutine never blocks. Returns the local start time of the call, why the
+// wait ended, and the call's error when it returned.
+func (c *leaseClient) renewAttempt(ctx context.Context, token Token, attempt int, stopCh <-chan struct{}, window time.Time) (time.Time, attemptEnd, error) {
+	// ===== STEP 1: Launch the call =====
+	attemptCtx, cancelAttempt := context.WithDeadline(ctx, window)
+	defer cancelAttempt()
+	results := make(chan renewResult, 1)
+	start := time.Now()
+	go func() {
+		err := c.b.Renew(attemptCtx, toRecord(token), c.cfg.TTL)
+		results <- renewResult{err: err, dur: time.Since(start)}
+	}()
+
+	// ===== STEP 2: Wait for the result, a stop, the parent, or the window =====
+	windowTimer := time.NewTimer(time.Until(window))
+	defer windowTimer.Stop()
+	var (
+		end attemptEnd
+		res renewResult
+	)
+	select {
+	case res = <-results:
+		end = attemptReturned
+	case <-stopCh:
+		end, res = attemptStopped, renewResult{err: context.Canceled, dur: time.Since(start)}
+	case <-ctx.Done():
+		end, res = attemptParentDone, renewResult{err: ctx.Err(), dur: time.Since(start)}
+	case <-windowTimer.C:
+		end, res = attemptWindowClosed, renewResult{err: context.DeadlineExceeded, dur: time.Since(start)}
+	}
+
+	// ===== STEP 3: Report the attempt =====
+	c.obs.OnRenew(ctx, RenewEvent{Token: token, Duration: res.dur, Attempt: attempt, Err: res.err})
+	return start, end, res.err
 }
 
 // defaultRenewalInterval returns TTL/2, floored at one nanosecond so that
