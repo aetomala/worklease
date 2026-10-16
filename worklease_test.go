@@ -117,6 +117,22 @@ var _ = Describe("worklease", func() {
 			Expect(lease).To(BeNil())
 		})
 
+		It("TTL below 1ms → non-nil error naming the 1ms minimum, no Lease returned", func() {
+			badCfg := cfg
+			badCfg.TTL = 999 * time.Microsecond
+			lease, err := worklease.New(mockB, badCfg)
+			Expect(err).To(MatchError(ContainSubstring("at least 1ms")))
+			Expect(lease).To(BeNil())
+		})
+
+		It("TTL exactly 1ms → non-nil Lease, nil error", func() {
+			okCfg := cfg
+			okCfg.TTL = time.Millisecond
+			lease, err := worklease.New(mockB, okCfg)
+			Expect(err).To(BeNil())
+			Expect(lease).NotTo(BeNil())
+		})
+
 		It("HolderID empty → non-nil error, no Lease returned", func() {
 			badCfg := cfg
 			badCfg.HolderID = ""

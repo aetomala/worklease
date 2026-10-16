@@ -11,7 +11,8 @@ import (
 
 // Config holds configuration for a Lease instance.
 type Config struct {
-	// TTL is the time-to-live for acquired leases. Required; zero or negative returns an error.
+	// TTL is the time-to-live for acquired leases. Required; New returns an
+	// error for zero, for a negative value, and for any value below 1ms.
 	TTL time.Duration
 
 	// HolderID is the identifier of the entity that will hold leases. Required; empty returns an error.
@@ -20,6 +21,11 @@ type Config struct {
 	// Observer is the LeaseObserver that will be notified of lease events. Optional; nil defaults to noopObserver.
 	Observer LeaseObserver
 }
+
+// The minTTL constant is the smallest TTL New accepts. A shorter TTL would be
+// shorter than the one-millisecond offset Release writes into the past
+// (ADR-0012), and PostgreSQL intervals resolve only to the microsecond.
+const minTTL = time.Millisecond
 
 // leaseClient implements the Lease interface. It wraps a Backend and delegates
 // all operations to it, translating between the exported Token API and the
@@ -30,8 +36,9 @@ type leaseClient struct {
 	obs LeaseObserver // never nil after New()
 }
 
-// New returns a new Lease instance backed by the provided Backend. Returns an error
-// if the backend is nil, TTL is zero or negative, or HolderID is empty.
+// New returns a new Lease instance backed by the provided Backend. Returns an
+// error if the backend is nil, TTL is zero, negative, or below 1ms, or
+// HolderID is empty.
 func New(b backend.Backend, cfg Config) (Lease, error) {
 	// ===== STEP 1: Validate Required Fields =====
 	if b == nil {
@@ -49,6 +56,10 @@ func New(b backend.Backend, cfg Config) (Lease, error) {
 	// ===== STEP 2: Reject Invalid Values =====
 	if cfg.TTL < 0 {
 		return nil, fmt.Errorf("worklease: New: TTL must be positive, got %v", cfg.TTL)
+	}
+
+	if cfg.TTL < minTTL {
+		return nil, fmt.Errorf("worklease: New: TTL must be at least 1ms, got %v", cfg.TTL)
 	}
 
 	// ===== STEP 3: Initialize and Return =====
