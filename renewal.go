@@ -258,7 +258,6 @@ type renewResult struct {
 func (c *leaseClient) renewAttempt(ctx context.Context, token Token, attempt int, stopCh <-chan struct{}, window time.Time) (time.Time, attemptEnd, error) {
 	// ===== STEP 1: Launch the call =====
 	attemptCtx, cancelAttempt := context.WithDeadline(ctx, window)
-	defer cancelAttempt()
 	results := make(chan renewResult, 1)
 	start := time.Now()
 	go func() {
@@ -284,7 +283,8 @@ func (c *leaseClient) renewAttempt(ctx context.Context, token Token, attempt int
 		end, res = attemptWindowClosed, renewResult{err: context.DeadlineExceeded, dur: time.Since(start)}
 	}
 
-	// ===== STEP 3: Report the attempt =====
+	// ===== STEP 3: Cancel the call's context, then report the attempt =====
+	cancelAttempt()
 	c.obs.OnRenew(ctx, RenewEvent{Token: token, Duration: res.dur, Attempt: attempt, Err: res.err})
 	return start, end, res.err
 }
