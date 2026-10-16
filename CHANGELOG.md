@@ -12,6 +12,7 @@ This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 ### Chore
 
 - Go toolchain directive bumped from go1.26.8 to go1.26.9 for GO-2026-6617, GO-2026-6613, GO-2026-6612, GO-2026-6611, and GO-2026-6603 (`net/http`), GO-2026-6608 (`mime/multipart`), and GO-2026-6607 (`crypto/tls`), all reachable standard-library vulnerabilities fixed in go1.26.9. Four of them are also reported against `golang.org/x/net` v0.56.0, where govulncheck finds no call from worklease code; `x/net` stays at v0.56.0 because v0.60.0 requires Go 1.26. The `go 1.25.0` floor is unchanged.
+- The `integration/` suite runs every `worker`, `leader`, and `pool` composition spec on both the in-memory and PostgreSQL backends (#87). The PostgreSQL run uses its own schema, `worklease_integration`, and fails rather than skips when `WORKLEASE_REQUIRE_POSTGRES` is set.
 
 ---
 
