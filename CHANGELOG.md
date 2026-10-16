@@ -9,6 +9,21 @@ This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 
 ## [Unreleased]
 
+### Breaking
+
+- **PostgreSQL: the deprecated `clean_handoff` column is dropped (#86).** `schema.sql` no longer creates it. v0.6 and v0.7 never read or write it, so an existing table keeps working until you drop the column. Run `ALTER TABLE worklease_leases DROP COLUMN IF EXISTS clean_handoff` once no v0.5 process remains; after that, a rollback to v0.5 is not possible. See `UPGRADING.md`.
+- `worklease.New` rejects a TTL below 1ms (#90). A TTL below 1ms is shorter than the 1ms offset `Release` writes into the past (ADR-0012), and PostgreSQL intervals resolve only to the microsecond.
+- The PostgreSQL backend requires the READ COMMITTED isolation level, the PostgreSQL default (#89). Under REPEATABLE READ or SERIALIZABLE, a contended `Acquire` fails with SQLSTATE 40001 instead of returning `ErrLeaseHeld`. See the `backend/postgres` package documentation.
+
+### Added
+
+- `worklease.LeaseWindow(ctx)` reports the lease window the renewal goroutine tracks, from the renewal context or any context derived from it (#93). It advances with each successful renewal and never exceeds the true expiry. `Token.ExpiresAt()` remains the expiry recorded at acquisition.
+
+### Fixed
+
+- `stopRenewal` no longer waits for an in-flight `Renew`, and the renewal context is cancelled with `ErrLeaseWindowExhausted` when the lease window closes, whether renewal is between ticks, backing off, or stalled in a `Renew` call (#88). Before, the window was checked only after a failed attempt, so work could run without a lease until the next tick or until a stalled call returned. Each `Renew` call runs with a deadline at the lease window. An abandoned call is reported to `OnRenew` with its context error, and its late result is discarded.
+- The PostgreSQL backend rounds a TTL up to the next whole microsecond instead of to the nearest microsecond, so a stored expiry is never earlier than the requested TTL (#90).
+
 ### Chore
 
 - Go toolchain directive bumped from go1.26.8 to go1.26.9 for GO-2026-6617, GO-2026-6613, GO-2026-6612, GO-2026-6611, and GO-2026-6603 (`net/http`), GO-2026-6608 (`mime/multipart`), and GO-2026-6607 (`crypto/tls`), all reachable standard-library vulnerabilities fixed in go1.26.9. Four of them are also reported against `golang.org/x/net` v0.56.0, where govulncheck finds no call from worklease code; `x/net` stays at v0.56.0 because v0.60.0 requires Go 1.26. The `go 1.25.0` floor is unchanged.

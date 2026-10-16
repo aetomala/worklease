@@ -534,8 +534,6 @@ CREATE TABLE IF NOT EXISTS worklease_leases (
     fencing_token   BIGINT      NOT NULL DEFAULT nextval('worklease_fencing_seq'),
     expires_at      TIMESTAMPTZ NOT NULL,
     checkpoint      BYTEA,
-    -- Deprecated: unread and unwritten since v0.6.0 (ADR-0018). Kept so a rollback to v0.5 does not fail; dropped in a later release (#86).
-    clean_handoff   BOOLEAN     NOT NULL DEFAULT FALSE,
     exit_mode       TEXT,
     prev_exit_mode  TEXT        NOT NULL DEFAULT 'none',
     prev_holder_id  TEXT,
@@ -557,8 +555,7 @@ work IDs, not just within a single row's history, and they survive row deletion 
 that makes v0.6 retention (`Forget`, `Vacuum.Sweep`) safe. `checkpoint` is nullable — `NULL` on first
 acquisition means no prior state. `exit_mode` holds the current holder's declared exit (`NULL`
 until it calls `Release`); `prev_exit_mode` and `prev_holder_id` hold the immediately previous
-holder's exit and ID, captured by `Acquire` (ADR-0018). `clean_handoff` is deprecated: it is
-never read or written since v0.6 and stays only so a rollback to v0.5 does not fail (#86).
+holder's exit and ID, captured by `Acquire` (ADR-0018). v0.7 dropped the deprecated `clean_handoff` column (#86).
 
 ### Acquire — Single-Statement Upsert with RETURNING
 
