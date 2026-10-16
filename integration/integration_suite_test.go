@@ -194,22 +194,3 @@ func dsnWithSearchPath(dsn string) (string, error) {
 	}
 	return dsn + " search_path=" + integrationSchema, nil
 }
-
-// fakeClock is a controllable Clock implementation for deterministic TTL tests.
-// Advance is safe to call concurrently with Now.
-type fakeClock struct {
-	mu  sync.Mutex
-	now time.Time
-}
-
-func (f *fakeClock) Now() time.Time {
-	f.mu.Lock()
-	defer f.mu.Unlock()
-	return f.now
-}
-
-func (f *fakeClock) Advance(d time.Duration) {
-	f.mu.Lock()
-	defer f.mu.Unlock()
-	f.now = f.now.Add(d)
-}

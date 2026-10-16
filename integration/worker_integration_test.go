@@ -3,6 +3,7 @@ package integration_test
 import (
 	"context"
 	"errors"
+	"sync"
 	"sync/atomic"
 	"time"
 
@@ -11,7 +12,6 @@ import (
 
 	"github.com/aetomala/worklease"
 	"github.com/aetomala/worklease/backend"
-	"github.com/aetomala/worklease/backend/memory"
 	"github.com/aetomala/worklease/worker"
 )
 
@@ -37,6 +37,61 @@ type failingRenew struct {
 
 func (failingRenew) Renew(_ context.Context, _ backend.LeaseRecord, _ time.Duration) error {
 	return errors.New("connection reset")
+}
+
+// The renewalGate type wraps a backend and holds Renew calls while paused.
+// Every other method delegates to the wrapped backend.
+type renewalGate struct {
+	backend.Backend
+	mu       sync.Mutex
+	paused   bool
+	inFlight int
+	resumeCh chan struct{}
+}
+
+func (g *renewalGate) pause() {
+	g.mu.Lock()
+	g.paused = true
+	g.resumeCh = make(chan struct{})
+	g.mu.Unlock()
+	for {
+		g.mu.Lock()
+		n := g.inFlight
+		g.mu.Unlock()
+		if n == 0 {
+			return
+		}
+		time.Sleep(time.Millisecond)
+	}
+}
+
+func (g *renewalGate) resume() {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	g.paused = false
+	close(g.resumeCh)
+}
+
+func (g *renewalGate) Renew(ctx context.Context, record backend.LeaseRecord, ttl time.Duration) error {
+	g.mu.Lock()
+	for g.paused {
+		ch := g.resumeCh
+		g.mu.Unlock()
+		select {
+		case <-ch:
+		case <-ctx.Done():
+			return ctx.Err()
+		}
+		g.mu.Lock()
+	}
+	g.inFlight++
+	g.mu.Unlock()
+	defer func() {
+		g.mu.Lock()
+		g.inFlight--
+		g.mu.Unlock()
+	}()
+	return g.Backend.Renew(ctx, record, ttl)
 }
 
 func workerSpecs(h harness) {
@@ -143,8 +198,8 @@ func workerSpecs(h harness) {
 		// ===== PHASE 3: Recovery After No Declared Exit =====
 		Describe("Phase 3: Recovery After No Declared Exit", func() {
 			It("after A crashes, B sees ExitExpired and A's last checkpoint", func() {
-				fc := &fakeClock{now: time.Now()}
-				b := memory.New(memory.WithClock(fc))
+				env := h.newEnv()
+				b := env.backend
 
 				stateA := []byte("checkpoint-before-crash")
 
@@ -155,15 +210,15 @@ func workerSpecs(h harness) {
 				Expect(err).NotTo(HaveOccurred())
 				Expect(leaseA.Checkpoint(ctx, tokenA, stateA)).To(Succeed())
 
-				// Advance fake clock past TTL so the lease appears expired.
-				fc.Advance(31 * time.Second)
+				// Expire A's lease, as if its TTL had passed.
+				env.expire("work-1")
 
 				Expect(successorSees(b)).To(Equal(worklease.Checkpoint{State: stateA, PrevExit: worklease.ExitExpired, PrevHolderID: "node-a"}))
 			})
 
 			It("after A's ReadCheckpoint fails, A does not release and B sees ExitExpired with A as the previous holder (#79 reproduction 2)", func() {
-				fc := &fakeClock{now: time.Now()}
-				b := memory.New(memory.WithClock(fc))
+				env := h.newEnv()
+				b := env.backend
 
 				leaseA, err := worklease.New(&failFirstReadCheckpoint{Backend: b}, worklease.Config{TTL: 30 * time.Second, HolderID: "node-a"})
 				Expect(err).NotTo(HaveOccurred())
@@ -186,7 +241,7 @@ func workerSpecs(h harness) {
 				_, err = leaseB.Acquire(ctx, "work-1")
 				Expect(err).To(MatchError(worklease.ErrLeaseHeld))
 
-				fc.Advance(31 * time.Second)
+				env.expire("work-1")
 
 				got := successorSees(b)
 				Expect(got.PrevExit).To(Equal(worklease.ExitExpired))
@@ -194,8 +249,8 @@ func workerSpecs(h harness) {
 			})
 
 			It("after A's lease window is exhausted, A does not release and B sees ExitExpired (#79 reproduction 3)", func() {
-				fc := &fakeClock{now: time.Now()}
-				b := memory.New(memory.WithClock(fc))
+				env := h.newEnv()
+				b := env.backend
 
 				// Every Renew fails transiently, so the 200ms window runs out in real time.
 				leaseA, err := worklease.New(failingRenew{Backend: b}, worklease.Config{TTL: 200 * time.Millisecond, HolderID: "node-a"})
@@ -211,14 +266,8 @@ func workerSpecs(h harness) {
 				Expect(err).NotTo(HaveOccurred())
 				Expect(rA.Run(ctx, "work-1")).To(MatchError(worklease.ErrLeaseWindowExhausted))
 
-				// A did not release, so the lease is still held until its TTL passes
-				// on the backend clock.
-				leaseB, err := worklease.New(b, worklease.Config{TTL: 30 * time.Second, HolderID: "node-b"})
-				Expect(err).NotTo(HaveOccurred())
-				_, err = leaseB.Acquire(ctx, "work-1")
-				Expect(err).To(MatchError(worklease.ErrLeaseHeld))
-
-				fc.Advance(time.Second)
+				// PrevExit == ExitExpired below proves A did not release: Release records a declared exit.
+				env.expire("work-1")
 
 				got := successorSees(b)
 				Expect(got.PrevExit).To(Equal(worklease.ExitExpired))
@@ -230,10 +279,11 @@ func workerSpecs(h harness) {
 		// ===== PHASE 4: Fencing Propagation =====
 		Describe("Phase 4: Fencing Propagation", func() {
 			It("runner.Run returns ErrFenced when another holder acquires the lease", func() {
-				fc := &fakeClock{now: time.Now()}
-				b := memory.New(memory.WithClock(fc))
+				env := h.newEnv()
+				b := env.backend
+				gate := &renewalGate{Backend: b}
 
-				leaseA, err := worklease.New(b, worklease.Config{TTL: 30 * time.Second, HolderID: "node-a"})
+				leaseA, err := worklease.New(gate, worklease.Config{TTL: 30 * time.Second, HolderID: "node-a"})
 				Expect(err).NotTo(HaveOccurred())
 				leaseB, err := worklease.New(b, worklease.Config{TTL: 30 * time.Second, HolderID: "node-b"})
 				Expect(err).NotTo(HaveOccurred())
@@ -260,17 +310,19 @@ func workerSpecs(h harness) {
 				// Wait until Worker A's WorkFn is running (lease acquired and renewal started).
 				Eventually(started).Should(BeClosed())
 
-				// Advance fake clock past Worker A's TTL so the record appears expired.
-				// Worker B can then acquire, bumping the fencing token.
-				fc.Advance(31 * time.Second)
+				// Hold Worker A's renewals at the gate, expire its lease, and let Worker B
+				// acquire and bump the fencing token.
+				gate.pause()
+				env.expire("work-1")
 
 				tokenB, err := leaseB.Acquire(ctx, "work-1")
 				Expect(err).NotTo(HaveOccurred())
 				defer leaseB.Release(ctx, tokenB, worklease.ExitFinished) //nolint:errcheck
+				gate.resume()
 
-				// Worker A's next renewal (fires within 50ms real time) sees a fencing
-				// token mismatch and cancels the renewal context with cause ErrFenced,
-				// so Run returns ErrFenced without releasing.
+				// Worker A's next renewal (fires within 50ms real time) passes the gate, sees
+				// a fencing token mismatch, and cancels the renewal context with cause
+				// ErrFenced, so Run returns ErrFenced without releasing.
 				Eventually(runErr, "1s").Should(Receive(MatchError(worklease.ErrFenced)))
 			})
 		})

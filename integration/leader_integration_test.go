@@ -9,7 +9,6 @@ import (
 	. "github.com/onsi/gomega"
 
 	"github.com/aetomala/worklease"
-	"github.com/aetomala/worklease/backend/memory"
 	"github.com/aetomala/worklease/leader"
 )
 
@@ -66,8 +65,8 @@ func leaderSpecs(h harness) {
 		// ===== PHASE 2: WithWaitForLease Standby Failover =====
 		Describe("Phase 2: WithWaitForLease Standby Failover", func() {
 			It("Node D acquires after Node C's TTL expires", func() {
-				fc := &fakeClock{now: time.Now()}
-				b := memory.New(memory.WithClock(fc))
+				env := h.newEnv()
+				b := env.backend
 
 				leaseC, err := worklease.New(b, worklease.Config{TTL: 30 * time.Second, HolderID: "node-c"})
 				Expect(err).NotTo(HaveOccurred())
@@ -89,8 +88,8 @@ func leaderSpecs(h harness) {
 					}, func(_ context.Context) error { return nil })
 				}()
 
-				// Advance fake clock past Node C's TTL — Node D's next poll succeeds.
-				fc.Advance(31 * time.Second)
+				// Expire Node C's lease — Node D's next poll succeeds.
+				env.expire("leader-work")
 
 				Eventually(dResult, "1s").Should(Receive(BeNil()))
 			})
@@ -99,10 +98,11 @@ func leaderSpecs(h harness) {
 		// ===== PHASE 3: Fencing Propagates via Context Cancellation =====
 		Describe("Phase 3: Fencing Propagates via Context Cancellation", func() {
 			It("Elect returns ErrFenced when another node steals the lease", func() {
-				fc := &fakeClock{now: time.Now()}
-				b := memory.New(memory.WithClock(fc))
+				env := h.newEnv()
+				b := env.backend
+				gate := &renewalGate{Backend: b}
 
-				leaseE, err := worklease.New(b, worklease.Config{TTL: 30 * time.Second, HolderID: "node-e"})
+				leaseE, err := worklease.New(gate, worklease.Config{TTL: 30 * time.Second, HolderID: "node-e"})
 				Expect(err).NotTo(HaveOccurred())
 				leaseF, err := worklease.New(b, worklease.Config{TTL: 30 * time.Second, HolderID: "node-f"})
 				Expect(err).NotTo(HaveOccurred())
@@ -125,16 +125,19 @@ func leaderSpecs(h harness) {
 
 				Eventually(eStarted).Should(BeClosed())
 
-				// Advance fake clock past Node E's TTL so the record appears expired,
-				// then Node F acquires and bumps the fencing token.
-				fc.Advance(31 * time.Second)
+				// Hold Node E's renewals at the gate, expire its lease, and let Node F
+				// acquire and bump the fencing token. Without the gate, a renewal could find
+				// the lease expired before Node F acquires and report window exhaustion.
+				gate.pause()
+				env.expire("leader-work")
 
 				tokenF, err := leaseF.Acquire(ctx, "leader-work")
 				Expect(err).NotTo(HaveOccurred())
 				defer leaseF.Release(ctx, tokenF, worklease.ExitFinished) //nolint:errcheck
+				gate.resume()
 
-				// Node E's next renewal (fires within 50ms real time) sees a fencing
-				// token mismatch. Elect surfaces ErrFenced via the Release path.
+				// Node E's next renewal (fires within 50ms real time) passes the gate and
+				// sees a fencing token mismatch, so Elect returns ErrFenced.
 				var electErr error
 				Eventually(eResult, "1s").Should(Receive(&electErr))
 				Expect(errors.Is(electErr, worklease.ErrFenced)).To(BeTrue())
