@@ -3,6 +3,7 @@ package worklease_test
 import (
 	"context"
 	"errors"
+	"runtime"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -77,10 +78,16 @@ func (s *spyObserver) OnFenced(_ context.Context, e worklease.FencedEvent) {
 type stallRenew struct {
 	backend.Backend
 	ignoreCtx bool
-	release   chan struct{} // closed in a DeferCleanup
+	release   chan struct{} // closed once by unblock
 	entered   chan struct{} // buffered; receives once per Renew call
+	once      sync.Once
 	mu        sync.Mutex
 	deadlines []time.Time // ctx.Deadline() of each Renew call
+}
+
+// unblock closes release once, so a spec and its DeferCleanup can both call it.
+func (s *stallRenew) unblock() {
+	s.once.Do(func() { close(s.release) })
 }
 
 func (s *stallRenew) Renew(ctx context.Context, _ backend.LeaseRecord, _ time.Duration) error {
@@ -126,6 +133,15 @@ func (r *recordRenew) lastEntry() (time.Time, int) {
 		return time.Time{}, 0
 	}
 	return r.entries[len(r.entries)-1], len(r.entries)
+}
+
+// failRenew wraps a Backend so that every Renew fails with a non-fencing error.
+type failRenew struct {
+	backend.Backend
+}
+
+func (failRenew) Renew(_ context.Context, _ backend.LeaseRecord, _ time.Duration) error {
+	return errors.New("storage unavailable")
 }
 
 var _ = Describe("worklease", func() {
@@ -938,7 +954,7 @@ var _ = Describe("worklease", func() {
 					release:   make(chan struct{}),
 					entered:   make(chan struct{}, 1),
 				}
-				DeferCleanup(func() { close(stall.release) })
+				DeferCleanup(stall.unblock)
 				var err error
 				lease, err = worklease.New(stall, worklease.Config{TTL: 200 * time.Millisecond, HolderID: "test-worker", Observer: spy})
 				Expect(err).NotTo(HaveOccurred())
@@ -1025,6 +1041,7 @@ var _ = Describe("worklease", func() {
 				events := renewEvents()
 				Expect(events).To(HaveLen(1))
 				Expect(events[0].Err).To(MatchError(context.Canceled))
+				Expect(events[0].Duration).To(BeNumerically(">", 0))
 				Consistently(renewEvents, 60*time.Millisecond).Should(HaveLen(1))
 			})
 
@@ -1043,21 +1060,54 @@ var _ = Describe("worklease", func() {
 			})
 
 			It("reports an attempt abandoned by cancellation of the parent context to OnRenew once, with the parent's error, and sets no cause", func() {
-				setup(false)
+				// Renew ignores its context, so only the parent-cancellation case of
+				// the attempt wait can end it before the window closes.
+				setup(true)
 				errParentStopped := errors.New("parent stopped")
 				parentCtx, parentCancel := context.WithCancelCause(ctx)
 				defer parentCancel(nil)
 				renewCtx, stopRenewal := lease.StartRenewal(parentCtx, token, interval)
+				defer stopRenewal()
 				Eventually(stall.entered).Should(Receive())
 
 				parentCancel(errParentStopped)
-				Eventually(renewCtx.Done()).Should(BeClosed())
-				stopRenewal()
-
-				Expect(context.Cause(renewCtx)).To(MatchError(errParentStopped))
+				// Observed before stopRenewal, which would report the attempt itself.
+				Eventually(renewEvents, 200*time.Millisecond).Should(HaveLen(1))
 				events := renewEvents()
-				Expect(events).To(HaveLen(1))
 				Expect(events[0].Err).To(MatchError(context.Canceled))
+
+				stopRenewal()
+				Expect(context.Cause(renewCtx)).To(MatchError(errParentStopped))
+			})
+
+			It("lets the goroutine of an abandoned Renew call exit once the call returns", func() {
+				setup(true)
+				before := runtime.NumGoroutine()
+				_, stopRenewal := lease.StartRenewal(ctx, token, interval)
+				Eventually(stall.entered).Should(Receive())
+
+				stopRenewal()
+				stall.unblock()
+				Eventually(runtime.NumGoroutine, time.Second).Should(BeNumerically("<=", before))
+			})
+		})
+
+		Context("when the window closes during a backoff wait (#88)", func() {
+			It("cancels renewCtx with cause ErrLeaseWindowExhausted at the window, without waiting out the backoff", func() {
+				lease, err := worklease.New(failRenew{Backend: memory.New()}, worklease.Config{TTL: 300 * time.Millisecond, HolderID: "test-worker"})
+				Expect(err).NotTo(HaveOccurred())
+				acquired := time.Now()
+				token, err := lease.Acquire(ctx, "w1")
+				Expect(err).NotTo(HaveOccurred())
+
+				renewCtx, stopRenewal := lease.StartRenewal(ctx, token, worklease.WithRenewalBackoff(5*time.Second, 5*time.Second, 0))
+				defer stopRenewal()
+
+				Eventually(renewCtx.Done(), time.Second).Should(BeClosed())
+				Expect(time.Since(acquired)).To(BeNumerically("<", 450*time.Millisecond))
+				cause := context.Cause(renewCtx)
+				Expect(cause).To(MatchError(worklease.ErrLeaseWindowExhausted))
+				Expect(errors.Is(cause, worklease.ErrLeaseExpired)).To(BeFalse())
 			})
 		})
 
