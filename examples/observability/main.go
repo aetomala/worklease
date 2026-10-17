@@ -152,6 +152,12 @@ func (m *metricsObserver) OnReadCheckpoint(_ context.Context, e worklease.ReadCh
 	}
 }
 
+func (m *metricsObserver) OnForget(_ context.Context, e worklease.ForgetEvent) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.record("forget", e.Duration, e.Err)
+}
+
 // OnFenced fires in addition to the operation-specific callback when an operation is
 // fenced. Incrementing a single counter here gives an accurate fencing rate without
 // inspecting error values in OnCheckpoint/OnRenew/OnRelease. e.Operation identifies

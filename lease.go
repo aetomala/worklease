@@ -16,6 +16,7 @@ const (
 	msgLeaseExpired         = "worklease: lease has expired"
 	msgLeaseWindowExhausted = "worklease: lease window exhausted before renewal succeeded"
 	msgAcquireCancelled     = "worklease: acquire cancelled"
+	msgNilBackend           = "worklease: backend is required"
 )
 
 // Sentinel errors for Lease operations.
@@ -29,6 +30,10 @@ var (
 	// successful renewal (goroutine lifecycle path 3).
 	// Inspect via context.Cause(renewCtx) — not returned directly from any method.
 	ErrLeaseWindowExhausted = errors.New(msgLeaseWindowExhausted)
+
+	// ErrNilBackend is returned by New and NewVacuum when the backend is nil,
+	// and by Vacuum.Sweep on a Vacuum that NewVacuum did not build.
+	ErrNilBackend = errors.New(msgNilBackend)
 )
 
 // ExitMode records how a lease holder left a lease. It is an alias for
@@ -141,7 +146,8 @@ type Lease interface {
 	// ErrFenced if the fencing token no longer matches the stored lease, or if no
 	// record exists for token's workID. Unlike Release, the record is not left
 	// behind for a future ReadCheckpoint — it is gone. Use only when a work ID is
-	// permanently retired. Forget does not invoke any LeaseObserver method.
+	// permanently retired. Every call is reported to LeaseObserver.OnForget, and
+	// a fenced call also to OnFenced.
 	Forget(ctx context.Context, token Token) error
 }
 
@@ -308,8 +314,12 @@ type LeaseObserver interface {
 	// OnFenced is NOT called on ReadCheckpoint — ErrFenced surfaces via e.Err only.
 	OnReadCheckpoint(ctx context.Context, e ReadCheckpointEvent)
 
-	// OnFenced is called when Checkpoint, Renew, or Release returns ErrFenced —
-	// not for ReadCheckpoint or Forget. Called in addition to the
+	// OnForget is called after every Forget attempt.
+	// If e.Err is ErrFenced, OnFenced is also called after this method returns.
+	OnForget(ctx context.Context, e ForgetEvent)
+
+	// OnFenced is called when Checkpoint, Renew, Release, or Forget returns
+	// ErrFenced — not for ReadCheckpoint. Called in addition to the
 	// operation-specific callback — not instead of.
 	// e.Operation identifies which operation triggered the fencing event.
 	OnFenced(ctx context.Context, e FencedEvent)
@@ -323,6 +333,7 @@ const (
 	OperationCheckpoint Operation = iota
 	OperationRenew
 	OperationRelease
+	OperationForget
 )
 
 // AcquireEvent carries the result of one backend acquire attempt.
@@ -381,6 +392,14 @@ type ReadCheckpointEvent struct {
 	Err          error
 }
 
+// ForgetEvent carries the result of a Forget call. Duration is the duration of
+// the backend call.
+type ForgetEvent struct {
+	Token    Token
+	Duration time.Duration
+	Err      error
+}
+
 // FencedEvent carries the context of a fencing event.
 // Called in addition to the operation-specific event — not instead of.
 type FencedEvent struct {
@@ -397,4 +416,5 @@ func (noopObserver) OnCheckpoint(_ context.Context, _ CheckpointEvent)         {
 func (noopObserver) OnRenew(_ context.Context, _ RenewEvent)                   {}
 func (noopObserver) OnRelease(_ context.Context, _ ReleaseEvent)               {}
 func (noopObserver) OnReadCheckpoint(_ context.Context, _ ReadCheckpointEvent) {}
+func (noopObserver) OnForget(_ context.Context, _ ForgetEvent)                 {}
 func (noopObserver) OnFenced(_ context.Context, _ FencedEvent)                 {}

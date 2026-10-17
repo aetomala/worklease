@@ -24,6 +24,7 @@ type spyObserver struct {
 	renewCalls          []worklease.RenewEvent
 	releaseCalls        []worklease.ReleaseEvent
 	readCheckpointCalls []worklease.ReadCheckpointEvent
+	forgetCalls         []worklease.ForgetEvent
 	fencedCalls         []worklease.FencedEvent
 	order               []string
 	mu                  sync.Mutex
@@ -62,6 +63,13 @@ func (s *spyObserver) OnReadCheckpoint(_ context.Context, e worklease.ReadCheckp
 	defer s.mu.Unlock()
 	s.readCheckpointCalls = append(s.readCheckpointCalls, e)
 	s.order = append(s.order, "OnReadCheckpoint")
+}
+
+func (s *spyObserver) OnForget(_ context.Context, e worklease.ForgetEvent) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.forgetCalls = append(s.forgetCalls, e)
+	s.order = append(s.order, "OnForget")
 }
 
 func (s *spyObserver) OnFenced(_ context.Context, e worklease.FencedEvent) {
@@ -170,9 +178,10 @@ var _ = Describe("worklease", func() {
 
 	// ===== PHASE 1: Constructor and Initialization =====
 	Describe("New", func() {
-		It("backend nil → non-nil error, no Lease returned", func() {
+		It("backend nil → ErrNilBackend, no Lease returned", func() {
 			lease, err := worklease.New(nil, cfg)
 			Expect(err).NotTo(BeNil())
+			Expect(errors.Is(err, worklease.ErrNilBackend)).To(BeTrue())
 			Expect(lease).To(BeNil())
 		})
 
@@ -662,7 +671,7 @@ var _ = Describe("worklease", func() {
 		})
 
 		Context("when the backend delete succeeds", func() {
-			It("returns nil and does not call any LeaseObserver method", func() {
+			It("returns nil and calls OnForget once with the token, a Duration, and nil Err", func() {
 				lease, _ := worklease.New(mockB, cfg)
 				record := backend.LeaseRecord{WorkID: "w1", HolderID: "test-worker", FencingToken: 1, ExpiresAt: time.Now().Add(30 * time.Second)}
 				mockB.EXPECT().Acquire(gomock.Any(), "w1", "test-worker", 30*time.Second).Return(record, nil)
@@ -672,18 +681,26 @@ var _ = Describe("worklease", func() {
 				ordersBefore := len(spy.order)
 				spy.mu.Unlock()
 
-				mockB.EXPECT().Forget(gomock.Any(), record).Return(nil)
+				mockB.EXPECT().Forget(gomock.Any(), record).DoAndReturn(
+					func(context.Context, backend.LeaseRecord) error {
+						time.Sleep(time.Millisecond)
+						return nil
+					})
 				err := lease.Forget(ctx, token)
 				Expect(err).To(BeNil())
 
 				spy.mu.Lock()
 				defer spy.mu.Unlock()
-				Expect(len(spy.order)).To(Equal(ordersBefore))
+				Expect(spy.order[ordersBefore:]).To(Equal([]string{"OnForget"}))
+				Expect(spy.forgetCalls).To(HaveLen(1))
+				Expect(spy.forgetCalls[0].Token).To(Equal(token))
+				Expect(spy.forgetCalls[0].Duration).To(BeNumerically(">", 0))
+				Expect(spy.forgetCalls[0].Err).To(BeNil())
 			})
 		})
 
 		Context("when the backend returns ErrFenced", func() {
-			It("wraps ErrFenced with workID and holderID context and does not call any LeaseObserver method", func() {
+			It("wraps ErrFenced with workID and holderID context and calls OnForget then OnFenced with OperationForget", func() {
 				lease, _ := worklease.New(mockB, cfg)
 				record := backend.LeaseRecord{WorkID: "w1", HolderID: "test-worker", FencingToken: 1, ExpiresAt: time.Now().Add(30 * time.Second)}
 				mockB.EXPECT().Acquire(gomock.Any(), "w1", "test-worker", 30*time.Second).Return(record, nil)
@@ -701,7 +718,12 @@ var _ = Describe("worklease", func() {
 
 				spy.mu.Lock()
 				defer spy.mu.Unlock()
-				Expect(len(spy.order)).To(Equal(ordersBefore))
+				Expect(spy.order[ordersBefore:]).To(Equal([]string{"OnForget", "OnFenced"}))
+				Expect(spy.forgetCalls).To(HaveLen(1))
+				Expect(errors.Is(spy.forgetCalls[0].Err, worklease.ErrFenced)).To(BeTrue())
+				Expect(spy.fencedCalls).To(HaveLen(1))
+				Expect(spy.fencedCalls[0].Operation).To(Equal(worklease.OperationForget))
+				Expect(spy.fencedCalls[0].Token).To(Equal(token))
 			})
 		})
 
@@ -716,6 +738,24 @@ var _ = Describe("worklease", func() {
 				err := lease.Forget(ctx, token)
 				Expect(err).To(HaveOccurred())
 				Expect(err.Error()).To(ContainSubstring("worklease: Forget:"))
+			})
+
+			It("calls OnForget with the error and does not call OnFenced", func() {
+				lease, _ := worklease.New(mockB, cfg)
+				record := backend.LeaseRecord{WorkID: "w1", HolderID: "test-worker", FencingToken: 1, ExpiresAt: time.Now().Add(30 * time.Second)}
+				mockB.EXPECT().Acquire(gomock.Any(), "w1", "test-worker", 30*time.Second).Return(record, nil)
+				token, _ := lease.Acquire(ctx, "w1")
+
+				backendErr := errors.New("connection lost")
+				mockB.EXPECT().Forget(gomock.Any(), record).Return(backendErr)
+				err := lease.Forget(ctx, token)
+				Expect(errors.Is(err, backendErr)).To(BeTrue())
+
+				spy.mu.Lock()
+				defer spy.mu.Unlock()
+				Expect(spy.forgetCalls).To(HaveLen(1))
+				Expect(spy.forgetCalls[0].Err).To(Equal(backendErr))
+				Expect(spy.fencedCalls).To(BeEmpty())
 			})
 		})
 	})
