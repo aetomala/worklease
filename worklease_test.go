@@ -79,6 +79,24 @@ func (s *spyObserver) OnFenced(_ context.Context, e worklease.FencedEvent) {
 	s.order = append(s.order, "OnFenced")
 }
 
+// sweepSpy is a VacuumObserver that records every OnSweep event.
+type sweepSpy struct {
+	mu     sync.Mutex
+	events []worklease.SweepEvent
+}
+
+func (s *sweepSpy) OnSweep(_ context.Context, e worklease.SweepEvent) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.events = append(s.events, e)
+}
+
+func (s *sweepSpy) calls() []worklease.SweepEvent {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return append([]worklease.SweepEvent(nil), s.events...)
+}
+
 // stallRenew wraps a Backend so that every Renew call stalls. With ignoreCtx
 // false, Renew returns ctx.Err() once its context ends; with ignoreCtx true, it
 // ignores its context and blocks until release is closed, then returns nil.
@@ -1908,10 +1926,25 @@ var _ = Describe("worklease", func() {
 		})
 	})
 
+	Describe("NewVacuum", func() {
+		It("returns nil and ErrNilBackend for a nil backend", func() {
+			v, err := worklease.NewVacuum(nil, worklease.VacuumConfig{})
+			Expect(v).To(BeNil())
+			Expect(errors.Is(err, worklease.ErrNilBackend)).To(BeTrue())
+		})
+
+		It("returns a Vacuum and nil error for a non-nil backend and a zero VacuumConfig", func() {
+			v, err := worklease.NewVacuum(mockB, worklease.VacuumConfig{})
+			Expect(err).NotTo(HaveOccurred())
+			Expect(v).NotTo(BeNil())
+		})
+	})
+
 	Describe("Vacuum.Sweep", func() {
 		Context("when opts.Retention is zero", func() {
 			It("returns 0 and ErrRetentionRequired without calling the backend", func() {
-				v := worklease.NewVacuum(mockB)
+				v, err := worklease.NewVacuum(mockB, worklease.VacuumConfig{})
+				Expect(err).NotTo(HaveOccurred())
 				n, err := v.Sweep(ctx, worklease.SweepOptions{Retention: 0})
 				Expect(n).To(BeZero())
 				Expect(errors.Is(err, worklease.ErrRetentionRequired)).To(BeTrue())
@@ -1920,7 +1953,8 @@ var _ = Describe("worklease", func() {
 
 		Context("when opts.Retention is negative", func() {
 			It("returns 0 and ErrRetentionRequired without calling the backend", func() {
-				v := worklease.NewVacuum(mockB)
+				v, err := worklease.NewVacuum(mockB, worklease.VacuumConfig{})
+				Expect(err).NotTo(HaveOccurred())
 				n, err := v.Sweep(ctx, worklease.SweepOptions{Retention: -time.Second})
 				Expect(n).To(BeZero())
 				Expect(errors.Is(err, worklease.ErrRetentionRequired)).To(BeTrue())
@@ -1929,7 +1963,8 @@ var _ = Describe("worklease", func() {
 
 		Context("when opts.Retention is positive", func() {
 			It("delegates to Backend.Sweep and returns its result unchanged, success case", func() {
-				v := worklease.NewVacuum(mockB)
+				v, err := worklease.NewVacuum(mockB, worklease.VacuumConfig{})
+				Expect(err).NotTo(HaveOccurred())
 				opts := worklease.SweepOptions{Retention: time.Hour, IncludeExpired: true}
 				mockB.EXPECT().Sweep(gomock.Any(), opts).Return(int64(3), nil)
 				n, err := v.Sweep(ctx, opts)
@@ -1938,13 +1973,96 @@ var _ = Describe("worklease", func() {
 			})
 
 			It("delegates to Backend.Sweep and returns its error unchanged, failure case", func() {
-				v := worklease.NewVacuum(mockB)
+				v, err := worklease.NewVacuum(mockB, worklease.VacuumConfig{})
+				Expect(err).NotTo(HaveOccurred())
 				opts := worklease.SweepOptions{Retention: time.Hour}
 				backendErr := errors.New("sweep failed")
 				mockB.EXPECT().Sweep(gomock.Any(), opts).Return(int64(0), backendErr)
 				n, err := v.Sweep(ctx, opts)
 				Expect(n).To(BeZero())
 				Expect(err).To(Equal(backendErr))
+			})
+		})
+
+		Context("on a zero-value Vacuum", func() {
+			It("zero-value Vacuum → returns 0 and ErrNilBackend without panicking", func() {
+				var (
+					n   int64
+					err error
+				)
+				Expect(func() {
+					n, err = (&worklease.Vacuum{}).Sweep(ctx, worklease.SweepOptions{Retention: time.Hour})
+				}).NotTo(Panic())
+				Expect(n).To(BeZero())
+				Expect(errors.Is(err, worklease.ErrNilBackend)).To(BeTrue())
+			})
+		})
+
+		Context("on a nil *Vacuum", func() {
+			It("nil *Vacuum → returns 0 and ErrNilBackend without panicking", func() {
+				var (
+					v   *worklease.Vacuum
+					n   int64
+					err error
+				)
+				Expect(func() {
+					n, err = v.Sweep(ctx, worklease.SweepOptions{Retention: time.Hour})
+				}).NotTo(Panic())
+				Expect(n).To(BeZero())
+				Expect(errors.Is(err, worklease.ErrNilBackend)).To(BeTrue())
+			})
+		})
+
+		Context("with an observer", func() {
+			var spy *sweepSpy
+
+			BeforeEach(func() {
+				spy = &sweepSpy{}
+			})
+
+			It("calls OnSweep once with the options, the deleted count, a Duration, and nil Err on success", func() {
+				v, err := worklease.NewVacuum(mockB, worklease.VacuumConfig{Observer: spy})
+				Expect(err).NotTo(HaveOccurred())
+				opts := worklease.SweepOptions{Retention: time.Hour, IncludeExpired: true}
+				mockB.EXPECT().Sweep(gomock.Any(), opts).DoAndReturn(
+					func(context.Context, backend.SweepOptions) (int64, error) {
+						time.Sleep(time.Millisecond)
+						return 4, nil
+					})
+				n, err := v.Sweep(ctx, opts)
+				Expect(err).NotTo(HaveOccurred())
+				Expect(n).To(Equal(int64(4)))
+
+				events := spy.calls()
+				Expect(events).To(HaveLen(1))
+				Expect(events[0].Options).To(Equal(opts))
+				Expect(events[0].Deleted).To(Equal(int64(4)))
+				Expect(events[0].Duration).To(BeNumerically(">", 0))
+				Expect(events[0].Err).To(BeNil())
+			})
+
+			It("calls OnSweep once with the backend error on failure", func() {
+				v, err := worklease.NewVacuum(mockB, worklease.VacuumConfig{Observer: spy})
+				Expect(err).NotTo(HaveOccurred())
+				opts := worklease.SweepOptions{Retention: time.Hour}
+				backendErr := errors.New("sweep failed")
+				mockB.EXPECT().Sweep(gomock.Any(), opts).Return(int64(0), backendErr)
+				_, err = v.Sweep(ctx, opts)
+				Expect(err).To(Equal(backendErr))
+
+				events := spy.calls()
+				Expect(events).To(HaveLen(1))
+				Expect(events[0].Err).To(Equal(backendErr))
+				Expect(events[0].Deleted).To(BeZero())
+			})
+
+			It("does not call OnSweep when Retention is not positive", func() {
+				v, err := worklease.NewVacuum(mockB, worklease.VacuumConfig{Observer: spy})
+				Expect(err).NotTo(HaveOccurred())
+				mockB.EXPECT().Sweep(gomock.Any(), gomock.Any()).Times(0)
+				_, err = v.Sweep(ctx, worklease.SweepOptions{Retention: 0})
+				Expect(errors.Is(err, worklease.ErrRetentionRequired)).To(BeTrue())
+				Expect(spy.calls()).To(BeEmpty())
 			})
 		})
 	})
