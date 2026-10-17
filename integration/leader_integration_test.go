@@ -53,7 +53,7 @@ func leaderSpecs(h harness) {
 				Eventually(aStarted).Should(BeClosed())
 
 				// Node B attempts fail-fast while A holds the lease.
-				err = leader.Elect(ctx, leaseB, "leader-work", leader.Config{}, func(_ context.Context) error { return nil })
+				err = leader.Elect(ctx, leaseB, "leader-work", leader.Config{IdleInterval: 10 * time.Millisecond}, func(_ context.Context) error { return nil })
 				Expect(errors.Is(err, worklease.ErrLeaseHeld)).To(BeTrue())
 
 				// Clean up: cancel lets Node A exit.

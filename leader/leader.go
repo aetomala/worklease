@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"math/rand/v2"
 	"time"
 
 	"github.com/aetomala/worklease"
@@ -19,6 +20,13 @@ var (
 // negative.
 const defaultCleanupTimeout = 5 * time.Second
 
+// Pacing defaults for Elect when Acquire fails: the idle wait used when
+// Config.IdleInterval is zero or negative, and the jitter fraction applied to it.
+const (
+	defaultIdleInterval = time.Second
+	idleJitter          = 0.20
+)
+
 // Config holds options for Elect.
 // TTL and HolderID are already embedded in the worklease.Lease passed to Elect.
 type Config struct {
@@ -31,10 +39,19 @@ type Config struct {
 	// defaults.
 	RenewalOptions []worklease.RenewalOption
 
+	// IdleInterval is the wait before Elect returns an Acquire error matching
+	// worklease.ErrLeaseHeld, meaning another holder has the lease. Zero or
+	// negative means 1s. Each wait is drawn uniformly from
+	// [IdleInterval, 1.2*IdleInterval). Cancellation of the context passed to
+	// Elect cuts the wait short. It paces no other path.
+	IdleInterval time.Duration
+
 	// BackoffInterval is the duration Elect sleeps before returning on every
-	// non-fencing path after a successful Acquire, including ExitAbandoned. Zero
-	// means no sleep. Fencing paths bypass the sleep, and an Acquire error is
-	// returned without it.
+	// non-fencing path after a successful Acquire, including ExitAbandoned and
+	// an exhausted lease window, and before returning an Acquire error that is
+	// neither a context error nor worklease.ErrLeaseHeld. Zero or negative means
+	// no sleep. Fencing paths bypass the sleep, and cancellation of the context
+	// passed to Elect cuts it short.
 	BackoffInterval time.Duration
 
 	// CleanupTimeout bounds Release, which runs on a context that survives
@@ -56,6 +73,13 @@ type Config struct {
 	OnRelinquished func(ctx context.Context, token worklease.Token)
 }
 
+// The jitterWait function returns base plus a uniform draw from
+// [0, idleJitter*base), so the result lies in [base, 1.2*base). It returns 0
+// for a zero base.
+func jitterWait(base time.Duration) time.Duration {
+	return base + time.Duration(idleJitter*float64(base)*rand.Float64())
+}
+
 // Elect acquires workID and calls fn under a managed renewal context.
 // The fn argument receives a context that is cancelled if the lease is fenced,
 // if the lease window is exhausted, or if ctx is cancelled; fn must respect it.
@@ -64,8 +88,22 @@ type Config struct {
 // returns nil, and any other error releases with ExitAbandoned. Elect does not
 // release when fenced or when the lease window was exhausted; the successor
 // sees ExitExpired. Release runs on a context that survives cancellation of
-// ctx, bounded by Config.CleanupTimeout. Elect surfaces worklease.ErrLeaseHeld,
-// worklease.ErrFenced, and context errors from the underlying Lease unchanged.
+// ctx, bounded by Config.CleanupTimeout.
+//
+// When Acquire fails, Elect calls neither fn nor any callback and returns the
+// Acquire error unchanged. When it returns depends on the error:
+//   - A context error (cancellation or deadline, including from
+//     worklease.WithWaitForLease) is returned immediately.
+//   - An error matching worklease.ErrLeaseHeld is returned after a wait drawn
+//     from [Config.IdleInterval, 1.2*Config.IdleInterval).
+//   - Any other error is returned after Config.BackoffInterval.
+//
+// Cancellation of ctx cuts either wait short. Elect returns worklease.ErrFenced,
+// without releasing and without the BackoffInterval sleep, when fn's error or
+// the renewal context's cause matches it; when Release reports it, Elect also
+// returns worklease.ErrFenced without the sleep. When the lease window is
+// exhausted, Elect does not release; after the BackoffInterval sleep it returns
+// fn's error, or the cause wrapped as "leader: …" when fn returned nil.
 // Elect does not force blocking acquisition; pass worklease.WithWaitForLease()
 // in cfg.AcquireOptions to block until leadership is available.
 // If fn panics, renewal is stopped, the lease is not released, and the panic
@@ -90,9 +128,26 @@ func Elect(ctx context.Context, lease worklease.Lease, workID string, cfg Config
 		}
 	}
 
-	// ===== STEP 2: Acquire =====
+	// ===== STEP 2: Acquire, pacing the error paths =====
 	token, err := lease.Acquire(ctx, workID, cfg.AcquireOptions...)
 	if err != nil {
+		switch {
+		case errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded):
+			// P1: a context error returns immediately.
+		case errors.Is(err, worklease.ErrLeaseHeld):
+			// P2: another holder has the lease; wait IdleInterval with jitter.
+			idle := cfg.IdleInterval
+			if idle <= 0 {
+				idle = defaultIdleInterval
+			}
+			select {
+			case <-time.After(jitterWait(idle)):
+			case <-ctx.Done():
+			}
+		default:
+			// P3: any other Acquire error waits BackoffInterval.
+			backoff()
+		}
 		return err
 	}
 
