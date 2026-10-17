@@ -6,6 +6,7 @@ import (
 	"context"
 	"errors"
 	"log"
+	"sync"
 	"time"
 
 	"github.com/aetomala/worklease"
@@ -50,28 +51,26 @@ func scenario1WaitDeadline(ctx context.Context) {
 func scenario2RenewalWindowExhaustion(ctx context.Context) {
 	log.Println("=== Scenario 2: WithRenewalBackoff + ErrLeaseWindowExhausted ===")
 
-	b := memory.New()
+	clk := &fakeClock{now: time.Now()}
+	b := memory.New(memory.WithClock(clk))
 	lease, _ := worklease.New(b, worklease.Config{TTL: 200 * time.Millisecond, HolderID: "worker-C"})
 	token, _ := lease.Acquire(ctx, "task:work-item")
 	log.Printf("  worker-C: lease acquired (expires in 200ms, fencing token %d)", token.FencingToken())
 
-	// Set the renewal interval longer than the TTL so the first renewal fires after
-	// the lease has already expired. This is a deliberate misconfiguration that
-	// forces the window-exhausted path; in production keep the interval below the
-	// TTL (the default is TTL/2). The first Renew returns ErrLeaseExpired.
-	//
-	// WithRenewalBackoff configures the retry policy for transient non-fencing errors
-	// (e.g., Postgres connection drops in production). initial=50ms, max=200ms, no jitter.
-	//
-	// ErrLeaseExpired is terminal: storage has found the lease lapsed, so retrying
-	// cannot help. The goroutine cancels renewCtx at once, with no backoff retry, and
-	// the cause is errors.Join(ErrLeaseWindowExhausted, ErrLeaseExpired), so
-	// errors.Is matches either sentinel.
+	// A fake clock lets storage find the lease lapsed while the local lease
+	// window is still open. Advancing it past the TTL right after StartRenewal
+	// makes the first Renew, at the default interval (TTL/2), return
+	// ErrLeaseExpired. Renewal then stops at once, without backoff or retry,
+	// and the renewal context's cause is
+	// errors.Join(ErrLeaseWindowExhausted, ErrLeaseExpired), so errors.Is
+	// matches both sentinels. A renewal interval longer than the TTL no longer
+	// reaches this path: since v0.7 the renewal context is cancelled when the
+	// local window closes, before a late tick could call Renew.
 	renewCtx, stopRenewal := lease.StartRenewal(ctx, token,
-		worklease.WithRenewalInterval(400*time.Millisecond),
 		worklease.WithRenewalBackoff(50*time.Millisecond, 200*time.Millisecond, 0),
 	)
 	defer stopRenewal()
+	clk.advance(time.Second)
 
 	// Block until the renewal goroutine exits due to window exhaustion.
 	<-renewCtx.Done()
@@ -85,6 +84,26 @@ func scenario2RenewalWindowExhaustion(ctx context.Context) {
 		log.Println("  worker-C: work abandoned; a successor worker may re-acquire this lease")
 	}
 	log.Println()
+}
+
+// fakeClock is a memory.Clock that moves only when advance is called.
+type fakeClock struct {
+	mu  sync.Mutex
+	now time.Time
+}
+
+// Now returns the clock's current time.
+func (c *fakeClock) Now() time.Time {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.now
+}
+
+// advance moves the clock forward by d.
+func (c *fakeClock) advance(d time.Duration) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.now = c.now.Add(d)
 }
 
 func main() {

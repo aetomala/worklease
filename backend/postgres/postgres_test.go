@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"errors"
+	"fmt"
 	"time"
 
 	. "github.com/onsi/ginkgo/v2"
@@ -280,21 +281,13 @@ var _ = Describe("Backend (postgres)", func() {
 			Expect(prevHolder.String).To(Equal("holder-a"))
 		})
 
-		It("Acquire never writes clean_handoff: the column keeps its value across Acquire, Checkpoint, and Release", func() {
-			record, err := b.Acquire(ctx, "x2", "holder-a", 30*time.Second)
+		It("schema has no clean_handoff column", func() {
+			var n int
+			err := db.QueryRowContext(ctx,
+				"SELECT count(*) FROM information_schema.columns WHERE table_schema = current_schema() AND table_name = 'worklease_leases' AND column_name = 'clean_handoff'",
+			).Scan(&n)
 			Expect(err).NotTo(HaveOccurred())
-			_, err = db.ExecContext(ctx, "UPDATE worklease_leases SET clean_handoff = TRUE WHERE work_id = $1", "x2")
-			Expect(err).NotTo(HaveOccurred())
-
-			Expect(b.Checkpoint(ctx, record, []byte("s"), 30*time.Second)).To(Succeed())
-			Expect(b.Release(ctx, record, backend.ExitAbandoned)).To(Succeed())
-			_, err = b.Acquire(ctx, "x2", "holder-b", 30*time.Second)
-			Expect(err).NotTo(HaveOccurred())
-
-			var cleanHandoff bool
-			err = db.QueryRowContext(ctx, "SELECT clean_handoff FROM worklease_leases WHERE work_id = $1", "x2").Scan(&cleanHandoff)
-			Expect(err).NotTo(HaveOccurred())
-			Expect(cleanHandoff).To(BeTrue())
+			Expect(n).To(BeZero())
 		})
 
 		It("schema rejects exit_mode = 'bogus' with a check violation", func() {
@@ -309,6 +302,60 @@ var _ = Describe("Backend (postgres)", func() {
 			Expect(err).NotTo(HaveOccurred())
 			_, err = db.ExecContext(ctx, "UPDATE worklease_leases SET prev_exit_mode = 'bogus' WHERE work_id = $1", "x4")
 			Expect(err).To(MatchError(ContainSubstring("worklease_leases_prev_exit_mode_check")))
+		})
+	})
+
+	Describe("isolation level (#89)", func() {
+		// contend starts 20 Acquire calls on workID together behind a channel and
+		// returns how many won and how many got ErrLeaseHeld. Any other error
+		// fails the spec.
+		contend := func(workID string) (won, held int) {
+			const callers = 20
+			startCh := make(chan struct{})
+			results := make(chan error, callers)
+			for i := range callers {
+				go func() {
+					<-startCh
+					_, err := b.Acquire(ctx, workID, fmt.Sprintf("holder-%d", i), 30*time.Second)
+					results <- err
+				}()
+			}
+			close(startCh)
+			for range callers {
+				err := <-results
+				Expect(err == nil || errors.Is(err, worklease.ErrLeaseHeld)).To(BeTrue(), "unexpected Acquire error: %v", err)
+				if err == nil {
+					won++
+				} else {
+					held++
+				}
+			}
+			return won, held
+		}
+
+		It("the test database defaults to READ COMMITTED", func() {
+			var level string
+			Expect(db.QueryRowContext(ctx, "SHOW default_transaction_isolation").Scan(&level)).To(Succeed())
+			Expect(level).To(Equal("read committed"))
+		})
+
+		It("contended Acquire on a work ID with no row: one of 20 concurrent callers wins and the other 19 get ErrLeaseHeld, in each of 20 rounds", func() {
+			for round := range 20 {
+				won, held := contend(fmt.Sprintf("iso-new-%d", round))
+				Expect(won).To(Equal(1), "round %d", round)
+				Expect(held).To(Equal(19), "round %d", round)
+			}
+		})
+
+		It("contended Acquire on an expired row: one of 20 concurrent callers wins and the other 19 get ErrLeaseHeld, in each of 20 rounds", func() {
+			for round := range 20 {
+				workID := fmt.Sprintf("iso-expired-%d", round)
+				_, err := b.Acquire(ctx, workID, "seed", -time.Second)
+				Expect(err).NotTo(HaveOccurred())
+				won, held := contend(workID)
+				Expect(won).To(Equal(1), "round %d", round)
+				Expect(held).To(Equal(19), "round %d", round)
+			}
 		})
 	})
 

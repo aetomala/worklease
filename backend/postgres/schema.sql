@@ -6,8 +6,6 @@ CREATE TABLE IF NOT EXISTS worklease_leases (
     fencing_token   BIGINT      NOT NULL DEFAULT nextval('worklease_fencing_seq'),
     expires_at      TIMESTAMPTZ NOT NULL,
     checkpoint      BYTEA,
-    -- Deprecated: unread and unwritten since v0.6.0 (ADR-0018). Kept so a rollback to v0.5 does not fail; dropped in a later release (#86).
-    clean_handoff   BOOLEAN     NOT NULL DEFAULT FALSE,
     exit_mode       TEXT,
     prev_exit_mode  TEXT        NOT NULL DEFAULT 'none',
     prev_holder_id  TEXT,

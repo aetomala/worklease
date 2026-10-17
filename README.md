@@ -383,8 +383,6 @@ CREATE TABLE IF NOT EXISTS worklease_leases (
     fencing_token   BIGINT      NOT NULL DEFAULT nextval('worklease_fencing_seq'),
     expires_at      TIMESTAMPTZ NOT NULL,
     checkpoint      BYTEA,
-    -- Deprecated: unread and unwritten since v0.6.0 (ADR-0018). Kept so a rollback to v0.5 does not fail; dropped in a later release (#86).
-    clean_handoff   BOOLEAN     NOT NULL DEFAULT FALSE,
     exit_mode       TEXT,
     prev_exit_mode  TEXT        NOT NULL DEFAULT 'none',
     prev_holder_id  TEXT,
@@ -401,6 +399,8 @@ CREATE INDEX IF NOT EXISTS idx_worklease_leases_updated_at
 ```
 
 The atomic checkpoint operation is a single `UPDATE ... WHERE fencing_token = $n`. Zero rows updated means the token is stale. There is no Lua script, no optimistic retry loop, no distributed clock dependency.
+
+The backend requires the READ COMMITTED isolation level, the PostgreSQL default. Under REPEATABLE READ or SERIALIZABLE, a contended `Acquire` fails with a serialization error (SQLSTATE 40001) instead of returning `ErrLeaseHeld`. If your database or role defaults to another level, pin it for the role worklease connects as: `ALTER ROLE worklease_role SET default_transaction_isolation = 'read committed';`. The schema drops the deprecated `clean_handoff` column as of v0.7; existing databases drop it with the step in `UPGRADING.md`.
 
 ### In-memory (testing)
 

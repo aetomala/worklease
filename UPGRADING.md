@@ -1,5 +1,39 @@
 # Upgrading worklease
 
+## v0.6.x → v0.7.0
+
+v0.7 hardens the API before the 1.0 freeze. Most changes turn configurations that never worked into errors at construction; the others are listed below.
+
+### Drop the `clean_handoff` column
+
+v0.6 and v0.7 never read or write `clean_handoff`. Once no v0.5 process uses the table, drop it:
+
+```sql
+ALTER TABLE worklease_leases DROP COLUMN IF EXISTS clean_handoff;
+```
+
+The statement is idempotent. After it runs, a rollback to v0.5 is no longer possible, because v0.5 writes the column. v0.6 and v0.7 processes can share the table before and after the drop, in any order. New installations get the reduced table from `backend/postgres/schema.sql`.
+
+### TTLs below 1ms are rejected
+
+`worklease.New` returns an error for a TTL below 1ms: such a TTL is shorter than the 1ms offset `Release` writes into the past (ADR-0012), and PostgreSQL intervals resolve only to the microsecond.
+
+### PostgreSQL requires READ COMMITTED
+
+The backend requires the READ COMMITTED isolation level, the PostgreSQL default. Under REPEATABLE READ or SERIALIZABLE, a contended `Acquire` fails with SQLSTATE 40001 instead of returning `ErrLeaseHeld`. If your database or role defaults to another level, pin READ COMMITTED for the role worklease connects as:
+
+```sql
+ALTER ROLE worklease_role SET default_transaction_isolation = 'read committed';
+```
+
+### Renewal no longer waits for a stalled `Renew`
+
+`stopRenewal` returns without waiting for an in-flight `Renew` call, and the renewal context is cancelled with `ErrLeaseWindowExhausted` when the lease window closes, even while a `Renew` call is stalled. An abandoned call is reported to `OnRenew` with `context.Canceled` (on `stopRenewal`), the parent context's error (on its cancellation), or `context.DeadlineExceeded` (at the window). Metrics that count `OnRenew` errors may see these during shutdown. The window is also enforced between renewal ticks: if it closes before the next tick, for example because a slow step ran between `Acquire` and `StartRenewal` or because `WithRenewalInterval` exceeds the TTL, the renewal context is cancelled at that moment, without a `Renew` call and without an `OnRenew` event.
+
+### New in v0.7.0
+
+- `worklease.LeaseWindow(renewCtx)` returns the lease window the renewal goroutine tracks, to bound a step by the time the lease is guaranteed. `Token.ExpiresAt()` is unchanged: it is the expiry recorded at acquisition.
+
 ## v0.5.x → v0.6.0
 
 v0.6 replaces the `clean_handoff` flag with declared exit modes (ADR-0018). It needs a schema migration and code changes in every caller of `Release`, `ReadCheckpoint`, and the `worker`/`pool` work functions.

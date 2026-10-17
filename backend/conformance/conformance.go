@@ -201,6 +201,16 @@ func RunSuite(newBackend func() backend.Backend) func() {
 					err = b.Renew(ctx, rec, normalTTL)
 					Expect(errors.Is(err, worklease.ErrLeaseExpired)).To(BeTrue())
 				})
+
+				It("returns ErrLeaseExpired after the holder released, and the work ID stays immediately acquirable", func() {
+					rec, err := b.Acquire(ctx, "w1", "h", normalTTL)
+					Expect(err).NotTo(HaveOccurred())
+					Expect(b.Release(ctx, rec, backend.ExitFinished)).To(Succeed())
+					err = b.Renew(ctx, rec, normalTTL)
+					Expect(errors.Is(err, worklease.ErrLeaseExpired)).To(BeTrue())
+					_, err = b.Acquire(ctx, "w1", "h2", normalTTL)
+					Expect(err).NotTo(HaveOccurred())
+				})
 			})
 
 			Context("Release", func() {

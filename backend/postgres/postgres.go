@@ -1,3 +1,18 @@
+// Package postgres implements the worklease Backend on PostgreSQL.
+//
+// No operation opens an explicit transaction: each statement runs in its own
+// implicit transaction at the session's default isolation level. The backend
+// requires READ COMMITTED, the PostgreSQL default. Under REPEATABLE READ or
+// SERIALIZABLE, a contended Acquire fails with a serialization error (SQLSTATE
+// 40001) instead of returning worklease.ErrLeaseHeld, and concurrent Renew or
+// Release calls on one lease can fail the same way. Fencing stays correct at
+// every level, because a serialization failure aborts the statement and never
+// reports success. If the database or role defaults to another level, pin READ
+// COMMITTED for the role worklease connects as, for example with ALTER ROLE
+// ... SET default_transaction_isolation = 'read committed'.
+//
+// The schema is in schema.sql in this package's directory. Applying and
+// migrating it is the caller's responsibility (ADR-0017).
 package postgres
 
 import (
@@ -92,6 +107,17 @@ WHERE updated_at < NOW() - $1::interval
   AND (exit_mode = 'retired' OR ($2 AND exit_mode IS NULL))`
 )
 
+// The formatInterval function formats d as a PostgreSQL interval of whole
+// microseconds, rounded up, so a stored expiry is never earlier than the
+// duration requested. PostgreSQL intervals resolve to the microsecond.
+func formatInterval(d time.Duration) string {
+	us := d / time.Microsecond
+	if d%time.Microsecond > 0 {
+		us++
+	}
+	return fmt.Sprintf("%d microseconds", us)
+}
+
 // postgresBackend implements the Backend interface using PostgreSQL.
 type postgresBackend struct {
 	db *sql.DB
@@ -114,7 +140,7 @@ func New(db *sql.DB) (backend.Backend, error) {
 // acquired lease details on success.
 func (p *postgresBackend) Acquire(ctx context.Context, workID, holderID string, ttl time.Duration) (backend.LeaseRecord, error) {
 	// ===== STEP 1: Execute INSERT/UPDATE with RETURNING =====
-	ttlStr := fmt.Sprintf("%.6f seconds", ttl.Seconds())
+	ttlStr := formatInterval(ttl)
 	var fencingToken uint64
 	var expiresAt time.Time
 	err := p.db.QueryRowContext(ctx, queryAcquire, workID, holderID, ttlStr).Scan(&fencingToken, &expiresAt)
@@ -140,7 +166,7 @@ func (p *postgresBackend) Acquire(ctx context.Context, workID, holderID string, 
 // writing, if the holder has already declared an exit with Release.
 func (p *postgresBackend) Checkpoint(ctx context.Context, record backend.LeaseRecord, state []byte, ttl time.Duration) error {
 	// ===== STEP 1: Write State and Extend the Lease =====
-	ttlStr := fmt.Sprintf("%.6f seconds", ttl.Seconds())
+	ttlStr := formatInterval(ttl)
 	result, err := p.db.ExecContext(ctx, queryCheckpoint, state, ttlStr, record.WorkID, record.HolderID, record.FencingToken)
 	if err != nil {
 		return fmt.Errorf("postgres: Checkpoint: %w", err)
@@ -173,7 +199,7 @@ func (p *postgresBackend) Checkpoint(ctx context.Context, record backend.LeaseRe
 // the lease has already expired.
 func (p *postgresBackend) Renew(ctx context.Context, record backend.LeaseRecord, ttl time.Duration) error {
 	// ===== STEP 1: Execute UPDATE =====
-	ttlStr := fmt.Sprintf("%.6f seconds", ttl.Seconds())
+	ttlStr := formatInterval(ttl)
 	result, err := p.db.ExecContext(ctx, queryRenew, ttlStr, record.WorkID, record.HolderID, record.FencingToken)
 	if err != nil {
 		return fmt.Errorf("postgres: Renew: %w", err)
