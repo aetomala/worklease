@@ -127,3 +127,7 @@ Rows released with `ExitFinished` or `ExitAbandoned` are never deleted. They are
 - `backend/conformance/conformance.go` — global-monotonicity spec across distinct work IDs
 - `docs/adr/0005-acquire-default-returns-err-lease-held.md` — the ADR this amends (ctx.Err() propagation)
 - `UPGRADING.md` — v0.4.x → v0.5.0 acquire breaking change
+
+## Amendment (2026-10-17) — v0.7: NewVacuum returns an error; retention is observable
+
+`NewVacuum(b backend.Backend, cfg VacuumConfig) (*Vacuum, error)` returns `ErrNilBackend` for a nil backend (#91), and `Sweep` on a zero-value or nil `*Vacuum` returns `ErrNilBackend` instead of panicking. `Forget` and `Sweep` no longer bypass observation (#92): `Forget` reports to `LeaseObserver.OnForget` (and `OnFenced` when fenced), and `Sweep` reports each backend call to `VacuumConfig.Observer.OnSweep` with its options, rows deleted, duration, and error. A `Sweep` rejected before the backend call reports nothing.

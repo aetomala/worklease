@@ -53,13 +53,13 @@ A background scheduler that must run on exactly one cluster node at a time, usin
 `leader` package. Best for:
 - Understanding `leader.Elect` as a simplified alternative to the manual acquire/StartRenewal/Release lifecycle
 - Seeing how `WithWaitForLease` turns a fail-fast election into an always-on standby
-- Understanding how fencing propagates to the work function via context cancellation
+- Understanding how losing the lease (fencing or a closed lease window) propagates to the work function via context cancellation
 
 **Features**:
 - Scenario 1: Fail-fast election — the losing node gets `ErrLeaseHeld` and skips
 - Scenario 2: Standby failover — `WithWaitForLease` blocks until the crashed leader's lease expires
-- Scenario 3: Fenced leader exits cleanly — `renewCtx` cancellation reaches the work loop
-- Scenario 4: Persistent leaders in a retry loop — `BackoffInterval` throttles terms; the loop waits on `ErrLeaseHeld` itself
+- Scenario 3: Stalled renewal — `renewCtx` is cancelled when the lease window closes, and the successor reads `ExitExpired`
+- Scenario 4: Persistent leaders in a retry loop — `BackoffInterval` paces the leader and `IdleInterval` the follower, so the loop needs no sleep of its own and the leader usually keeps leading
 - `OnRelinquished` logs only a clean handover (`ExitFinished` or `ExitRetired`)
 
 **Run**:
@@ -104,6 +104,7 @@ A stdlib-only `LeaseObserver` that produces real metrics — counts, latency, ho
 - Lease hold duration correlated on the fencing token across `OnAcquire` → `OnRelease`
 - A dedicated fencing counter, exercised by a real fencing scenario (a successor steals an expired lease)
 - Exit-mode counters: releases per `ReleaseEvent.Mode` and reads per `ReadCheckpointEvent.PrevExit`, including an `ExitAbandoned` release
+- Retention events: `OnForget`, including a fenced `Forget`, and a `VacuumObserver`'s `OnSweep` with rows deleted
 - A comment block mapping each field to the equivalent Prometheus / OpenTelemetry instrument
 - Compile-time interface assertion; injected via `Config.Observer`
 
