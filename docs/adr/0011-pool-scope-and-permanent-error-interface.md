@@ -149,3 +149,7 @@ These are breaking at the margins (the `ErrConfigInvalid` message and the `Run`-
 - **Retirement (ADR-0018).** A `WorkFn` that returns an error wrapping `worklease.ErrRetire` releases with `ExitRetired`. The slot exits without reacquiring or backing off, and `Observer.OnSlotRetired` fires. `OnSlotDead` stays reserved for `PermanentError`. `ErrRetire` wins when an error satisfies both. `Run` returns `ErrAllSlotsDead` only if every slot exited through `PermanentError`; if at least one slot retired, it returns `nil`.
 - **Exit modes (ADR-0018).** `pool.WorkFn` receives `prior worklease.Checkpoint`. A `PermanentError` is a non-fencing error, so its slot releases with `ExitAbandoned`, and its successor resumes from partial state.
 - **Cleanup (#80).** `pool.Config.CleanupTimeout` bounds each slot's final `Checkpoint` and `Release`, which run on a context that survives cancellation of `Run`'s context. Zero or negative means 5s.
+
+## Amendment (2026-10-17) — v0.7: empty and duplicate work IDs are rejected
+
+`pool.New` rejects an empty work ID with `ErrEmptyWorkID` (the error names its index) and a repeated work ID with `ErrDuplicateWorkID` (the error names the ID and both indices), both wrapping `ErrConfigInvalid` (#97). An empty ID failed every `Acquire` before reaching the backend and backed off forever; a duplicate added a second slot that only polled the lease every `IdleInterval` while its sibling held it. Entries are checked in index order, and the first invalid entry is reported.

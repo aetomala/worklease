@@ -126,3 +126,7 @@ not fire if `fn` or `Release` returns `ErrFenced`.
 - `docs/adr/0005-acquire-default-returns-err-lease-held.md` — acquire default behavior
 - `docs/adr/0007-observer-config-field.md` — the `LeaseObserver` these callbacks layer above
 - `docs/adr/0011-pool-scope-and-permanent-error-interface.md` — `pool.Observer` (interface, by contrast)
+
+## Amendment (2026-10-17) — v0.7: Elect paces Acquire errors
+
+`Elect` returned `Acquire` errors immediately, so a follower calling `Elect` in a loop without `WithWaitForLease` spun on `ErrLeaseHeld` against the backend (#104). `BackoffInterval` did not help: it applies only after a successful `Acquire`, and its zero value means no sleep. `Elect` now handles a failed `Acquire` in three ways. A context error is returned immediately. An error matching `ErrLeaseHeld` is returned after waiting the new `Config.IdleInterval` (zero or negative means 1s), drawn from `[IdleInterval, 1.2·IdleInterval)` as in `pool`. Any other error is returned after `BackoffInterval`. Cancelling `ctx` cuts either wait short, and `Elect` then returns the original error. `OnElected`, `OnLost`, and `OnRelinquished` never fire on these paths. Reusing `BackoffInterval` for `ErrLeaseHeld` was rejected, because its zero value would leave default callers spinning and it conflates failover pacing with failure backoff; changing its default to 1s was rejected, because it would add a sleep to every successful one-shot `Elect`. A caller that wants one immediate attempt calls `Lease.Acquire`.

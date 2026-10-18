@@ -69,3 +69,7 @@ individual accessors — both paths are open.
 
 - `lease.go` — `Token` type definition and accessor methods
 - `worklease.go` — `Acquire` implementation — the only place tokens are issued
+
+## Amendment (2026-10-17) — v0.7: the lease window is not a Token method
+
+v0.7 exposes the renewed lease window to work code (#93) as `worklease.LeaseWindow(ctx) (deadline time.Time, ok bool)`, read from the renewal context, rather than as a `Token` method. A `Token` is an immutable value passed by copy, while the window advances on every successful renewal; a `Token.Deadline()` accessor would either go stale or require a mutable shared pointer inside a value type. `Token.ExpiresAt()` keeps its meaning: the expiry the backend reported at acquisition, never updated.
