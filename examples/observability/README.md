@@ -14,7 +14,7 @@ backend (Prometheus, OpenTelemetry) would plug in.
 observability/
 ├── go.mod    ← separate module; replace directive points to repo root
 ├── go.sum
-└── main.go   ← metricsObserver + a clean lifecycle, a fencing scenario, and an abandoned run
+└── main.go   ← metricsObserver + a clean lifecycle, a fencing scenario, an abandoned run, and a retention block (Forget and a Vacuum sweep)
 ```
 
 ---
@@ -39,19 +39,24 @@ Expected output (latency values vary run to run):
 
 ```
 holder-A checkpoint correctly fenced: worklease: Checkpoint: workID="report-2026-06" holderID="holder-A": worklease: fenced — lease acquired by another holder
+holder-A forget correctly fenced: worklease: Forget: workID="report-2026-06" holderID="holder-A": worklease: fenced — lease acquired by another holder
+vacuum swept 1 row(s)
 === lease metrics ===
-acquire          calls=3 errors=0 avg_latency=4.014µs
-checkpoint       calls=3 errors=1 avg_latency=97ns
-renew            calls=1 errors=0 avg_latency=125ns
-release          calls=2 errors=0 avg_latency=125ns
-read_checkpoint  calls=3 errors=0 avg_latency=69ns
-fenced           total=1
+acquire          calls=5 errors=0 avg_latency=433ns
+checkpoint       calls=3 errors=1 avg_latency=138ns
+renew            calls=1 errors=0 avg_latency=292ns
+release          calls=3 errors=0 avg_latency=152ns
+read_checkpoint  calls=3 errors=0 avg_latency=125ns
+forget           calls=2 errors=1 avg_latency=167ns
+fenced           total=2
 renew_retries    total=0
-hold_duration    holding[0]=32.333µs
-hold_duration    holding[1]=416ns
+vacuum           sweeps=1 rows_deleted=1 errors=0
+hold_duration    holding[0]=38.25µs
+hold_duration    holding[1]=417ns
+hold_duration    holding[2]=334ns
 release_by_mode  mode=finished total=1
 release_by_mode  mode=abandoned total=1
-release_by_mode  mode=retired total=0
+release_by_mode  mode=retired total=1
 read_by_prev     prev_exit=none total=1
 read_by_prev     prev_exit=finished total=1
 read_by_prev     prev_exit=abandoned total=0
@@ -107,6 +112,13 @@ instruments (see the comment block at the top of `main.go`): call/error counts �
 `Counter` labelled by mode. The callback
 bodies and correlation logic are identical whether the sink is an in-memory map, a Prometheus
 `CounterVec`/`HistogramVec`, or OpenTelemetry instruments.
+
+**Retention events (v0.7)** — `Forget` and `Vacuum.Sweep` are observable. `OnForget` is
+counted like any other operation, and a fenced `Forget` also fires `OnFenced` with
+`OperationForget`: holder D forgets the row, then holder A's stale `Forget` is fenced. `Vacuum`
+takes its own observer, `VacuumConfig.Observer`; the same `metricsObserver` implements
+`VacuumObserver`, and `OnSweep` counts sweeps, rows deleted, and failed sweeps. The example
+retires a second work ID, advances the fake clock past the retention period, and sweeps it.
 
 ---
 
