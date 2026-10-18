@@ -119,13 +119,17 @@ var _ = Describe("leader", func() {
 			})
 
 			It("returns a context error from Acquire immediately, without waiting IdleInterval or BackoffInterval", func() {
-				ctxErr := fmt.Errorf("worklease: Acquire: %w", context.Canceled)
-				mockLease.EXPECT().Acquire(gomock.Any(), "work-1").Return(worklease.Token{}, ctxErr)
-				start := time.Now()
-				err := leader.Elect(ctx, mockLease, "work-1", leader.Config{IdleInterval: 5 * time.Second, BackoffInterval: 5 * time.Second}, noFn)
-				Expect(err).To(Equal(ctxErr))
-				Expect(errors.Is(err, context.Canceled)).To(BeTrue())
-				Expect(time.Since(start)).To(BeNumerically("<", 500*time.Millisecond))
+				// Both context errors take P1: cancellation and a deadline, such as
+				// a WithWaitForLease wait that ran out.
+				for _, cause := range []error{context.Canceled, context.DeadlineExceeded} {
+					ctxErr := fmt.Errorf("worklease: Acquire: %w", cause)
+					mockLease.EXPECT().Acquire(gomock.Any(), "work-1").Return(worklease.Token{}, ctxErr)
+					start := time.Now()
+					err := leader.Elect(ctx, mockLease, "work-1", leader.Config{IdleInterval: 5 * time.Second, BackoffInterval: 5 * time.Second}, noFn)
+					Expect(err).To(Equal(ctxErr))
+					Expect(errors.Is(err, cause)).To(BeTrue())
+					Expect(time.Since(start)).To(BeNumerically("<", 500*time.Millisecond), "cause %v", cause)
+				}
 			})
 
 			It("does not call OnElected, OnLost, or OnRelinquished on any Acquire-error path", func() {
