@@ -203,6 +203,16 @@ stopRenewal()             // explicit stop before Release
 lease.Release(ctx, token, worklease.ExitFinished) // use the original ctx, not renewCtx
 ```
 
+`stopRenewal` returns without waiting for an in-flight `Renew` call, and the renewal context is cancelled when the lease window closes, even if a `Renew` call is stalled. Work code can read the window with `worklease.LeaseWindow`:
+
+```go
+if deadline, ok := worklease.LeaseWindow(renewCtx); ok && time.Until(deadline) < 5*time.Second {
+    return errNotEnoughLease // too little guaranteed lease left for this step
+}
+```
+
+`LeaseWindow` works on `renewCtx` and on any context derived from it, advances with each successful renewal, and never exceeds the true expiry. It returns `ok == false` outside a renewal context and once `renewCtx` is done. `Token.ExpiresAt()` is the expiry recorded at acquisition and never moves.
+
 ---
 
 ## Error Reference
@@ -218,6 +228,8 @@ lease.Release(ctx, token, worklease.ExitFinished) // use the original ctx, not r
 ---
 
 ## Upgrading
+
+`v0.7.0` drops the deprecated `clean_handoff` column (run the `ALTER TABLE` in `UPGRADING.md` once no v0.5 process remains), rejects TTLs below 1ms, requires READ COMMITTED on PostgreSQL, changes `NewVacuum` to `NewVacuum(b, cfg) (*Vacuum, error)`, adds `LeaseObserver.OnForget`, rejects empty and duplicate `pool` work IDs, and makes `leader.Elect` wait `IdleInterval` (default 1s) before returning `ErrLeaseHeld`.
 
 `v0.5.0` changes `Acquire` with `WithWaitForLease`: on context cancellation or deadline while waiting it now returns an error wrapping `ctx.Err()` (satisfying `errors.Is(err, context.Canceled)` / `context.DeadlineExceeded`) instead of bare `ErrLeaseHeld`. This is a runtime break for callers that treated `ErrLeaseHeld` as their sole wait-loop termination signal; the synchronous no-wait path is unchanged. The renewal goroutine also now retries transient errors with backoff bounded by the lease window rather than stopping on the first error (configure with `WithRenewalBackoff`).
 
@@ -266,7 +278,7 @@ err := leader.Elect(ctx, lease, "scheduler:primary", leader.Config{}, func(ctx c
 })
 ```
 
-Pass `worklease.WithWaitForLease()` in `leader.Config.AcquireOptions` to block until leadership is available rather than returning `ErrLeaseHeld` immediately. `leader.Config` also accepts optional lifecycle callbacks — `OnElected`, `OnLost`, and `OnRelinquished` — for observing leadership transitions.
+Without `worklease.WithWaitForLease()`, `Elect` returns `ErrLeaseHeld` when another process leads, after waiting `leader.Config.IdleInterval` (default 1s, up to 20% jitter), so a follower can call `Elect` in a loop without spinning against the backend. Any other `Acquire` error is returned after `BackoffInterval`, and a context error at once. Pass `worklease.WithWaitForLease()` in `leader.Config.AcquireOptions` to block until leadership is available instead. `leader.Config` also accepts optional lifecycle callbacks — `OnElected`, `OnLost`, and `OnRelinquished` — for observing leadership transitions; none of them fires when `Acquire` fails.
 
 ### pool — Distributed work distribution
 
@@ -286,7 +298,7 @@ if err != nil { ... }
 if err := p.Run(ctx); err != nil { ... }
 ```
 
-Return `worklease.ErrRetire` (or wrap it) from the work function to retire the work ID: the slot releases with `ExitRetired`, calls `OnSlotRetired`, and stops. Return a `PermanentError` to drop a slot without reacquisition — implement the interface on a custom type, or wrap an error with `pool.Permanent(err)`; the slot releases with `ExitAbandoned`. When every slot exits through a `PermanentError`, `Run` returns `pool.ErrAllSlotsDead`; if any slot retired, it returns `nil`. `ErrAllSlotsDead` requires every slot to be counted dead: a slot that observes cancellation of `ctx` before its `PermanentError` check exits uncounted, so if `ctx` is cancelled at the same moment the last slot fails, `Run` may return `nil` instead. A slot whose work ID another process holds waits `Config.IdleInterval` (default 1s, up to 20% jitter); a slot whose work function returned `nil` waits `Config.RerunInterval` (default 1s, up to 20% jitter) before running again; a slot whose work function failed waits `Config.BackoffInterval` (default 1s) and calls `OnSlotBackoff`. Set `pool.Config.Observer` to a `pool.Observer` to receive slot lifecycle events (`OnSlotAcquired` / `OnSlotLost` / `OnSlotBackoff` / `OnSlotDead` / `OnSlotRetired`), and call `ActiveSlots()` for a point-in-time view of slots currently executing their work function. Construction errors are distinct sentinels (`ErrNilLease` / `ErrEmptyWorkIDs` / `ErrWithWaitForLeaseProhibited`) that all satisfy `errors.Is(err, pool.ErrConfigInvalid)`.
+Return `worklease.ErrRetire` (or wrap it) from the work function to retire the work ID: the slot releases with `ExitRetired`, calls `OnSlotRetired`, and stops. Return a `PermanentError` to drop a slot without reacquisition — implement the interface on a custom type, or wrap an error with `pool.Permanent(err)`; the slot releases with `ExitAbandoned`. When every slot exits through a `PermanentError`, `Run` returns `pool.ErrAllSlotsDead`; if any slot retired, it returns `nil`. `ErrAllSlotsDead` requires every slot to be counted dead: a slot that observes cancellation of `ctx` before its `PermanentError` check exits uncounted, so if `ctx` is cancelled at the same moment the last slot fails, `Run` may return `nil` instead. A slot whose work ID another process holds waits `Config.IdleInterval` (default 1s, up to 20% jitter); a slot whose work function returned `nil` waits `Config.RerunInterval` (default 1s, up to 20% jitter) before running again; a slot whose work function failed waits `Config.BackoffInterval` (default 1s) and calls `OnSlotBackoff`. Set `pool.Config.Observer` to a `pool.Observer` to receive slot lifecycle events (`OnSlotAcquired` / `OnSlotLost` / `OnSlotBackoff` / `OnSlotDead` / `OnSlotRetired`), and call `ActiveSlots()` for a point-in-time view of slots currently executing their work function. Construction errors are distinct sentinels (`ErrNilLease` / `ErrEmptyWorkIDs` / `ErrEmptyWorkID` / `ErrDuplicateWorkID` / `ErrWithWaitForLeaseProhibited`) that all satisfy `errors.Is(err, pool.ErrConfigInvalid)`; every work ID must be non-empty and unique.
 
 ### checkpoint — Typed serialization helpers
 
@@ -294,7 +306,7 @@ Return `worklease.ErrRetire` (or wrap it) from the work function to retire the w
 
 ### Observability — LeaseObserver
 
-Set `worklease.Config.Observer` to a `LeaseObserver` to receive a synchronous callback after every lease operation — `OnAcquire`, `OnCheckpoint`, `OnRenew`, `OnRelease`, `OnReadCheckpoint`, and `OnFenced` — each with a per-operation event struct carrying the `Token`, error, and a `Duration` for the final backend call. nil installs a no-op, so observability is fully opt-in. See [`examples/observability`](examples/observability/) for a stdlib-only implementation.
+Set `worklease.Config.Observer` to a `LeaseObserver` to receive a synchronous callback after every lease operation — `OnAcquire`, `OnCheckpoint`, `OnRenew`, `OnRelease`, `OnReadCheckpoint`, and `OnForget` — each with an event struct carrying the `Token`, the error, and a `Duration` for the backend call. `OnFenced` fires in addition when `Checkpoint`, `Renew`, `Release`, or `Forget` is fenced. nil installs a no-op, so observability is fully opt-in. `Vacuum` is observed separately: set `worklease.VacuumConfig.Observer` to a `VacuumObserver` to receive `OnSweep` with each sweep's options, rows deleted, duration, and error. See [`examples/observability`](examples/observability/) for a stdlib-only implementation of both.
 
 ---
 
@@ -348,12 +360,18 @@ if err := lease.Forget(ctx, token); err != nil {
 }
 
 // Periodically delete retired rows last updated more than a week ago.
-n, err := worklease.NewVacuum(b).Sweep(ctx, worklease.SweepOptions{
+vacuum, err := worklease.NewVacuum(b, worklease.VacuumConfig{})
+if err != nil {
+    return err // ErrNilBackend
+}
+n, err := vacuum.Sweep(ctx, worklease.SweepOptions{
     Retention: 7 * 24 * time.Hour,
 })
 ```
 
 `Sweep` deletes rows released with `ExitRetired` once they are older than `Retention`. With `IncludeExpired: true` it also deletes rows whose lease expired with no declared exit, which discards the partial state a successor would have recovered from. Rows released with `ExitFinished` or `ExitAbandoned`, and rows currently held, are never deleted. `Retention` is how long a retired or expired row is kept after its last update; it is not tied to the TTL. After `Forget` or `Sweep`, the next holder sees `ExitNone`, and a holder whose row was removed gets `ErrFenced`. Do not run `Sweep` while v0.5 processes still share the table (see `UPGRADING.md`).
+
+`Forget` is reported to `LeaseObserver.OnForget`, and each `Sweep` that reaches the backend to `VacuumConfig.Observer`.
 
 ## Backends
 
