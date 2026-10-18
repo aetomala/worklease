@@ -3,6 +3,8 @@ package leader_test
 import (
 	"context"
 	"errors"
+	"fmt"
+	"sync/atomic"
 	"time"
 
 	. "github.com/onsi/ginkgo/v2"
@@ -10,6 +12,7 @@ import (
 	"go.uber.org/mock/gomock"
 
 	"github.com/aetomala/worklease"
+	"github.com/aetomala/worklease/backend/memory"
 	"github.com/aetomala/worklease/leader"
 	"github.com/aetomala/worklease/testutil"
 )
@@ -20,6 +23,19 @@ var (
 	ctrl      *gomock.Controller
 	mockLease *testutil.MockLease
 )
+
+// acquireCounter is a LeaseObserver that counts OnAcquire calls.
+type acquireCounter struct {
+	n atomic.Int32
+}
+
+func (a *acquireCounter) OnAcquire(context.Context, worklease.AcquireEvent)               { a.n.Add(1) }
+func (a *acquireCounter) OnCheckpoint(context.Context, worklease.CheckpointEvent)         {}
+func (a *acquireCounter) OnRenew(context.Context, worklease.RenewEvent)                   {}
+func (a *acquireCounter) OnRelease(context.Context, worklease.ReleaseEvent)               {}
+func (a *acquireCounter) OnReadCheckpoint(context.Context, worklease.ReadCheckpointEvent) {}
+func (a *acquireCounter) OnForget(context.Context, worklease.ForgetEvent)                 {}
+func (a *acquireCounter) OnFenced(context.Context, worklease.FencedEvent)                 {}
 
 var _ = Describe("leader", func() {
 	BeforeEach(func() {
@@ -47,12 +63,117 @@ var _ = Describe("leader", func() {
 			It("returns ErrLeaseHeld without calling fn", func() {
 				mockLease.EXPECT().Acquire(gomock.Any(), "work-1").Return(worklease.Token{}, worklease.ErrLeaseHeld)
 				fnCalled := false
-				err := leader.Elect(ctx, mockLease, "work-1", leader.Config{}, func(ctx context.Context) error {
+				err := leader.Elect(ctx, mockLease, "work-1", leader.Config{IdleInterval: time.Millisecond}, func(ctx context.Context) error {
 					fnCalled = true
 					return nil
 				})
 				Expect(errors.Is(err, worklease.ErrLeaseHeld)).To(BeTrue())
 				Expect(fnCalled).To(BeFalse())
+			})
+		})
+
+		Context("when Acquire returns an error (#104)", func() {
+			noFn := func(context.Context) error {
+				Fail("fn must not be called on an Acquire-error path")
+				return nil
+			}
+
+			It("waits at least IdleInterval before returning ErrLeaseHeld", func() {
+				mockLease.EXPECT().Acquire(gomock.Any(), "work-1").Return(worklease.Token{}, worklease.ErrLeaseHeld)
+				start := time.Now()
+				err := leader.Elect(ctx, mockLease, "work-1", leader.Config{IdleInterval: 50 * time.Millisecond}, noFn)
+				Expect(errors.Is(err, worklease.ErrLeaseHeld)).To(BeTrue())
+				Expect(time.Since(start)).To(BeNumerically(">=", 50*time.Millisecond))
+			})
+
+			It("returns ErrLeaseHeld promptly when ctx is cancelled during the idle wait", func() {
+				mockLease.EXPECT().Acquire(gomock.Any(), "work-1").Return(worklease.Token{}, worklease.ErrLeaseHeld)
+				electCtx, electCancel := context.WithCancel(ctx)
+				defer electCancel()
+				time.AfterFunc(50*time.Millisecond, electCancel)
+				start := time.Now()
+				err := leader.Elect(electCtx, mockLease, "work-1", leader.Config{IdleInterval: 5 * time.Second}, noFn)
+				Expect(errors.Is(err, worklease.ErrLeaseHeld)).To(BeTrue())
+				Expect(time.Since(start)).To(BeNumerically("<", 500*time.Millisecond))
+			})
+
+			It("waits at least BackoffInterval before returning a non-context, non-ErrLeaseHeld Acquire error", func() {
+				storageDown := errors.New("storage down")
+				mockLease.EXPECT().Acquire(gomock.Any(), "work-1").Return(worklease.Token{}, storageDown)
+				start := time.Now()
+				err := leader.Elect(ctx, mockLease, "work-1", leader.Config{BackoffInterval: 50 * time.Millisecond}, noFn)
+				Expect(errors.Is(err, storageDown)).To(BeTrue())
+				Expect(time.Since(start)).To(BeNumerically(">=", 50*time.Millisecond))
+			})
+
+			It("returns the original Acquire error promptly when ctx is cancelled during the backoff wait", func() {
+				storageDown := errors.New("storage down")
+				mockLease.EXPECT().Acquire(gomock.Any(), "work-1").Return(worklease.Token{}, storageDown)
+				electCtx, electCancel := context.WithCancel(ctx)
+				defer electCancel()
+				time.AfterFunc(50*time.Millisecond, electCancel)
+				start := time.Now()
+				err := leader.Elect(electCtx, mockLease, "work-1", leader.Config{BackoffInterval: 5 * time.Second}, noFn)
+				Expect(errors.Is(err, storageDown)).To(BeTrue())
+				Expect(time.Since(start)).To(BeNumerically("<", 500*time.Millisecond))
+			})
+
+			It("returns a context error from Acquire immediately, without waiting IdleInterval or BackoffInterval", func() {
+				// Both context errors take P1: cancellation and a deadline, such as
+				// a WithWaitForLease wait that ran out.
+				for _, cause := range []error{context.Canceled, context.DeadlineExceeded} {
+					ctxErr := fmt.Errorf("worklease: Acquire: %w", cause)
+					mockLease.EXPECT().Acquire(gomock.Any(), "work-1").Return(worklease.Token{}, ctxErr)
+					start := time.Now()
+					err := leader.Elect(ctx, mockLease, "work-1", leader.Config{IdleInterval: 5 * time.Second, BackoffInterval: 5 * time.Second}, noFn)
+					Expect(err).To(Equal(ctxErr))
+					Expect(errors.Is(err, cause)).To(BeTrue())
+					Expect(time.Since(start)).To(BeNumerically("<", 500*time.Millisecond), "cause %v", cause)
+				}
+			})
+
+			It("does not call OnElected, OnLost, or OnRelinquished on any Acquire-error path", func() {
+				var callbacks atomic.Int32
+				count := func(context.Context, worklease.Token) { callbacks.Add(1) }
+				cfg := leader.Config{
+					IdleInterval:    time.Millisecond,
+					BackoffInterval: time.Millisecond,
+					OnElected:       count,
+					OnLost:          count,
+					OnRelinquished:  count,
+				}
+				for _, acquireErr := range []error{
+					fmt.Errorf("worklease: Acquire: %w", context.DeadlineExceeded), // P1
+					worklease.ErrLeaseHeld,     // P2
+					errors.New("storage down"), // P3
+				} {
+					mockLease.EXPECT().Acquire(gomock.Any(), "work-1").Return(worklease.Token{}, acquireErr)
+					err := leader.Elect(ctx, mockLease, "work-1", cfg, noFn)
+					Expect(err).To(Equal(acquireErr))
+				}
+				Expect(callbacks.Load()).To(BeZero())
+			})
+		})
+
+		Context("when a peer holds the lease under the default IdleInterval (#104)", func() {
+			It("a follower looping on Elect calls Acquire at most twice in 300ms", func() {
+				b := memory.New()
+				leaseA, err := worklease.New(b, worklease.Config{TTL: 30 * time.Second, HolderID: "leader-a"})
+				Expect(err).NotTo(HaveOccurred())
+				_, err = leaseA.Acquire(ctx, "work-1")
+				Expect(err).NotTo(HaveOccurred())
+
+				acquires := &acquireCounter{}
+				leaseB, err := worklease.New(b, worklease.Config{TTL: 30 * time.Second, HolderID: "follower-b", Observer: acquires})
+				Expect(err).NotTo(HaveOccurred())
+
+				loopCtx, loopCancel := context.WithTimeout(ctx, 300*time.Millisecond)
+				defer loopCancel()
+				for loopCtx.Err() == nil {
+					_ = leader.Elect(loopCtx, leaseB, "work-1", leader.Config{}, func(context.Context) error { return nil })
+				}
+				Expect(acquires.n.Load()).To(BeNumerically("<=", 2))
+				Expect(acquires.n.Load()).To(BeNumerically(">=", 1))
 			})
 		})
 
@@ -406,7 +527,7 @@ var _ = Describe("leader", func() {
 			It("does not call OnElected when Acquire returns an error", func() {
 				mockLease.EXPECT().Acquire(gomock.Any(), "work-1").Return(worklease.Token{}, worklease.ErrLeaseHeld)
 				called := false
-				cfg := leader.Config{OnElected: func(_ context.Context, _ worklease.Token) { called = true }}
+				cfg := leader.Config{OnElected: func(_ context.Context, _ worklease.Token) { called = true }, IdleInterval: time.Millisecond}
 				_ = leader.Elect(ctx, mockLease, "work-1", cfg, func(context.Context) error { return nil })
 				Expect(called).To(BeFalse())
 			})

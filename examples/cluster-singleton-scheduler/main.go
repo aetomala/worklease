@@ -147,13 +147,16 @@ func scenario3StalledLeader(ctx context.Context, b backend.Backend) {
 
 func scenario4PersistentLeaderWithBackoff(ctx context.Context, b backend.Backend) {
 	log.Println("=== Scenario 4: Persistent Leader with BackoffInterval ===")
-	log.Println("  Two nodes compete in retry loops. BackoffInterval=300ms throttles")
-	log.Println("  reacquisition after Release — which expires the lease immediately.")
+	log.Println("  Two nodes compete in retry loops. BackoffInterval=300ms paces the leader")
+	log.Println("  between terms; IdleInterval (default 1s) paces the follower, so the")
+	log.Println("  leader usually wins its next term too.")
 
 	// runNode wraps Elect in a retry loop, executing up to maxTerms leadership terms.
-	// BackoffInterval prevents rapid acquire/release/reacquire cycling: without it,
-	// Release expiring the lease immediately (ADR-0012) means the losing node could
-	// reacquire before the winner has done meaningful work.
+	// BackoffInterval paces the leader between terms: Release expires the lease
+	// immediately (ADR-0012), so without it a node would reacquire at once. Elect
+	// paces the follower with IdleInterval (default 1s) on ErrLeaseHeld, so a
+	// leader whose BackoffInterval is shorter usually leads again: the output shows
+	// one node's terms, then the other's.
 	runNode := func(name string, lease worklease.Lease, maxTerms int, done chan<- string) {
 		term := 0
 		for term < maxTerms {
@@ -167,11 +170,8 @@ func scenario4PersistentLeaderWithBackoff(ctx context.Context, b backend.Backend
 			if errors.Is(err, worklease.ErrFenced) || ctx.Err() != nil {
 				break
 			}
-			// BackoffInterval applies only after a successful Acquire. ErrLeaseHeld
-			// (another node is leading) returns at once, so wait before polling again.
-			if errors.Is(err, worklease.ErrLeaseHeld) {
-				time.Sleep(100 * time.Millisecond)
-			}
+			// No sleep on ErrLeaseHeld: Elect already waited IdleInterval (default 1s)
+			// before returning it, so this follower loop does not spin.
 		}
 		log.Printf("  %s: exiting after %d term(s)", name, term)
 		done <- name

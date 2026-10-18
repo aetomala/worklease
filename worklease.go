@@ -36,13 +36,13 @@ type leaseClient struct {
 	obs LeaseObserver // never nil after New()
 }
 
-// New returns a new Lease instance backed by the provided Backend. Returns an
-// error if the backend is nil, TTL is zero, negative, or below 1ms, or
-// HolderID is empty.
+// New returns a new Lease instance backed by the provided Backend. Returns
+// ErrNilBackend if the backend is nil, and an error if TTL is zero, negative,
+// or below 1ms, or HolderID is empty.
 func New(b backend.Backend, cfg Config) (Lease, error) {
 	// ===== STEP 1: Validate Required Fields =====
 	if b == nil {
-		return nil, fmt.Errorf("worklease: New: backend is required")
+		return nil, ErrNilBackend
 	}
 
 	if cfg.TTL == 0 {
@@ -204,12 +204,21 @@ func (c *leaseClient) ReadCheckpoint(ctx context.Context, token Token) (Checkpoi
 
 // Forget permanently deletes the lease record for token's workID. Returns
 // ErrFenced if the fencing token no longer matches the stored lease, or if no
-// record exists for token's workID. Forget does not invoke any LeaseObserver
-// method — this is a deliberate v0.6 scope boundary, not an oversight.
+// record exists for token's workID. Every call is reported to OnForget,
+// followed by OnFenced with OperationForget when the backend returns ErrFenced.
 func (c *leaseClient) Forget(ctx context.Context, token Token) error {
+	// ===== STEP 1: Delegate to Backend =====
 	record := toRecord(token)
+	start := time.Now()
 	err := c.b.Forget(ctx, record)
 
+	// ===== STEP 2: Observe =====
+	c.obs.OnForget(ctx, ForgetEvent{Token: token, Duration: time.Since(start), Err: err})
+	if errors.Is(err, ErrFenced) {
+		c.obs.OnFenced(ctx, FencedEvent{Token: token, Operation: OperationForget})
+	}
+
+	// ===== STEP 3: Wrap =====
 	if errors.Is(err, ErrFenced) {
 		return fmt.Errorf("worklease: Forget: workID=%q holderID=%q: %w", token.WorkID(), token.HolderID(), ErrFenced)
 	}

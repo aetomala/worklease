@@ -2,10 +2,10 @@
 // produces the signals a production deployment cares about — without pulling in a
 // metrics or tracing library.
 //
-// It implements the five patterns that are non-obvious from the LeaseObserver
+// It implements the seven patterns that are non-obvious from the LeaseObserver
 // interface alone:
 //
-//  1. Per-operation call counting (Acquire / Checkpoint / Renew / Release / ReadCheckpoint).
+//  1. Per-operation call counting (Acquire / Checkpoint / Renew / Release / ReadCheckpoint / Forget).
 //  2. Per-operation latency, read directly from the v0.4 Duration field on each event
 //     (no Lease wrapping required).
 //  3. Lease hold duration, via stateful correlation between OnAcquire and OnRelease
@@ -20,6 +20,7 @@
 //  6. Exit-mode counts (v0.6, ADR-0018): releases labelled by ReleaseEvent.Mode and
 //     reads labelled by ReadCheckpointEvent.PrevExit. The ratio of abandoned to finished
 //     releases is a failure rate; reads that see "expired" count crashes and lost leases.
+//  7. Retention observability (v0.7): OnForget counts Forget calls like any other operation, a fenced Forget also fires OnFenced with OperationForget, and a VacuumObserver's OnSweep reports the rows each sweep deleted.
 //
 // The example runs a clean lifecycle and a real fencing scenario (a successor steals
 // an expired lease, fencing the original holder) so every callback fires.
@@ -36,6 +37,7 @@
 //   - renewRetries   -> prometheus.Counter (renew_retry_total)            / otel Int64Counter
 //   - releasesByMode -> prometheus.CounterVec{labels: "mode"}             / otel Int64Counter
 //   - readsByPrev    -> prometheus.CounterVec{labels: "prev_exit"}        / otel Int64Counter
+//   - sweeps / sweptRows -> prometheus.Counter (vacuum_sweeps_total / vacuum_rows_deleted_total) / otel Int64Counter
 //
 // Replace the in-memory aggregation with .Inc() / .Observe() calls on those instruments;
 // the callback bodies and correlation logic stay identical.
@@ -75,6 +77,11 @@ type metricsObserver struct {
 	// ===== Exit-mode counters =====
 	releasesByMode map[string]int // e.Mode.String() -> successful releases
 	readsByPrev    map[string]int // e.PrevExit.String() -> successful reads
+
+	// ===== Vacuum counters =====
+	sweeps      int   // OnSweep calls
+	sweptRows   int64 // sum of SweepEvent.Deleted
+	sweepErrors int   // OnSweep calls with a non-nil Err
 }
 
 func newMetricsObserver() *metricsObserver {
@@ -91,6 +98,9 @@ func newMetricsObserver() *metricsObserver {
 
 // Compile-time assertion that metricsObserver satisfies the interface.
 var _ worklease.LeaseObserver = (*metricsObserver)(nil)
+
+// Compile-time assertion that metricsObserver also satisfies VacuumObserver.
+var _ worklease.VacuumObserver = (*metricsObserver)(nil)
 
 // record is the shared bookkeeping for every operation callback.
 func (m *metricsObserver) record(op string, dur time.Duration, err error) {
@@ -152,6 +162,24 @@ func (m *metricsObserver) OnReadCheckpoint(_ context.Context, e worklease.ReadCh
 	}
 }
 
+func (m *metricsObserver) OnForget(_ context.Context, e worklease.ForgetEvent) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.record("forget", e.Duration, e.Err)
+}
+
+// OnSweep reports each Vacuum.Sweep backend call: how many rows it deleted and
+// whether it failed.
+func (m *metricsObserver) OnSweep(_ context.Context, e worklease.SweepEvent) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.sweeps++
+	m.sweptRows += e.Deleted
+	if e.Err != nil {
+		m.sweepErrors++
+	}
+}
+
 // OnFenced fires in addition to the operation-specific callback when an operation is
 // fenced. Incrementing a single counter here gives an accurate fencing rate without
 // inspecting error values in OnCheckpoint/OnRenew/OnRelease. e.Operation identifies
@@ -166,7 +194,7 @@ func (m *metricsObserver) report() {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	fmt.Println("=== lease metrics ===")
-	for _, op := range []string{"acquire", "checkpoint", "renew", "release", "read_checkpoint"} {
+	for _, op := range []string{"acquire", "checkpoint", "renew", "release", "read_checkpoint", "forget"} {
 		n := m.opCalls[op]
 		if n == 0 {
 			continue
@@ -176,6 +204,7 @@ func (m *metricsObserver) report() {
 	}
 	fmt.Printf("%-16s total=%d\n", "fenced", m.fencedTotal)
 	fmt.Printf("%-16s total=%d\n", "renew_retries", m.renewRetries)
+	fmt.Printf("%-16s sweeps=%d rows_deleted=%d errors=%d\n", "vacuum", m.sweeps, m.sweptRows, m.sweepErrors)
 	for i, d := range m.holdDurations {
 		fmt.Printf("%-16s holding[%d]=%s\n", "hold_duration", i, d)
 	}
@@ -247,6 +276,38 @@ func main() {
 	}
 	_, _ = leaseC.ReadCheckpoint(ctx, tokenC)
 	_ = leaseC.Release(ctx, tokenC, worklease.ExitAbandoned)
+
+	// ===== Retention =====
+	// Holder D takes the work ID and forgets it: the row is deleted. Holder A's
+	// stale token then finds no row, so its Forget is fenced. A retired row on a
+	// second work ID ages past the retention window and is swept.
+	leaseD, err := worklease.New(b, worklease.Config{TTL: 30 * time.Second, HolderID: "holder-D", Observer: obs})
+	if err != nil {
+		panic(err)
+	}
+	tokenD, err := leaseD.Acquire(ctx, workID)
+	if err != nil {
+		panic(err)
+	}
+	_ = leaseD.Forget(ctx, tokenD)
+	if err := leaseA.Forget(ctx, tokenA); err != nil {
+		fmt.Printf("holder-A forget correctly fenced: %v\n", err)
+	}
+	tokenR, err := leaseD.Acquire(ctx, "report-2026-07")
+	if err != nil {
+		panic(err)
+	}
+	_ = leaseD.Release(ctx, tokenR, worklease.ExitRetired)
+	clk.advance(2 * time.Hour)
+	vacuum, err := worklease.NewVacuum(b, worklease.VacuumConfig{Observer: obs})
+	if err != nil {
+		panic(err)
+	}
+	swept, err := vacuum.Sweep(ctx, worklease.SweepOptions{Retention: time.Hour})
+	if err != nil {
+		panic(err)
+	}
+	fmt.Printf("vacuum swept %d row(s)\n", swept)
 
 	obs.report()
 }
