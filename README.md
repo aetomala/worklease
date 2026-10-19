@@ -211,7 +211,7 @@ if deadline, ok := worklease.LeaseWindow(renewCtx); ok && time.Until(deadline) <
 }
 ```
 
-`LeaseWindow` works on `renewCtx` and on any context derived from it, advances with each successful renewal, and never exceeds the true expiry. It returns `ok == false` outside a renewal context and once `renewCtx` is done. `Token.ExpiresAt()` is the expiry recorded at acquisition and never moves.
+`LeaseWindow` works on `renewCtx` and on any context derived from it, advances with each successful renewal, and, under a constant clock offset, never exceeds the true expiry. It returns `ok == false` outside a renewal context and once `renewCtx` is done. `Token.ExpiresAt()` is the expiry recorded at acquisition and never moves.
 
 ---
 
@@ -373,6 +373,8 @@ n, err := vacuum.Sweep(ctx, worklease.SweepOptions{
 
 `Forget` is reported to `LeaseObserver.OnForget`, and each `Sweep` that reaches the backend to `VacuumConfig.Observer`.
 
+Configuration errors are matchable: every error `worklease.New` returns, and `ErrNilBackend` from `NewVacuum` and `Vacuum.Sweep`, satisfies `errors.Is(err, worklease.ErrConfigInvalid)`.
+
 ## Backends
 
 ### PostgreSQL (v0.1)
@@ -418,7 +420,7 @@ CREATE INDEX IF NOT EXISTS idx_worklease_leases_updated_at
 
 The atomic checkpoint operation is a single `UPDATE ... WHERE fencing_token = $n`. Zero rows updated means the token is stale. There is no Lua script, no optimistic retry loop, no distributed clock dependency.
 
-The backend requires the READ COMMITTED isolation level, the PostgreSQL default. Under REPEATABLE READ or SERIALIZABLE, a contended `Acquire` fails with a serialization error (SQLSTATE 40001) instead of returning `ErrLeaseHeld`. If your database or role defaults to another level, pin it for the role worklease connects as: `ALTER ROLE worklease_role SET default_transaction_isolation = 'read committed';`. The schema drops the deprecated `clean_handoff` column as of v0.7; existing databases drop it with the step in `UPGRADING.md`.
+The backend requires the READ COMMITTED isolation level, the PostgreSQL default. Under REPEATABLE READ or SERIALIZABLE, a contended `Acquire` fails with a serialization error (SQLSTATE 40001) instead of returning `ErrLeaseHeld`. If your database or role defaults to another level, pin it for the role worklease connects as: `ALTER ROLE worklease_role SET default_transaction_isolation = 'read committed';`. The schema drops the deprecated `clean_handoff` column as of v0.7; existing databases drop it with the step in `UPGRADING.md`. A statement cancelled or timed out by its context returns an error that wraps both the driver error and `ctx.Err()` (#113); the `Backend` contract requires custom backends to match `ctx.Err()` the same way.
 
 ### In-memory (testing)
 

@@ -28,7 +28,7 @@ ALTER ROLE worklease_role SET default_transaction_isolation = 'read committed';
 
 ### Renewal no longer waits for a stalled `Renew`
 
-`stopRenewal` returns without waiting for an in-flight `Renew` call, and the renewal context is cancelled with `ErrLeaseWindowExhausted` when the lease window closes, even while a `Renew` call is stalled. An abandoned call is reported to `OnRenew` with `context.Canceled` (on `stopRenewal`), the parent context's error (on its cancellation), or `context.DeadlineExceeded` (at the window). Metrics that count `OnRenew` errors may see these during shutdown. The window is also enforced between renewal ticks: if it closes before the next tick, for example because a slow step ran between `Acquire` and `StartRenewal` or because `WithRenewalInterval` exceeds the TTL, the renewal context is cancelled at that moment, without a `Renew` call and without an `OnRenew` event. Because the first window is the earlier of `Token.ExpiresAt()`, in database time, and the local acquire start plus TTL, a database clock that runs behind the application clock now shortens it by the skew. With the default renewal interval, a skew above half the TTL, or a custom `Backend` or test fake that returns a zero or past `ExpiresAt`, cancels the renewal context before the first renewal although the lease is held. Keep the clocks within a small fraction of the shortest TTL, and make fakes return a real `ExpiresAt`.
+`stopRenewal` returns without waiting for an in-flight `Renew` call, and the renewal context is cancelled with `ErrLeaseWindowExhausted` when the lease window closes, even while a `Renew` call is stalled. An abandoned call is reported to `OnRenew` with `context.Canceled` (on `stopRenewal`), the parent context's error (on its cancellation), or `context.DeadlineExceeded` (at the window). Metrics that count `OnRenew` errors may see these during shutdown. The window is also enforced between renewal ticks: if it closes before the next tick, for example because a slow step ran between `Acquire` and `StartRenewal` or because `WithRenewalInterval` exceeds the TTL, the renewal context is cancelled at that moment, without a `Renew` call and without an `OnRenew` event.
 
 ### `NewVacuum` returns an error and takes a `VacuumConfig`
 
@@ -69,6 +69,9 @@ func (o *myObserver) OnForget(ctx context.Context, e worklease.ForgetEvent) {}
 - `worklease.LeaseWindow(renewCtx)` returns the lease window the renewal goroutine tracks, to bound a step by the time the lease is guaranteed. `Token.ExpiresAt()` is unchanged: it is the expiry recorded at acquisition.
 - `worklease.VacuumConfig.Observer` takes a `VacuumObserver`, whose `OnSweep` reports each sweep's options, rows deleted, duration, and error.
 - `leader.Config.IdleInterval` sets the wait before `Elect` returns `ErrLeaseHeld`.
+- Custom `Backend` implementations: when a method fails because its context was cancelled or its deadline passed, including mid-request, the returned error must match `ctx.Err()` with `errors.Is`. The PostgreSQL backend now does this (#113).
+- `worklease.ErrConfigInvalid` matches every error `worklease.New` returns and `ErrNilBackend`.
+- Custom `Backend` implementations: `Acquire` must store an expiry at least the requested TTL after a reading of the backend's clock taken during the call (never earlier than the moment the call began), rounding up when it cannot represent the TTL exactly. The renewal window relies on it.
 
 ## v0.5.x → v0.6.0
 
