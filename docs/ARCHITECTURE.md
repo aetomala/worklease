@@ -576,6 +576,7 @@ SET holder_id      = EXCLUDED.holder_id,
     prev_exit_mode = COALESCE(worklease_leases.exit_mode, 'expired'),
     prev_holder_id = worklease_leases.holder_id,
     exit_mode      = NULL,
+    acquired_at    = NOW(),
     updated_at     = NOW()
 WHERE worklease_leases.expires_at < NOW()
 RETURNING fencing_token, expires_at

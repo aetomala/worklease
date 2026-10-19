@@ -287,6 +287,24 @@ var _ = Describe("worklease", func() {
 				Expect(errors.Is(err, worklease.ErrConfigInvalid)).To(BeTrue())
 				Expect(err.Error()).To(Equal("worklease: New: TTL must be at least 1ms, got 999µs"))
 			})
+
+			It("zero TTL and empty HolderID → the TTL check runs first, so the message is \"worklease: New: TTL is required\"", func() {
+				badCfg := cfg
+				badCfg.TTL = 0
+				badCfg.HolderID = ""
+				_, err := worklease.New(mockB, badCfg)
+				Expect(errors.Is(err, worklease.ErrConfigInvalid)).To(BeTrue())
+				Expect(err.Error()).To(Equal("worklease: New: TTL is required"))
+			})
+
+			It("negative TTL and empty HolderID → required fields are checked before values, so the message is \"worklease: New: HolderID is required\"", func() {
+				badCfg := cfg
+				badCfg.TTL = -time.Second
+				badCfg.HolderID = ""
+				_, err := worklease.New(mockB, badCfg)
+				Expect(errors.Is(err, worklease.ErrConfigInvalid)).To(BeTrue())
+				Expect(err.Error()).To(Equal("worklease: New: HolderID is required"))
+			})
 		})
 	})
 
