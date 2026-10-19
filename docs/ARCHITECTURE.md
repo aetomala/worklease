@@ -1494,7 +1494,7 @@ make ci   # lint, build, test (all three targets)
 - ADR-0017 — schema migration remains caller-owned
 - Explicit lease exit modes (ADR-0018) — `Release(ctx, token, mode)` with `ExitFinished`, `ExitAbandoned`, `ExitRetired`; `ReadCheckpoint` returns a `Checkpoint` with `PrevExit` and `PrevHolderID`; `worker.Runner`, `leader.Elect`, and `pool` record each run's outcome, release on a cleanup context bounded by `CleanupTimeout`, and `pool` gains `IdleInterval`, `RerunInterval`, and slot retirement via `ErrRetire`. PostgreSQL schema migration required — see `UPGRADING.md`
 
-### v0.7 — Planned
+### v0.7 — Released (v0.7.0, 2026-10-19)
 
 - Drop the deprecated `clean_handoff` column (#86)
 - Run the integration suite against both the memory and PostgreSQL backends (#87)
@@ -1506,6 +1506,12 @@ make ci   # lint, build, test (all three targets)
 - Expose the tracked lease window to work code (#93)
 - Reject empty and duplicate work IDs in `pool.New` (#97)
 - Pace `Acquire` errors in `leader.Elect` with `Config.IdleInterval` (#104)
+- Return errors matching `ctx.Err()` when a PostgreSQL statement is cancelled mid-flight (#113)
+- Make every `worklease.New` error match `ErrConfigInvalid` (#114)
+- Test a `Renew` stalled on a half-open PostgreSQL connection (#115)
+- Close the test gaps found by mutation testing (#116)
+- Start the first lease window from the local clock only (#117)
+- Set `acquired_at` on PostgreSQL reacquisition (#118)
 
 ### Unscheduled (post-1.0)
 
@@ -1549,4 +1555,4 @@ ADR-0012, ADR-0013, and ADR-0016. v0.7 adds dated amendments to ADR-0002, ADR-00
 
 ---
 
-*Last updated: October 2026 — v0.6 (v0.6.0)*
+*Last updated: October 2026 — v0.7 (v0.7.0)*
