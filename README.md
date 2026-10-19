@@ -480,11 +480,11 @@ Requires Go 1.25+. PostgreSQL backend requires PostgreSQL 12+.
 
 ## Status
 
-v0.6.0 is the latest release line. The core lease model (`Lease`, `Token`, fencing, options, sentinels) is stable; v0.6 changes several signatures, so read `UPGRADING.md` before upgrading.
+v0.7.0 is the latest release line. The core lease model (`Lease`, `Token`, fencing, options, sentinels) is stable; v0.7 changes several signatures and behaviors, so read `UPGRADING.md` before upgrading.
 
-v0.6 adds caller-governed row lifecycle: `Lease.Forget` deletes one row, and `worklease.Vacuum.Sweep` deletes retired rows (and, with `IncludeExpired`, expired rows) older than a retention period. It also replaces the `cleanHandoff` flag with explicit exit modes (ADR-0018). `Release(ctx, token, mode)` records `ExitFinished`, `ExitAbandoned`, or `ExitRetired`; `ReadCheckpoint` returns a `Checkpoint` with `PrevExit` and `PrevHolderID`; and `worker.Runner`, `leader.Elect`, and `pool` record each run's outcome, release on a cleanup context bounded by `CleanupTimeout`, and support retiring a work ID with `worklease.ErrRetire`.
+v0.7 bounds renewal by the lease window. Each `Renew` call runs with a deadline at the window, `stopRenewal` no longer waits for an in-flight call, and the renewal context is cancelled with `ErrLeaseWindowExhausted` when the window closes, even while a `Renew` call is stalled. Work code reads the window with `worklease.LeaseWindow(ctx)`. Errors become matchable: every `worklease.New` error matches `ErrConfigInvalid`, and a PostgreSQL statement cancelled mid-flight returns an error matching `ctx.Err()`. `Forget` and `Vacuum.Sweep` are observable through `LeaseObserver.OnForget` and `VacuumObserver`, and the `integration/` suite runs on both backends.
 
-Breaking changes: a PostgreSQL schema migration is required before deploying; `Release` and `ReadCheckpoint` change on both `Lease` and `Backend`, as do the `worker`/`pool` work-function signatures; `ReadCheckpointEvent.CleanHandoff` is replaced by `PrevExit` and `PrevHolderID`; custom `Backend` and `Lease` implementations must add `Forget` (and `Sweep` for backends); custom `pool.Observer` implementations must add `OnSlotRetired`; and `pool.Config.BackoffInterval` zero now means 1s. See `UPGRADING.md` and `CHANGELOG.md`.
+Breaking changes: `worklease.New` rejects a TTL below 1ms; the PostgreSQL backend requires READ COMMITTED and its schema no longer creates the deprecated `clean_handoff` column; `NewVacuum` takes a `VacuumConfig` and returns an error; custom `LeaseObserver` implementations must add `OnForget`; `pool.New` rejects empty and duplicate work IDs; and `leader.Elect` waits `Config.IdleInterval` before returning `ErrLeaseHeld`. See `UPGRADING.md` and `CHANGELOG.md`.
 
 ---
 
@@ -498,6 +498,7 @@ Breaking changes: a PostgreSQL schema migration is required before deploying; `R
 - **v0.4.0** — `LeaseObserver` event-struct redesign (breaking), `backend/conformance` suite, `pool.Observer`/`Permanent`/`ErrAllSlotsDead`, `leader` lifecycle callbacks, memory slice-ownership fix
 - **v0.5.0** — bounded renewal retry (`WithRenewalBackoff`, `ErrLeaseWindowExhausted`, `RenewEvent.Attempt`); global fencing sequence on both backends; single-statement `Acquire` with `RETURNING`; ctx-aware `Acquire` cancellation under `WithWaitForLease` (breaking — see `UPGRADING.md`)
 - **v0.6.0** — caller-governed row lifecycle: `Lease.Forget`, `worklease.Vacuum.Sweep` (breaking — new `Backend`/`Lease` interface methods for custom implementations; see `UPGRADING.md`); explicit exit modes (ADR-0018) — schema migration required, see `UPGRADING.md`
+- **v0.7.0** — renewal bounded by the lease window (`LeaseWindow`, per-attempt `Renew` deadline, `stopRenewal` no longer waits on backend I/O); `ErrConfigInvalid` and context-matching PostgreSQL errors; observable `Forget` and `Sweep` (`OnForget`, `VacuumObserver`); 1ms TTL floor, READ COMMITTED, `NewVacuum(b, cfg)`, `pool.New` work ID validation, `Elect` pacing (breaking — see `UPGRADING.md`)
 
 ### Future
 - Redis backend, etcd backend (unscheduled, post-1.0)

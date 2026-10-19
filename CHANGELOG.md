@@ -9,6 +9,10 @@ This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 
 ## [Unreleased]
 
+---
+
+## [v0.7.0] — 2026-10-19
+
 ### Breaking
 
 - **PostgreSQL: the deprecated `clean_handoff` column is dropped (#86).** `schema.sql` no longer creates it. v0.6 and v0.7 never read or write it, so an existing table keeps working until you drop the column. Run `ALTER TABLE worklease_leases DROP COLUMN IF EXISTS clean_handoff` once no v0.5 process remains; after that, a rollback to v0.5 is not possible. See `UPGRADING.md`.
