@@ -1,5 +1,78 @@
 # Upgrading worklease
 
+## v0.6.x → v0.7.0
+
+v0.7 hardens the API before the 1.0 freeze. Most changes turn configurations that never worked into errors at construction; the others are listed below.
+
+### Drop the `clean_handoff` column
+
+v0.6 and v0.7 never read or write `clean_handoff`. Once no v0.5 process uses the table, drop it:
+
+```sql
+ALTER TABLE worklease_leases DROP COLUMN IF EXISTS clean_handoff;
+```
+
+The statement is idempotent. After it runs, a rollback to v0.5 is no longer possible, because v0.5 writes the column. v0.6 and v0.7 processes can share the table before and after the drop, in any order. New installations get the reduced table from `backend/postgres/schema.sql`.
+
+### TTLs below 1ms are rejected
+
+`worklease.New` returns an error for a TTL below 1ms: such a TTL is shorter than the 1ms offset `Release` writes into the past (ADR-0012), and PostgreSQL intervals resolve only to the microsecond.
+
+### PostgreSQL requires READ COMMITTED
+
+The backend requires the READ COMMITTED isolation level, the PostgreSQL default. Under REPEATABLE READ or SERIALIZABLE, a contended `Acquire` fails with SQLSTATE 40001 instead of returning `ErrLeaseHeld`. If your database or role defaults to another level, pin READ COMMITTED for the role worklease connects as:
+
+```sql
+ALTER ROLE worklease_role SET default_transaction_isolation = 'read committed';
+```
+
+### Renewal no longer waits for a stalled `Renew`
+
+`stopRenewal` returns without waiting for an in-flight `Renew` call, and the renewal context is cancelled with `ErrLeaseWindowExhausted` when the lease window closes, even while a `Renew` call is stalled. An abandoned call is reported to `OnRenew` with `context.Canceled` (on `stopRenewal`), the parent context's error (on its cancellation), or `context.DeadlineExceeded` (at the window). Metrics that count `OnRenew` errors may see these during shutdown. The window is also enforced between renewal ticks: if it closes before the next tick, for example because a slow step ran between `Acquire` and `StartRenewal` or because `WithRenewalInterval` exceeds the TTL, the renewal context is cancelled at that moment, without a `Renew` call and without an `OnRenew` event.
+
+### `NewVacuum` returns an error and takes a `VacuumConfig`
+
+```go
+// v0.6
+n, err := worklease.NewVacuum(b).Sweep(ctx, opts)
+
+// v0.7
+vacuum, err := worklease.NewVacuum(b, worklease.VacuumConfig{})
+if err != nil {
+    return err // ErrNilBackend
+}
+n, err := vacuum.Sweep(ctx, opts)
+```
+
+`Sweep` on a zero-value or nil `*Vacuum` returns `ErrNilBackend` instead of panicking. `worklease.New` also returns `ErrNilBackend` for a nil backend; code that matched the old message `worklease: New: backend is required` should use `errors.Is(err, worklease.ErrNilBackend)`.
+
+### `LeaseObserver` gains `OnForget`
+
+Custom `LeaseObserver` implementations must add:
+
+```go
+func (o *myObserver) OnForget(ctx context.Context, e worklease.ForgetEvent) {}
+```
+
+`Forget` reports every call to `OnForget`. A fenced `Forget` then fires `OnFenced` with `e.Operation == worklease.OperationForget`; a `switch` over `Operation` should handle the new value.
+
+### `pool.New` rejects empty and duplicate work IDs
+
+`pool.New` returns `ErrEmptyWorkID` for an empty work ID and `ErrDuplicateWorkID` for a repeated one; both satisfy `errors.Is(err, pool.ErrConfigInvalid)`. An empty ID never ran, and a duplicate only added a slot that polled the lease every `IdleInterval` while its sibling held it. Remove the entries.
+
+### `leader.Elect` waits before returning `ErrLeaseHeld`
+
+`Elect` now waits `leader.Config.IdleInterval` (default 1s, up to 20% jitter) before returning `ErrLeaseHeld`, and `BackoffInterval` before returning any other non-context `Acquire` error. A follower loop no longer needs its own sleep on `ErrLeaseHeld`. Code that relied on an immediate `ErrLeaseHeld`, such as a one-shot leadership check, should call `Lease.Acquire` directly or set `IdleInterval` to a small positive value.
+
+### New in v0.7.0
+
+- `worklease.LeaseWindow(renewCtx)` returns the lease window the renewal goroutine tracks, to bound a step by the time the lease is guaranteed. `Token.ExpiresAt()` is unchanged: it is the expiry recorded at acquisition.
+- `worklease.VacuumConfig.Observer` takes a `VacuumObserver`, whose `OnSweep` reports each sweep's options, rows deleted, duration, and error.
+- `leader.Config.IdleInterval` sets the wait before `Elect` returns `ErrLeaseHeld`.
+- Custom `Backend` implementations: when a method fails because its context was cancelled or its deadline passed, including mid-request, the returned error must match `ctx.Err()` with `errors.Is`. The PostgreSQL backend now does this (#113).
+- `worklease.ErrConfigInvalid` matches every error `worklease.New` returns and `ErrNilBackend`.
+- Custom `Backend` implementations: `Acquire` must store an expiry at least the requested TTL after a reading of the backend's clock taken during the call (never earlier than the moment the call began), rounding up when it cannot represent the TTL exactly. The renewal window relies on it.
+
 ## v0.5.x → v0.6.0
 
 v0.6 replaces the `clean_handoff` flag with declared exit modes (ADR-0018). It needs a schema migration and code changes in every caller of `Release`, `ReadCheckpoint`, and the `worker`/`pool` work functions.

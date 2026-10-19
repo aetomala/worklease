@@ -116,3 +116,7 @@ Two behaviors change:
 - `clean_handoff` is no longer read or written. The column stays in the schema, deprecated, until a later release drops it (#86).
 
 The note that `clean_handoff` disambiguates intent after `Release` is superseded: `exit_mode`, and the `prev_exit_mode` that `Acquire` captures from it, carry that information. See ADR-0018.
+
+## Amendment (2026-10-17) — v0.7: clean_handoff dropped; TTL floor
+
+`schema.sql` no longer creates `clean_handoff` (#86); existing tables drop it with the idempotent `UPGRADING.md` step once no v0.5 process remains. The one-millisecond past offset that `Release` writes also sets the smallest TTL `worklease.New` accepts: a TTL below 1ms is rejected (#90), because it would be shorter than that offset. The PostgreSQL backend now formats a TTL as whole microseconds rounded up, so a stored expiry is never earlier than the requested TTL.

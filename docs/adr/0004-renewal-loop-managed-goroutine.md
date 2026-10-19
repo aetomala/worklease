@@ -98,3 +98,7 @@ parent cancellation. See ADR-0013 for the full policy and `WithRenewalBackoff`.
 - `lease.go` — `Lease.StartRenewal` method signature and contract
 - `docs/adr/0013-renewal-goroutine-retry-policy.md` — the v0.5 bounded-retry amendment
 - Architecture document — Renewal Loop Design and Residual Risks R2
+
+## Amendment (2026-10-17) — v0.7: stopRenewal does not wait for an in-flight Renew
+
+Each `Renew` call now runs on its own goroutine, with a context whose deadline is the lease window at the time of the call (#88). On `stopRenewal`, on cancellation of the parent context, or when the window closes, the renewal goroutine cancels that context, reports the attempt to `OnRenew` with the context error, and moves on; the call's late result is discarded. `stopRenewal` therefore returns once the renewal goroutine exits, without waiting on backend I/O. A context-honoring backend was not enough: lib/pq answers a cancelled context with a cancel request on a new connection and keeps reading the original one, so a `Renew` stalled on a half-open connection blocked `stopRenewal` until TCP keepalive gave up. At most one abandoned backend call per `StartRenewal` can outlive `stopRenewal`. A late `Renew` that reaches storage after `Release` fails, because `Renew` extends only an unexpired lease.

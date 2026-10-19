@@ -47,8 +47,8 @@ Expected output:
   worker-C: work abandoned; a successor worker may re-acquire this lease
 ```
 
-The example runs in approximately 1 second — 500ms waiting for the deadline in Scenario 1
-and 400ms for the renewal goroutine to fire in Scenario 2.
+The example runs in approximately 0.6 seconds — 500ms waiting for the deadline in Scenario 1
+and 100ms, half the 200ms TTL, until the first renewal in Scenario 2.
 
 ---
 
@@ -62,13 +62,16 @@ fires on the wait path — only on the immediate fail-fast path (no `WithWaitFor
 
 **`WithRenewalBackoff` and terminal `ErrLeaseExpired`** — `StartRenewal` retries transient
 non-fencing `Renew` errors with exponential backoff bounded by the lease window. The window
-starts as the earlier of `token.ExpiresAt()` and the local acquire time plus TTL, and
-advances after every successful renewal. In Scenario 2 the renewal interval is deliberately
-set longer than the TTL, so the first `Renew` runs after the lease has expired and returns
-`ErrLeaseExpired`. That error is terminal (#84): storage has found the lease lapsed, so the
-goroutine cancels `renewCtx` at once, without any backoff retry. The cause is
-`errors.Join(ErrLeaseWindowExhausted, ErrLeaseExpired)`, so `errors.Is` matches both
-sentinels, and existing checks for `ErrLeaseWindowExhausted` keep working.
+starts at the local start of the acquiring call plus TTL, and
+advances after every successful renewal. In Scenario 2, a fake clock lets storage find the
+lease lapsed while the local lease window is still open: the scenario advances it past the
+TTL right after `StartRenewal`, so the first `Renew`, at the default interval (TTL/2),
+returns `ErrLeaseExpired`. Renewal stops at once, without backoff or retry, and
+`context.Cause(renewCtx)` is `errors.Join(ErrLeaseWindowExhausted, ErrLeaseExpired)`, so
+`errors.Is` matches both sentinels and existing checks for `ErrLeaseWindowExhausted` keep
+working. Before v0.7, a renewal interval longer than the TTL reached the same path; now the
+renewal context is cancelled when the local window closes, before a late tick could call
+`Renew`, and the cause is `ErrLeaseWindowExhausted` alone.
 
 In production (Postgres), transient errors such as connection drops also enter this retry
 path. `WithRenewalBackoff` controls how aggressively the goroutine retries before the

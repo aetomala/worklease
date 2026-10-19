@@ -102,43 +102,44 @@ func scenario2StandbyFailover(ctx context.Context, b backend.Backend) {
 	log.Println()
 }
 
-func scenario3FencedLeader(ctx context.Context, b backend.Backend) {
-	log.Println("=== Scenario 3: Fenced Leader Exits via Context Cancellation ===")
+// stalledRenew wraps a Backend so that every Renew waits until its context
+// ends, simulating a database that stopped answering.
+type stalledRenew struct {
+	backend.Backend
+}
 
-	// node-E: TTL=2s, renewal interval=4s — the lease expires before the first renewal fires.
-	leaseE, _ := worklease.New(b, worklease.Config{TTL: 2 * time.Second, HolderID: "node-E"})
+// Renew waits for ctx to end and returns ctx.Err().
+func (stalledRenew) Renew(ctx context.Context, _ backend.LeaseRecord, _ time.Duration) error {
+	<-ctx.Done()
+	return ctx.Err()
+}
 
-	var wg sync.WaitGroup
-	wg.Add(1)
-	go func() {
-		defer wg.Done()
-		err := leader.Elect(ctx, leaseE, "scheduler:primary", leader.Config{
-			RenewalOptions: []worklease.RenewalOption{worklease.WithRenewalInterval(4 * time.Second)},
-		}, func(renewCtx context.Context) error {
-			if err := runScheduler(renewCtx, "node-E", 2); err != nil {
-				return err
-			}
-			log.Println("  node-E: stalled — awaiting context cancellation...")
-			<-renewCtx.Done()
-			log.Printf("  node-E: context cancelled (%v)", renewCtx.Err())
-			return renewCtx.Err()
-		})
-		if errors.Is(err, worklease.ErrFenced) {
-			log.Println("  node-E: leader.Elect returned ErrFenced — another node took leadership")
-		}
-	}()
+func scenario3StalledLeader(ctx context.Context, b backend.Backend) {
+	log.Println("=== Scenario 3: Stalled Renewal Stops the Leader When Its Lease Window Closes ===")
 
-	// Give node-E time to acquire and stall, then wait for its 2s lease to expire.
-	time.Sleep(3 * time.Second)
+	// node-E: every Renew stalls, so no renewal ever succeeds. The first Renew
+	// starts at the default interval (TTL/2 = 1s) and never returns; when the
+	// 2s lease window closes, the renewal context is cancelled anyway.
+	leaseE, _ := worklease.New(stalledRenew{Backend: b}, worklease.Config{TTL: 2 * time.Second, HolderID: "node-E"})
+	_ = leader.Elect(ctx, leaseE, "scheduler:primary", leader.Config{
+		OnLost: func(_ context.Context, _ worklease.Token) {
+			log.Println("  node-E: OnLost — lease window closed, stopping work")
+		},
+	}, func(renewCtx context.Context) error {
+		err := runScheduler(renewCtx, "node-E", 20)
+		log.Printf("  node-E: renewal context cancelled (%v)", context.Cause(renewCtx))
+		return err
+	})
+	log.Println("  node-E: leader.Elect returned without releasing — the successor will see ExitExpired")
 
+	// node-F: waits for node-E's lease to expire in storage, then takes over.
 	leaseF, _ := worklease.New(b, worklease.Config{TTL: 30 * time.Second, HolderID: "node-F"})
-	tokenF, _ := leaseF.Acquire(ctx, "scheduler:primary")
-	log.Printf("  node-F: acquired leadership (fencing token %d)", tokenF.FencingToken())
-
-	// Wait for node-E's renewal goroutine to fire at t=4s and detect ErrFenced.
-	time.Sleep(2 * time.Second)
-
-	wg.Wait()
+	tokenF, _ := leaseF.Acquire(ctx, "scheduler:primary",
+		worklease.WithWaitForLease(),
+		worklease.WithPollInterval(100*time.Millisecond),
+	)
+	cp, _ := leaseF.ReadCheckpoint(ctx, tokenF)
+	log.Printf("  node-F: acquired leadership (fencing token %d); previous leader's exit: %s", tokenF.FencingToken(), cp.PrevExit)
 	_ = leaseF.Release(ctx, tokenF, worklease.ExitFinished)
 	log.Println("  node-F: released leadership")
 	log.Println()
@@ -146,13 +147,16 @@ func scenario3FencedLeader(ctx context.Context, b backend.Backend) {
 
 func scenario4PersistentLeaderWithBackoff(ctx context.Context, b backend.Backend) {
 	log.Println("=== Scenario 4: Persistent Leader with BackoffInterval ===")
-	log.Println("  Two nodes compete in retry loops. BackoffInterval=300ms throttles")
-	log.Println("  reacquisition after Release — which expires the lease immediately.")
+	log.Println("  Two nodes compete in retry loops. BackoffInterval=300ms paces the leader")
+	log.Println("  between terms; IdleInterval (default 1s) paces the follower, so the")
+	log.Println("  leader usually wins its next term too.")
 
 	// runNode wraps Elect in a retry loop, executing up to maxTerms leadership terms.
-	// BackoffInterval prevents rapid acquire/release/reacquire cycling: without it,
-	// Release expiring the lease immediately (ADR-0012) means the losing node could
-	// reacquire before the winner has done meaningful work.
+	// BackoffInterval paces the leader between terms: Release expires the lease
+	// immediately (ADR-0012), so without it a node would reacquire at once. Elect
+	// paces the follower with IdleInterval (default 1s) on ErrLeaseHeld, so a
+	// leader whose BackoffInterval is shorter usually leads again: the output shows
+	// one node's terms, then the other's.
 	runNode := func(name string, lease worklease.Lease, maxTerms int, done chan<- string) {
 		term := 0
 		for term < maxTerms {
@@ -166,11 +170,8 @@ func scenario4PersistentLeaderWithBackoff(ctx context.Context, b backend.Backend
 			if errors.Is(err, worklease.ErrFenced) || ctx.Err() != nil {
 				break
 			}
-			// BackoffInterval applies only after a successful Acquire. ErrLeaseHeld
-			// (another node is leading) returns at once, so wait before polling again.
-			if errors.Is(err, worklease.ErrLeaseHeld) {
-				time.Sleep(100 * time.Millisecond)
-			}
+			// No sleep on ErrLeaseHeld: Elect already waited IdleInterval (default 1s)
+			// before returning it, so this follower loop does not spin.
 		}
 		log.Printf("  %s: exiting after %d term(s)", name, term)
 		done <- name
@@ -192,6 +193,6 @@ func main() {
 
 	scenario1HappyPath(ctx, memory.New())
 	scenario2StandbyFailover(ctx, memory.New())
-	scenario3FencedLeader(ctx, memory.New())
+	scenario3StalledLeader(ctx, memory.New())
 	scenario4PersistentLeaderWithBackoff(ctx, memory.New())
 }

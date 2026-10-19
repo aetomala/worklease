@@ -44,6 +44,7 @@ var _ = Describe("Runner", func() {
 			WorkID:       "w1",
 			HolderID:     "test-worker",
 			FencingToken: 1,
+			ExpiresAt:    time.Now().Add(30 * time.Second),
 		}
 		token = worklease.Token{}
 	})

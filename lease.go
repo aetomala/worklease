@@ -16,6 +16,7 @@ const (
 	msgLeaseExpired         = "worklease: lease has expired"
 	msgLeaseWindowExhausted = "worklease: lease window exhausted before renewal succeeded"
 	msgAcquireCancelled     = "worklease: acquire cancelled"
+	msgNilBackend           = "worklease: backend is required"
 )
 
 // Sentinel errors for Lease operations.
@@ -29,7 +30,27 @@ var (
 	// successful renewal (goroutine lifecycle path 3).
 	// Inspect via context.Cause(renewCtx) — not returned directly from any method.
 	ErrLeaseWindowExhausted = errors.New(msgLeaseWindowExhausted)
+
+	// ErrConfigInvalid is the parent sentinel for configuration errors: every
+	// error worklease.New returns, and ErrNilBackend wherever it is returned.
+	// Match it with errors.Is.
+	ErrConfigInvalid = errors.New("worklease: invalid configuration")
+
+	// ErrNilBackend is returned by New and NewVacuum when the backend is nil,
+	// and by Vacuum.Sweep on a Vacuum that NewVacuum did not build. It matches
+	// ErrConfigInvalid.
+	ErrNilBackend error = &configError{msg: msgNilBackend}
 )
+
+// The configError type is a configuration error whose message is exactly msg
+// and which matches ErrConfigInvalid with errors.Is.
+type configError struct {
+	msg string
+}
+
+func (e *configError) Error() string { return e.msg }
+
+func (e *configError) Unwrap() error { return ErrConfigInvalid }
 
 // ExitMode records how a lease holder left a lease. It is an alias for
 // backend.ExitMode; the canonical definition lives in package backend because
@@ -125,20 +146,24 @@ type Lease interface {
 	// Sweep.
 	ReadCheckpoint(ctx context.Context, token Token) (Checkpoint, error)
 
-	// StartRenewal begins automatic renewal of the lease at regular intervals. Returns
-	// a derived context and a stop function. Calling stop cancels the renewal context
-	// and terminates the renewal loop. The renewal context is cancelled if the underlying
-	// context is cancelled or if the lease is lost.
+	// StartRenewal begins automatic renewal of the lease at regular intervals.
+	// Returns a derived context and a stop function. The renewal context is
+	// cancelled if the parent context is cancelled, if the lease is fenced, or
+	// if the lease window closes before a renewal succeeds. Calling the stop
+	// function ends renewal without cancelling the renewal context, and it
+	// returns without waiting for an in-flight Renew call to finish.
 	// If Renew returns ErrLeaseExpired, storage has found the lease lapsed:
 	// renewal stops at once without retrying, and the renewal context's cause
 	// matches both ErrLeaseWindowExhausted and ErrLeaseExpired.
+	// LeaseWindow reports the current lease window from the renewal context.
 	StartRenewal(ctx context.Context, token Token, opts ...RenewalOption) (renewCtx context.Context, stopRenewal func())
 
 	// Forget permanently deletes the lease record for token's workID. Returns
 	// ErrFenced if the fencing token no longer matches the stored lease, or if no
 	// record exists for token's workID. Unlike Release, the record is not left
 	// behind for a future ReadCheckpoint — it is gone. Use only when a work ID is
-	// permanently retired. Forget does not invoke any LeaseObserver method.
+	// permanently retired. Every call is reported to LeaseObserver.OnForget, and
+	// a fenced call also to OnFenced.
 	Forget(ctx context.Context, token Token) error
 }
 
@@ -172,7 +197,8 @@ func (t Token) FencingToken() uint64 {
 }
 
 // ExpiresAt returns the lease expiry recorded at acquisition, as reported by the
-// backend's clock. It is not updated by Renew or Checkpoint.
+// backend's clock. It is not updated by Renew or Checkpoint. For a bound that
+// reflects renewals, call LeaseWindow with the renewal context.
 func (t Token) ExpiresAt() time.Time {
 	return t.expiresAt
 }
@@ -304,8 +330,12 @@ type LeaseObserver interface {
 	// OnFenced is NOT called on ReadCheckpoint — ErrFenced surfaces via e.Err only.
 	OnReadCheckpoint(ctx context.Context, e ReadCheckpointEvent)
 
-	// OnFenced is called when Checkpoint, Renew, or Release returns ErrFenced —
-	// not for ReadCheckpoint or Forget. Called in addition to the
+	// OnForget is called after every Forget attempt.
+	// If e.Err is ErrFenced, OnFenced is also called after this method returns.
+	OnForget(ctx context.Context, e ForgetEvent)
+
+	// OnFenced is called when Checkpoint, Renew, Release, or Forget returns
+	// ErrFenced — not for ReadCheckpoint. Called in addition to the
 	// operation-specific callback — not instead of.
 	// e.Operation identifies which operation triggered the fencing event.
 	OnFenced(ctx context.Context, e FencedEvent)
@@ -319,6 +349,7 @@ const (
 	OperationCheckpoint Operation = iota
 	OperationRenew
 	OperationRelease
+	OperationForget
 )
 
 // AcquireEvent carries the result of one backend acquire attempt.
@@ -343,7 +374,11 @@ type CheckpointEvent struct {
 // RenewEvent carries the result of a Renew call.
 // Attempt is 1 on the first attempt. The renewal goroutine increments Attempt
 // on each retry attempt within the backoff loop. Direct calls to Renew from
-// caller code always produce Attempt: 1.
+// caller code always produce Attempt: 1. When the renewal goroutine abandons an
+// in-flight attempt, Err is the error of the abandonment: context.Canceled on
+// stopRenewal, the parent context's error on its cancellation, and
+// context.DeadlineExceeded when the lease window closes. Duration then runs to
+// the moment of abandonment.
 type RenewEvent struct {
 	Token    Token
 	Duration time.Duration
@@ -373,6 +408,14 @@ type ReadCheckpointEvent struct {
 	Err          error
 }
 
+// ForgetEvent carries the result of a Forget call. Duration is the duration of
+// the backend call.
+type ForgetEvent struct {
+	Token    Token
+	Duration time.Duration
+	Err      error
+}
+
 // FencedEvent carries the context of a fencing event.
 // Called in addition to the operation-specific event — not instead of.
 type FencedEvent struct {
@@ -389,4 +432,5 @@ func (noopObserver) OnCheckpoint(_ context.Context, _ CheckpointEvent)         {
 func (noopObserver) OnRenew(_ context.Context, _ RenewEvent)                   {}
 func (noopObserver) OnRelease(_ context.Context, _ ReleaseEvent)               {}
 func (noopObserver) OnReadCheckpoint(_ context.Context, _ ReadCheckpointEvent) {}
+func (noopObserver) OnForget(_ context.Context, _ ForgetEvent)                 {}
 func (noopObserver) OnFenced(_ context.Context, _ FencedEvent)                 {}

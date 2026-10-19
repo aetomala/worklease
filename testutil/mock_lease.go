@@ -212,6 +212,18 @@ func (mr *MockLeaseObserverMockRecorder) OnFenced(ctx, e any) *gomock.Call {
 	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "OnFenced", reflect.TypeOf((*MockLeaseObserver)(nil).OnFenced), ctx, e)
 }
 
+// OnForget mocks base method.
+func (m *MockLeaseObserver) OnForget(ctx context.Context, e worklease.ForgetEvent) {
+	m.ctrl.T.Helper()
+	m.ctrl.Call(m, "OnForget", ctx, e)
+}
+
+// OnForget indicates an expected call of OnForget.
+func (mr *MockLeaseObserverMockRecorder) OnForget(ctx, e any) *gomock.Call {
+	mr.mock.ctrl.T.Helper()
+	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "OnForget", reflect.TypeOf((*MockLeaseObserver)(nil).OnForget), ctx, e)
+}
+
 // OnReadCheckpoint mocks base method.
 func (m *MockLeaseObserver) OnReadCheckpoint(ctx context.Context, e worklease.ReadCheckpointEvent) {
 	m.ctrl.T.Helper()

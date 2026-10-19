@@ -203,6 +203,16 @@ stopRenewal()             // explicit stop before Release
 lease.Release(ctx, token, worklease.ExitFinished) // use the original ctx, not renewCtx
 ```
 
+`stopRenewal` returns without waiting for an in-flight `Renew` call, and the renewal context is cancelled when the lease window closes, even if a `Renew` call is stalled. Work code can read the window with `worklease.LeaseWindow`:
+
+```go
+if deadline, ok := worklease.LeaseWindow(renewCtx); ok && time.Until(deadline) < 5*time.Second {
+    return errNotEnoughLease // too little guaranteed lease left for this step
+}
+```
+
+`LeaseWindow` works on `renewCtx` and on any context derived from it, advances with each successful renewal, and, under a constant clock offset, never exceeds the true expiry. It returns `ok == false` outside a renewal context and once `renewCtx` is done. `Token.ExpiresAt()` is the expiry recorded at acquisition and never moves.
+
 ---
 
 ## Error Reference
@@ -218,6 +228,8 @@ lease.Release(ctx, token, worklease.ExitFinished) // use the original ctx, not r
 ---
 
 ## Upgrading
+
+`v0.7.0` drops the deprecated `clean_handoff` column (run the `ALTER TABLE` in `UPGRADING.md` once no v0.5 process remains), rejects TTLs below 1ms, requires READ COMMITTED on PostgreSQL, changes `NewVacuum` to `NewVacuum(b, cfg) (*Vacuum, error)`, adds `LeaseObserver.OnForget`, rejects empty and duplicate `pool` work IDs, and makes `leader.Elect` wait `IdleInterval` (default 1s) before returning `ErrLeaseHeld`.
 
 `v0.5.0` changes `Acquire` with `WithWaitForLease`: on context cancellation or deadline while waiting it now returns an error wrapping `ctx.Err()` (satisfying `errors.Is(err, context.Canceled)` / `context.DeadlineExceeded`) instead of bare `ErrLeaseHeld`. This is a runtime break for callers that treated `ErrLeaseHeld` as their sole wait-loop termination signal; the synchronous no-wait path is unchanged. The renewal goroutine also now retries transient errors with backoff bounded by the lease window rather than stopping on the first error (configure with `WithRenewalBackoff`).
 
@@ -266,7 +278,7 @@ err := leader.Elect(ctx, lease, "scheduler:primary", leader.Config{}, func(ctx c
 })
 ```
 
-Pass `worklease.WithWaitForLease()` in `leader.Config.AcquireOptions` to block until leadership is available rather than returning `ErrLeaseHeld` immediately. `leader.Config` also accepts optional lifecycle callbacks — `OnElected`, `OnLost`, and `OnRelinquished` — for observing leadership transitions.
+Without `worklease.WithWaitForLease()`, `Elect` returns `ErrLeaseHeld` when another process leads, after waiting `leader.Config.IdleInterval` (default 1s, up to 20% jitter), so a follower can call `Elect` in a loop without spinning against the backend. Any other `Acquire` error is returned after `BackoffInterval`, and a context error at once. Pass `worklease.WithWaitForLease()` in `leader.Config.AcquireOptions` to block until leadership is available instead. `leader.Config` also accepts optional lifecycle callbacks — `OnElected`, `OnLost`, and `OnRelinquished` — for observing leadership transitions; none of them fires when `Acquire` fails.
 
 ### pool — Distributed work distribution
 
@@ -286,7 +298,7 @@ if err != nil { ... }
 if err := p.Run(ctx); err != nil { ... }
 ```
 
-Return `worklease.ErrRetire` (or wrap it) from the work function to retire the work ID: the slot releases with `ExitRetired`, calls `OnSlotRetired`, and stops. Return a `PermanentError` to drop a slot without reacquisition — implement the interface on a custom type, or wrap an error with `pool.Permanent(err)`; the slot releases with `ExitAbandoned`. When every slot exits through a `PermanentError`, `Run` returns `pool.ErrAllSlotsDead`; if any slot retired, it returns `nil`. `ErrAllSlotsDead` requires every slot to be counted dead: a slot that observes cancellation of `ctx` before its `PermanentError` check exits uncounted, so if `ctx` is cancelled at the same moment the last slot fails, `Run` may return `nil` instead. A slot whose work ID another process holds waits `Config.IdleInterval` (default 1s, up to 20% jitter); a slot whose work function returned `nil` waits `Config.RerunInterval` (default 1s, up to 20% jitter) before running again; a slot whose work function failed waits `Config.BackoffInterval` (default 1s) and calls `OnSlotBackoff`. Set `pool.Config.Observer` to a `pool.Observer` to receive slot lifecycle events (`OnSlotAcquired` / `OnSlotLost` / `OnSlotBackoff` / `OnSlotDead` / `OnSlotRetired`), and call `ActiveSlots()` for a point-in-time view of slots currently executing their work function. Construction errors are distinct sentinels (`ErrNilLease` / `ErrEmptyWorkIDs` / `ErrWithWaitForLeaseProhibited`) that all satisfy `errors.Is(err, pool.ErrConfigInvalid)`.
+Return `worklease.ErrRetire` (or wrap it) from the work function to retire the work ID: the slot releases with `ExitRetired`, calls `OnSlotRetired`, and stops. Return a `PermanentError` to drop a slot without reacquisition — implement the interface on a custom type, or wrap an error with `pool.Permanent(err)`; the slot releases with `ExitAbandoned`. When every slot exits through a `PermanentError`, `Run` returns `pool.ErrAllSlotsDead`; if any slot retired, it returns `nil`. `ErrAllSlotsDead` requires every slot to be counted dead: a slot that observes cancellation of `ctx` before its `PermanentError` check exits uncounted, so if `ctx` is cancelled at the same moment the last slot fails, `Run` may return `nil` instead. A slot whose work ID another process holds waits `Config.IdleInterval` (default 1s, up to 20% jitter); a slot whose work function returned `nil` waits `Config.RerunInterval` (default 1s, up to 20% jitter) before running again; a slot whose work function failed waits `Config.BackoffInterval` (default 1s) and calls `OnSlotBackoff`. Set `pool.Config.Observer` to a `pool.Observer` to receive slot lifecycle events (`OnSlotAcquired` / `OnSlotLost` / `OnSlotBackoff` / `OnSlotDead` / `OnSlotRetired`), and call `ActiveSlots()` for a point-in-time view of slots currently executing their work function. Construction errors are distinct sentinels (`ErrNilLease` / `ErrEmptyWorkIDs` / `ErrEmptyWorkID` / `ErrDuplicateWorkID` / `ErrWithWaitForLeaseProhibited`) that all satisfy `errors.Is(err, pool.ErrConfigInvalid)`; every work ID must be non-empty and unique.
 
 ### checkpoint — Typed serialization helpers
 
@@ -294,7 +306,7 @@ Return `worklease.ErrRetire` (or wrap it) from the work function to retire the w
 
 ### Observability — LeaseObserver
 
-Set `worklease.Config.Observer` to a `LeaseObserver` to receive a synchronous callback after every lease operation — `OnAcquire`, `OnCheckpoint`, `OnRenew`, `OnRelease`, `OnReadCheckpoint`, and `OnFenced` — each with a per-operation event struct carrying the `Token`, error, and a `Duration` for the final backend call. nil installs a no-op, so observability is fully opt-in. See [`examples/observability`](examples/observability/) for a stdlib-only implementation.
+Set `worklease.Config.Observer` to a `LeaseObserver` to receive a synchronous callback after every lease operation — `OnAcquire`, `OnCheckpoint`, `OnRenew`, `OnRelease`, `OnReadCheckpoint`, and `OnForget` — each with an event struct carrying the `Token`, the error, and a `Duration` for the backend call. `OnFenced` fires in addition when `Checkpoint`, `Renew`, `Release`, or `Forget` is fenced. nil installs a no-op, so observability is fully opt-in. `Vacuum` is observed separately: set `worklease.VacuumConfig.Observer` to a `VacuumObserver` to receive `OnSweep` with each sweep's options, rows deleted, duration, and error. See [`examples/observability`](examples/observability/) for a stdlib-only implementation of both.
 
 ---
 
@@ -348,12 +360,20 @@ if err := lease.Forget(ctx, token); err != nil {
 }
 
 // Periodically delete retired rows last updated more than a week ago.
-n, err := worklease.NewVacuum(b).Sweep(ctx, worklease.SweepOptions{
+vacuum, err := worklease.NewVacuum(b, worklease.VacuumConfig{})
+if err != nil {
+    return err // ErrNilBackend
+}
+n, err := vacuum.Sweep(ctx, worklease.SweepOptions{
     Retention: 7 * 24 * time.Hour,
 })
 ```
 
 `Sweep` deletes rows released with `ExitRetired` once they are older than `Retention`. With `IncludeExpired: true` it also deletes rows whose lease expired with no declared exit, which discards the partial state a successor would have recovered from. Rows released with `ExitFinished` or `ExitAbandoned`, and rows currently held, are never deleted. `Retention` is how long a retired or expired row is kept after its last update; it is not tied to the TTL. After `Forget` or `Sweep`, the next holder sees `ExitNone`, and a holder whose row was removed gets `ErrFenced`. Do not run `Sweep` while v0.5 processes still share the table (see `UPGRADING.md`).
+
+`Forget` is reported to `LeaseObserver.OnForget`, and each `Sweep` that reaches the backend to `VacuumConfig.Observer`.
+
+Configuration errors are matchable: every error `worklease.New` returns, and `ErrNilBackend` from `NewVacuum` and `Vacuum.Sweep`, satisfies `errors.Is(err, worklease.ErrConfigInvalid)`.
 
 ## Backends
 
@@ -383,8 +403,6 @@ CREATE TABLE IF NOT EXISTS worklease_leases (
     fencing_token   BIGINT      NOT NULL DEFAULT nextval('worklease_fencing_seq'),
     expires_at      TIMESTAMPTZ NOT NULL,
     checkpoint      BYTEA,
-    -- Deprecated: unread and unwritten since v0.6.0 (ADR-0018). Kept so a rollback to v0.5 does not fail; dropped in a later release (#86).
-    clean_handoff   BOOLEAN     NOT NULL DEFAULT FALSE,
     exit_mode       TEXT,
     prev_exit_mode  TEXT        NOT NULL DEFAULT 'none',
     prev_holder_id  TEXT,
@@ -401,6 +419,8 @@ CREATE INDEX IF NOT EXISTS idx_worklease_leases_updated_at
 ```
 
 The atomic checkpoint operation is a single `UPDATE ... WHERE fencing_token = $n`. Zero rows updated means the token is stale. There is no Lua script, no optimistic retry loop, no distributed clock dependency.
+
+The backend requires the READ COMMITTED isolation level, the PostgreSQL default. Under REPEATABLE READ or SERIALIZABLE, a contended `Acquire` fails with a serialization error (SQLSTATE 40001) instead of returning `ErrLeaseHeld`. If your database or role defaults to another level, pin it for the role worklease connects as: `ALTER ROLE worklease_role SET default_transaction_isolation = 'read committed';`. The schema drops the deprecated `clean_handoff` column as of v0.7; existing databases drop it with the step in `UPGRADING.md`. A statement cancelled or timed out by its context returns an error that wraps both the driver error and `ctx.Err()` (#113); the `Backend` contract requires custom backends to match `ctx.Err()` the same way.
 
 ### In-memory (testing)
 
@@ -460,11 +480,11 @@ Requires Go 1.25+. PostgreSQL backend requires PostgreSQL 12+.
 
 ## Status
 
-v0.6.0 is the latest release line. The core lease model (`Lease`, `Token`, fencing, options, sentinels) is stable; v0.6 changes several signatures, so read `UPGRADING.md` before upgrading.
+v0.7.0 is the latest release line. The core lease model (`Lease`, `Token`, fencing, options, sentinels) is stable; v0.7 changes several signatures and behaviors, so read `UPGRADING.md` before upgrading.
 
-v0.6 adds caller-governed row lifecycle: `Lease.Forget` deletes one row, and `worklease.Vacuum.Sweep` deletes retired rows (and, with `IncludeExpired`, expired rows) older than a retention period. It also replaces the `cleanHandoff` flag with explicit exit modes (ADR-0018). `Release(ctx, token, mode)` records `ExitFinished`, `ExitAbandoned`, or `ExitRetired`; `ReadCheckpoint` returns a `Checkpoint` with `PrevExit` and `PrevHolderID`; and `worker.Runner`, `leader.Elect`, and `pool` record each run's outcome, release on a cleanup context bounded by `CleanupTimeout`, and support retiring a work ID with `worklease.ErrRetire`.
+v0.7 bounds renewal by the lease window. Each `Renew` call runs with a deadline at the window, `stopRenewal` no longer waits for an in-flight call, and the renewal context is cancelled with `ErrLeaseWindowExhausted` when the window closes, even while a `Renew` call is stalled. Work code reads the window with `worklease.LeaseWindow(ctx)`. Errors become matchable: every `worklease.New` error matches `ErrConfigInvalid`, and a PostgreSQL statement cancelled mid-flight returns an error matching `ctx.Err()`. `Forget` and `Vacuum.Sweep` are observable through `LeaseObserver.OnForget` and `VacuumObserver`, and the `integration/` suite runs on both backends.
 
-Breaking changes: a PostgreSQL schema migration is required before deploying; `Release` and `ReadCheckpoint` change on both `Lease` and `Backend`, as do the `worker`/`pool` work-function signatures; `ReadCheckpointEvent.CleanHandoff` is replaced by `PrevExit` and `PrevHolderID`; custom `Backend` and `Lease` implementations must add `Forget` (and `Sweep` for backends); custom `pool.Observer` implementations must add `OnSlotRetired`; and `pool.Config.BackoffInterval` zero now means 1s. See `UPGRADING.md` and `CHANGELOG.md`.
+Breaking changes: `worklease.New` rejects a TTL below 1ms; the PostgreSQL backend requires READ COMMITTED and its schema no longer creates the deprecated `clean_handoff` column; `NewVacuum` takes a `VacuumConfig` and returns an error; custom `LeaseObserver` implementations must add `OnForget`; `pool.New` rejects empty and duplicate work IDs; and `leader.Elect` waits `Config.IdleInterval` before returning `ErrLeaseHeld`. See `UPGRADING.md` and `CHANGELOG.md`.
 
 ---
 
@@ -478,6 +498,7 @@ Breaking changes: a PostgreSQL schema migration is required before deploying; `R
 - **v0.4.0** — `LeaseObserver` event-struct redesign (breaking), `backend/conformance` suite, `pool.Observer`/`Permanent`/`ErrAllSlotsDead`, `leader` lifecycle callbacks, memory slice-ownership fix
 - **v0.5.0** — bounded renewal retry (`WithRenewalBackoff`, `ErrLeaseWindowExhausted`, `RenewEvent.Attempt`); global fencing sequence on both backends; single-statement `Acquire` with `RETURNING`; ctx-aware `Acquire` cancellation under `WithWaitForLease` (breaking — see `UPGRADING.md`)
 - **v0.6.0** — caller-governed row lifecycle: `Lease.Forget`, `worklease.Vacuum.Sweep` (breaking — new `Backend`/`Lease` interface methods for custom implementations; see `UPGRADING.md`); explicit exit modes (ADR-0018) — schema migration required, see `UPGRADING.md`
+- **v0.7.0** — renewal bounded by the lease window (`LeaseWindow`, per-attempt `Renew` deadline, `stopRenewal` no longer waits on backend I/O); `ErrConfigInvalid` and context-matching PostgreSQL errors; observable `Forget` and `Sweep` (`OnForget`, `VacuumObserver`); 1ms TTL floor, READ COMMITTED, `NewVacuum(b, cfg)`, `pool.New` work ID validation, `Elect` pacing (breaking — see `UPGRADING.md`)
 
 ### Future
 - Redis backend, etcd backend (unscheduled, post-1.0)

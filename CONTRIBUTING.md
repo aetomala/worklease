@@ -55,6 +55,8 @@ WORKLEASE_TEST_POSTGRES_DSN="postgres://user:pass@localhost/worklease_test?sslmo
     go test -race -tags integration ./backend/postgres/...
 ```
 
+The same variable, `WORKLEASE_TEST_POSTGRES_DSN`, also runs the `integration/` suite against PostgreSQL, in its own schema `worklease_integration`: `go test ./integration/...`. With `WORKLEASE_REQUIRE_POSTGRES` set, a missing DSN fails that suite too instead of skipping its PostgreSQL specs.
+
 ---
 
 ## Pull request guidelines

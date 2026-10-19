@@ -88,3 +88,7 @@ See `UPGRADING.md` (v0.3 → v0.4) for the migration.
 - `worklease.go` / `acquire.go` / `renewal.go` — `leaseClient` observer call sites
 - `examples/observability` — stdlib-only `LeaseObserver` reference implementation
 - `worklease.go` — `Config.Observer` field; `New()` observer resolution
+
+## Amendment (2026-10-17) — v0.7: OnForget and VacuumObserver
+
+`LeaseObserver` gains `OnForget(ctx, ForgetEvent)` (#92). `Forget` was the only `Lease` method that reported nothing, so a fenced `Forget` was invisible. It now fires `OnForget` after every call and `OnFenced` with the new `OperationForget` when fenced, in the same order as `Checkpoint`, `Renew`, and `Release`. Adding the method breaks custom implementations; an optional extension interface detected by type assertion was rejected, because an observer that misses it compiles and silently loses events. `Vacuum` is not a `Lease`, so `Sweep` reports through its own interface, `VacuumObserver.OnSweep`, injected through `VacuumConfig.Observer`. Whether to export an embeddable no-op observer, so later methods do not break custom implementations, is left to the 1.0 API audit (#96).

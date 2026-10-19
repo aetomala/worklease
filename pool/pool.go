@@ -24,6 +24,14 @@ var (
 	// ErrEmptyWorkIDs is returned by New when cfg.WorkIDs is empty.
 	ErrEmptyWorkIDs = fmt.Errorf("pool: WorkIDs must not be empty: %w", ErrConfigInvalid)
 
+	// ErrEmptyWorkID is returned by New when an entry of cfg.WorkIDs is the
+	// empty string. The returned error names the entry's index.
+	ErrEmptyWorkID = fmt.Errorf("pool: work ID must not be empty: %w", ErrConfigInvalid)
+
+	// ErrDuplicateWorkID is returned by New when a work ID appears more than
+	// once in cfg.WorkIDs. The returned error names the work ID and both indices.
+	ErrDuplicateWorkID = fmt.Errorf("pool: duplicate work ID: %w", ErrConfigInvalid)
+
 	// ErrWithWaitForLeaseProhibited is returned by New when cfg.AcquireOptions includes WithWaitForLease.
 	ErrWithWaitForLeaseProhibited = fmt.Errorf("pool: WithWaitForLease is prohibited in AcquireOptions: %w", ErrConfigInvalid)
 
@@ -135,7 +143,9 @@ const (
 // Config holds construction parameters for a Pool.
 type Config struct {
 	// WorkIDs is the fixed set of work IDs this pool competes for.
-	// Required; an empty slice returns ErrEmptyWorkIDs from New.
+	// Required; an empty slice returns ErrEmptyWorkIDs from New. Every entry
+	// must be non-empty and unique: New returns ErrEmptyWorkID for an empty
+	// entry and ErrDuplicateWorkID for a repeated one.
 	WorkIDs []string
 
 	// AcquireOptions are passed to each slot's internal Runner. Passing
@@ -190,8 +200,11 @@ type Pool struct {
 
 // New constructs a Pool. Does not start slot acquisition — call Run.
 // Returns ErrNilLease if lease is nil, ErrEmptyWorkIDs if cfg.WorkIDs is empty,
+// ErrEmptyWorkID if an entry of cfg.WorkIDs is the empty string,
+// ErrDuplicateWorkID if a work ID appears more than once, and
 // ErrWithWaitForLeaseProhibited if cfg.AcquireOptions includes WithWaitForLease.
-// All three satisfy errors.Is(err, ErrConfigInvalid).
+// All five satisfy errors.Is(err, ErrConfigInvalid). Entries are checked in
+// index order, and the first invalid entry is reported.
 func New(lease worklease.Lease, cfg Config, fn WorkFn) (*Pool, error) {
 	// ===== STEP 1: Nil lease check =====
 	if lease == nil {
@@ -203,12 +216,24 @@ func New(lease worklease.Lease, cfg Config, fn WorkFn) (*Pool, error) {
 		return nil, ErrEmptyWorkIDs
 	}
 
-	// ===== STEP 3: WithWaitForLease check =====
+	// ===== STEP 3: Empty and duplicate work ID checks, in index order =====
+	firstIndex := make(map[string]int, len(cfg.WorkIDs))
+	for i, id := range cfg.WorkIDs {
+		if id == "" {
+			return nil, fmt.Errorf("pool: New: WorkIDs[%d]: %w", i, ErrEmptyWorkID)
+		}
+		if first, seen := firstIndex[id]; seen {
+			return nil, fmt.Errorf("pool: New: WorkIDs[%d] and WorkIDs[%d] are both %q: %w", first, i, id, ErrDuplicateWorkID)
+		}
+		firstIndex[id] = i
+	}
+
+	// ===== STEP 4: WithWaitForLease check =====
 	if worklease.HasWaitForLease(cfg.AcquireOptions) {
 		return nil, ErrWithWaitForLeaseProhibited
 	}
 
-	// ===== STEP 4: Apply pacing defaults for zero or negative values =====
+	// ===== STEP 5: Apply pacing defaults for zero or negative values =====
 	if cfg.IdleInterval <= 0 {
 		cfg.IdleInterval = defaultIdleInterval
 	}
@@ -219,7 +244,7 @@ func New(lease worklease.Lease, cfg Config, fn WorkFn) (*Pool, error) {
 		cfg.BackoffInterval = defaultBackoffInterval
 	}
 
-	// ===== STEP 5: Inject NoOp observer when nil =====
+	// ===== STEP 6: Inject NoOp observer when nil =====
 	obs := cfg.Observer
 	if obs == nil {
 		obs = noopPoolObserver{}

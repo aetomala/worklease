@@ -62,3 +62,64 @@ func TestWithRenewalBackoffClamping(t *testing.T) {
 		})
 	}
 }
+
+// TestBackoffWait verifies that backoffWait draws from [base, base+jitter*base),
+// that the draws spread across that range, and that a jitter of zero or less
+// returns base exactly.
+func TestBackoffWait(t *testing.T) {
+	const base = 100 * time.Millisecond
+	const jitter = 0.2
+	upper := base + time.Duration(jitter*float64(base))
+	lo, hi := upper, time.Duration(0)
+	for range 10_000 {
+		d := backoffWait(base, jitter)
+		if d < base || d >= upper {
+			t.Fatalf("backoffWait(%v, %v) = %v, want in [%v, %v)", base, jitter, d, base, upper)
+		}
+		lo, hi = min(lo, d), max(hi, d)
+	}
+	if spread := hi - lo; spread <= time.Duration(jitter*float64(base))/10 {
+		t.Errorf("10,000 draws spread over %v, want more than %v", spread, time.Duration(jitter*float64(base))/10)
+	}
+	for _, j := range []float64{0, -1} {
+		if d := backoffWait(base, j); d != base {
+			t.Errorf("backoffWait(%v, %v) = %v, want %v", base, j, d, base)
+		}
+	}
+}
+
+// TestNextBackoff verifies that nextBackoff doubles its base and caps the result
+// at maxInterval.
+func TestNextBackoff(t *testing.T) {
+	cases := []struct {
+		base, maxInterval, want time.Duration
+	}{
+		{100 * time.Millisecond, 5 * time.Second, 200 * time.Millisecond},
+		{3 * time.Second, 5 * time.Second, 5 * time.Second},
+		{2500 * time.Millisecond, 5 * time.Second, 5 * time.Second},
+		{5 * time.Second, 5 * time.Second, 5 * time.Second},
+	}
+	for _, tc := range cases {
+		if got := nextBackoff(tc.base, tc.maxInterval); got != tc.want {
+			t.Errorf("nextBackoff(%v, %v) = %v, want %v", tc.base, tc.maxInterval, got, tc.want)
+		}
+	}
+}
+
+// TestWithRenewalIntervalIgnoresNonPositive verifies that WithRenewalInterval
+// keeps the prior interval for zero and negative values and sets a positive one.
+func TestWithRenewalIntervalIgnoresNonPositive(t *testing.T) {
+	const prior = 15 * time.Second
+	for _, d := range []time.Duration{0, -time.Second} {
+		c := renewalConfig{renewalInterval: prior}
+		WithRenewalInterval(d)(&c)
+		if c.renewalInterval != prior {
+			t.Errorf("WithRenewalInterval(%v): renewalInterval = %v, want %v", d, c.renewalInterval, prior)
+		}
+	}
+	c := renewalConfig{renewalInterval: prior}
+	WithRenewalInterval(50 * time.Millisecond)(&c)
+	if c.renewalInterval != 50*time.Millisecond {
+		t.Errorf("WithRenewalInterval(50ms): renewalInterval = %v, want 50ms", c.renewalInterval)
+	}
+}

@@ -3,6 +3,7 @@ package memory_test
 import (
 	"context"
 	"errors"
+	"fmt"
 	"time"
 
 	. "github.com/onsi/ginkgo/v2"
@@ -314,6 +315,12 @@ var _ = Describe("Backend (memory)", func() {
 		})
 
 		Describe("Backend.Acquire", func() {
+			It("Acquire stores an expiry exactly ttl after the backend clock", func() {
+				rec, err := b.Acquire(ctx, "w-ttl", "h1", 7*time.Second)
+				Expect(err).NotTo(HaveOccurred())
+				Expect(rec.ExpiresAt.Equal(fc.Now().Add(7*time.Second))).To(BeTrue(), "ExpiresAt %v", rec.ExpiresAt)
+			})
+
 			Context("when the lease exists and has not expired per the injected clock", func() {
 				It("returns ErrLeaseHeld", func() {
 					_, err := b.Acquire(ctx, "w1", "h1", 10*time.Second)
@@ -439,6 +446,33 @@ var _ = Describe("Backend (memory)", func() {
 		})
 
 		Describe("Backend.Sweep", func() {
+			It("deletes all 30 eligible rows when 90 kept rows of three kinds are interleaved", func() {
+				// At t0: 30 retired rows (deletable later), 30 finished rows (kept by
+				// the exit-mode check), 30 rows held with a 2h TTL (kept by the expiry
+				// check). One hour later: 30 retired rows too new for the 30m
+				// retention (kept by the retention check).
+				for i := range 30 {
+					rec, err := b.Acquire(ctx, fmt.Sprintf("retired-old-%d", i), "h1", time.Minute)
+					Expect(err).NotTo(HaveOccurred())
+					Expect(b.Release(ctx, rec, backend.ExitRetired)).To(Succeed())
+					rec, err = b.Acquire(ctx, fmt.Sprintf("finished-%d", i), "h1", time.Minute)
+					Expect(err).NotTo(HaveOccurred())
+					Expect(b.Release(ctx, rec, backend.ExitFinished)).To(Succeed())
+					_, err = b.Acquire(ctx, fmt.Sprintf("held-%d", i), "h1", 2*time.Hour)
+					Expect(err).NotTo(HaveOccurred())
+				}
+				fc.Advance(time.Hour)
+				for i := range 30 {
+					rec, err := b.Acquire(ctx, fmt.Sprintf("retired-new-%d", i), "h1", time.Minute)
+					Expect(err).NotTo(HaveOccurred())
+					Expect(b.Release(ctx, rec, backend.ExitRetired)).To(Succeed())
+				}
+
+				n, err := b.Sweep(ctx, backend.SweepOptions{Retention: 30 * time.Minute})
+				Expect(err).NotTo(HaveOccurred())
+				Expect(n).To(Equal(int64(30)))
+			})
+
 			Context("when a released row's age equals Retention exactly", func() {
 				It("keeps the row — matches postgres updated_at < NOW() - retention", func() {
 					rec, _ := b.Acquire(ctx, "w1", "h1", 5*time.Second)

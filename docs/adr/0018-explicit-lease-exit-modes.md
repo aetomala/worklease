@@ -277,3 +277,7 @@ The audit's reproductions are all expressible: a crash before the first checkpoi
 - `backend/conformance/conformance.go` — handoff and `Sweep` specs to be replaced
 - `worker/runner.go`, `leader/leader.go`, `pool/pool.go` — the exit mapping
 - `REVIEW-v0.6.0.md` §5.4.1 and §5.4.9 — the audit discussion this ADR resolves
+
+## Amendment (2026-10-17) — v0.7: clean_handoff dropped
+
+The deprecated `clean_handoff` column, unread and unwritten since v0.6, is removed from `schema.sql` (#86). `UPGRADING.md` drops it from existing tables with `ALTER TABLE worklease_leases DROP COLUMN IF EXISTS clean_handoff`, to run only after no v0.5 process remains; after it runs, a rollback to v0.5 is no longer possible. v0.6 and v0.7 processes can share the table before and after the drop. This closes the rolling-upgrade concern recorded in the Migration section.

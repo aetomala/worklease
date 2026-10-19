@@ -4,8 +4,10 @@ import (
 	"context"
 	"database/sql"
 	"errors"
+	"fmt"
 	"time"
 
+	"github.com/lib/pq"
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
 
@@ -280,21 +282,13 @@ var _ = Describe("Backend (postgres)", func() {
 			Expect(prevHolder.String).To(Equal("holder-a"))
 		})
 
-		It("Acquire never writes clean_handoff: the column keeps its value across Acquire, Checkpoint, and Release", func() {
-			record, err := b.Acquire(ctx, "x2", "holder-a", 30*time.Second)
+		It("schema has no clean_handoff column", func() {
+			var n int
+			err := db.QueryRowContext(ctx,
+				"SELECT count(*) FROM information_schema.columns WHERE table_schema = current_schema() AND table_name = 'worklease_leases' AND column_name = 'clean_handoff'",
+			).Scan(&n)
 			Expect(err).NotTo(HaveOccurred())
-			_, err = db.ExecContext(ctx, "UPDATE worklease_leases SET clean_handoff = TRUE WHERE work_id = $1", "x2")
-			Expect(err).NotTo(HaveOccurred())
-
-			Expect(b.Checkpoint(ctx, record, []byte("s"), 30*time.Second)).To(Succeed())
-			Expect(b.Release(ctx, record, backend.ExitAbandoned)).To(Succeed())
-			_, err = b.Acquire(ctx, "x2", "holder-b", 30*time.Second)
-			Expect(err).NotTo(HaveOccurred())
-
-			var cleanHandoff bool
-			err = db.QueryRowContext(ctx, "SELECT clean_handoff FROM worklease_leases WHERE work_id = $1", "x2").Scan(&cleanHandoff)
-			Expect(err).NotTo(HaveOccurred())
-			Expect(cleanHandoff).To(BeTrue())
+			Expect(n).To(BeZero())
 		})
 
 		It("schema rejects exit_mode = 'bogus' with a check violation", func() {
@@ -309,6 +303,60 @@ var _ = Describe("Backend (postgres)", func() {
 			Expect(err).NotTo(HaveOccurred())
 			_, err = db.ExecContext(ctx, "UPDATE worklease_leases SET prev_exit_mode = 'bogus' WHERE work_id = $1", "x4")
 			Expect(err).To(MatchError(ContainSubstring("worklease_leases_prev_exit_mode_check")))
+		})
+	})
+
+	Describe("isolation level (#89)", func() {
+		// contend starts 20 Acquire calls on workID together behind a channel and
+		// returns how many won and how many got ErrLeaseHeld. Any other error
+		// fails the spec.
+		contend := func(workID string) (won, held int) {
+			const callers = 20
+			startCh := make(chan struct{})
+			results := make(chan error, callers)
+			for i := range callers {
+				go func() {
+					<-startCh
+					_, err := b.Acquire(ctx, workID, fmt.Sprintf("holder-%d", i), 30*time.Second)
+					results <- err
+				}()
+			}
+			close(startCh)
+			for range callers {
+				err := <-results
+				Expect(err == nil || errors.Is(err, worklease.ErrLeaseHeld)).To(BeTrue(), "unexpected Acquire error: %v", err)
+				if err == nil {
+					won++
+				} else {
+					held++
+				}
+			}
+			return won, held
+		}
+
+		It("the test database defaults to READ COMMITTED", func() {
+			var level string
+			Expect(db.QueryRowContext(ctx, "SHOW default_transaction_isolation").Scan(&level)).To(Succeed())
+			Expect(level).To(Equal("read committed"))
+		})
+
+		It("contended Acquire on a work ID with no row: one of 20 concurrent callers wins and the other 19 get ErrLeaseHeld, in each of 20 rounds", func() {
+			for round := range 20 {
+				won, held := contend(fmt.Sprintf("iso-new-%d", round))
+				Expect(won).To(Equal(1), "round %d", round)
+				Expect(held).To(Equal(19), "round %d", round)
+			}
+		})
+
+		It("contended Acquire on an expired row: one of 20 concurrent callers wins and the other 19 get ErrLeaseHeld, in each of 20 rounds", func() {
+			for round := range 20 {
+				workID := fmt.Sprintf("iso-expired-%d", round)
+				_, err := b.Acquire(ctx, workID, "seed", -time.Second)
+				Expect(err).NotTo(HaveOccurred())
+				won, held := contend(workID)
+				Expect(won).To(Equal(1), "round %d", round)
+				Expect(held).To(Equal(19), "round %d", round)
+			}
 		})
 	})
 
@@ -421,6 +469,219 @@ var _ = Describe("Backend (postgres)", func() {
 			Expect(err).NotTo(HaveOccurred())
 			Expect(cp.PrevExit).To(Equal(worklease.ExitAbandoned))
 			Expect(cp.PrevHolderID).To(Equal("leader-a"))
+		})
+	})
+
+	// storedSpan returns expires_at - acquired_at for workID, measured in SQL so
+	// only the server clock is involved.
+	storedSpan := func(workID string) time.Duration {
+		var us float64
+		Expect(db.QueryRowContext(ctx,
+			"SELECT EXTRACT(EPOCH FROM (expires_at - acquired_at)) * 1000000 FROM worklease_leases WHERE work_id = $1",
+			workID).Scan(&us)).To(Succeed())
+		return time.Duration(us) * time.Microsecond
+	}
+	stamps := func(workID string) (acquiredAt, updatedAt time.Time) {
+		Expect(db.QueryRowContext(ctx,
+			"SELECT acquired_at, updated_at FROM worklease_leases WHERE work_id = $1",
+			workID).Scan(&acquiredAt, &updatedAt)).To(Succeed())
+		return acquiredAt, updatedAt
+	}
+
+	It("Acquire stores an expiry at least ttl after the server's acquisition time, rounding 1500ns up", func() {
+		_, err := b.Acquire(ctx, "ttl-1", "holder-a", 1500*time.Nanosecond)
+		Expect(err).NotTo(HaveOccurred())
+		Expect(storedSpan("ttl-1")).To(BeNumerically(">=", 1500*time.Nanosecond))
+
+		time.Sleep(time.Millisecond) // the 1500ns lease has expired; reacquire it
+		_, err = b.Acquire(ctx, "ttl-1", "holder-b", 30*time.Second)
+		Expect(err).NotTo(HaveOccurred())
+		Expect(storedSpan("ttl-1")).To(BeNumerically(">=", 30*time.Second))
+	})
+
+	It("Acquire on reacquisition sets acquired_at to the reacquisition time", func() {
+		rec, err := b.Acquire(ctx, "acq-1", "holder-a", 30*time.Second)
+		Expect(err).NotTo(HaveOccurred())
+		first, _ := stamps("acq-1")
+
+		Expect(b.Renew(ctx, rec, 30*time.Second)).To(Succeed())
+		afterRenew, _ := stamps("acq-1")
+		Expect(afterRenew.Equal(first)).To(BeTrue(), "Renew changed acquired_at")
+
+		Expect(b.Release(ctx, rec, backend.ExitFinished)).To(Succeed())
+		time.Sleep(10 * time.Millisecond)
+		_, err = b.Acquire(ctx, "acq-1", "holder-b", 30*time.Second)
+		Expect(err).NotTo(HaveOccurred())
+		acquiredAt, updatedAt := stamps("acq-1")
+		Expect(acquiredAt).To(BeTemporally(">", first))
+		Expect(acquiredAt.Equal(updatedAt)).To(BeTrue(), "acquired_at %v, updated_at %v", acquiredAt, updatedAt)
+	})
+
+	Context("when a statement is cancelled mid-flight (#113)", func() {
+		// holdLock runs query on a second connection inside an open transaction,
+		// so a backend statement on the locked row or table blocks inside
+		// PostgreSQL until the transaction ends. It is rolled back in DeferCleanup.
+		holdLock := func(query string, args ...any) {
+			tx, err := db.BeginTx(ctx, nil)
+			Expect(err).NotTo(HaveOccurred())
+			DeferCleanup(func() { _ = tx.Rollback() })
+			_, err = tx.ExecContext(ctx, query, args...)
+			Expect(err).NotTo(HaveOccurred())
+		}
+		lockRow := func(workID string) {
+			holdLock("SELECT 1 FROM worklease_leases WHERE work_id = $1 FOR UPDATE", workID)
+		}
+		// cancelled returns a context that is cancelled after 300ms, and expired
+		// one whose deadline passes after 300ms, both while the statement waits.
+		cancelled := func() context.Context {
+			c, cancelC := context.WithCancel(ctx)
+			time.AfterFunc(300*time.Millisecond, cancelC)
+			DeferCleanup(cancelC)
+			return c
+		}
+		expired := func() context.Context {
+			c, cancelC := context.WithTimeout(ctx, 300*time.Millisecond)
+			DeferCleanup(cancelC)
+			return c
+		}
+		// releasedRow leaves an expired row for workID, so Acquire's upsert takes
+		// the ON CONFLICT path and waits on the row lock.
+		releasedRow := func(workID string) {
+			rec, err := b.Acquire(ctx, workID, "holder-old", 30*time.Second)
+			Expect(err).NotTo(HaveOccurred())
+			Expect(b.Release(ctx, rec, backend.ExitFinished)).To(Succeed())
+		}
+		heldLease := func(workID string) backend.LeaseRecord {
+			rec, err := b.Acquire(ctx, workID, "holder-1", 30*time.Second)
+			Expect(err).NotTo(HaveOccurred())
+			return rec
+		}
+		expectDriverCancel := func(err error) {
+			var pqErr *pq.Error
+			Expect(errors.As(err, &pqErr)).To(BeTrue(), "no *pq.Error in %v", err)
+			Expect(string(pqErr.Code)).To(Equal("57014"))
+		}
+		newLease := func() worklease.Lease {
+			l, err := worklease.New(b, worklease.Config{TTL: 30 * time.Second, HolderID: "holder-2"})
+			Expect(err).NotTo(HaveOccurred())
+			return l
+		}
+		noFn := func(context.Context) error {
+			Fail("fn must not run: Acquire was cancelled")
+			return nil
+		}
+		newRunner := func(l worklease.Lease) *worker.Runner {
+			r, err := worker.NewRunner(worker.RunnerConfig{
+				Lease: l,
+				WorkFn: func(context.Context, worklease.Token, worklease.Checkpoint) ([]byte, error) {
+					Fail("WorkFn must not run: Acquire was cancelled")
+					return nil, nil
+				},
+			})
+			Expect(err).NotTo(HaveOccurred())
+			return r
+		}
+
+		It("Acquire: cancellation → errors.Is context.Canceled, and the *pq.Error with code 57014 is still found", func() {
+			releasedRow("mid-1")
+			lockRow("mid-1")
+			_, err := b.Acquire(cancelled(), "mid-1", "holder-2", 30*time.Second)
+			Expect(errors.Is(err, context.Canceled)).To(BeTrue(), "%v", err)
+			expectDriverCancel(err)
+		})
+
+		It("Acquire: deadline → errors.Is context.DeadlineExceeded, and the *pq.Error with code 57014 is still found", func() {
+			releasedRow("mid-2")
+			lockRow("mid-2")
+			_, err := b.Acquire(expired(), "mid-2", "holder-2", 30*time.Second)
+			Expect(errors.Is(err, context.DeadlineExceeded)).To(BeTrue(), "%v", err)
+			expectDriverCancel(err)
+		})
+
+		It("Checkpoint: cancellation → errors.Is context.Canceled", func() {
+			rec := heldLease("mid-3")
+			lockRow("mid-3")
+			err := b.Checkpoint(cancelled(), rec, []byte("state"), 30*time.Second)
+			Expect(errors.Is(err, context.Canceled)).To(BeTrue(), "%v", err)
+		})
+
+		It("Renew: cancellation → errors.Is context.Canceled", func() {
+			rec := heldLease("mid-4")
+			lockRow("mid-4")
+			err := b.Renew(cancelled(), rec, 30*time.Second)
+			Expect(errors.Is(err, context.Canceled)).To(BeTrue(), "%v", err)
+		})
+
+		It("Release: cancellation → errors.Is context.Canceled", func() {
+			rec := heldLease("mid-5")
+			lockRow("mid-5")
+			err := b.Release(cancelled(), rec, backend.ExitFinished)
+			Expect(errors.Is(err, context.Canceled)).To(BeTrue(), "%v", err)
+		})
+
+		It("Forget: cancellation → errors.Is context.Canceled", func() {
+			rec := heldLease("mid-6")
+			lockRow("mid-6")
+			err := b.Forget(cancelled(), rec)
+			Expect(errors.Is(err, context.Canceled)).To(BeTrue(), "%v", err)
+		})
+
+		It("Sweep: cancellation → errors.Is context.Canceled", func() {
+			rec := heldLease("mid-7")
+			Expect(b.Release(ctx, rec, backend.ExitRetired)).To(Succeed())
+			time.Sleep(20 * time.Millisecond) // older than the 1ms retention below
+			lockRow("mid-7")
+			_, err := b.Sweep(cancelled(), backend.SweepOptions{Retention: time.Millisecond})
+			Expect(errors.Is(err, context.Canceled)).To(BeTrue(), "%v", err)
+		})
+
+		It("ReadCheckpoint: cancellation → errors.Is context.Canceled", func() {
+			rec := heldLease("mid-8")
+			holdLock("LOCK TABLE worklease_leases IN ACCESS EXCLUSIVE MODE")
+			_, err := b.ReadCheckpoint(cancelled(), rec)
+			Expect(errors.Is(err, context.Canceled)).To(BeTrue(), "%v", err)
+		})
+
+		It("Lease.Acquire with WithWaitForLease: cancellation → errors.Is context.Canceled", func() {
+			releasedRow("mid-9")
+			lockRow("mid-9")
+			_, err := newLease().Acquire(cancelled(), "mid-9", worklease.WithWaitForLease())
+			Expect(errors.Is(err, context.Canceled)).To(BeTrue(), "%v", err)
+		})
+
+		It("Lease.Acquire with WithWaitForLease: deadline → errors.Is context.DeadlineExceeded", func() {
+			releasedRow("mid-10")
+			lockRow("mid-10")
+			_, err := newLease().Acquire(expired(), "mid-10", worklease.WithWaitForLease())
+			Expect(errors.Is(err, context.DeadlineExceeded)).To(BeTrue(), "%v", err)
+		})
+
+		It("leader.Elect: cancellation → errors.Is context.Canceled", func() {
+			releasedRow("mid-11")
+			lockRow("mid-11")
+			err := leader.Elect(cancelled(), newLease(), "mid-11", leader.Config{}, noFn)
+			Expect(errors.Is(err, context.Canceled)).To(BeTrue(), "%v", err)
+		})
+
+		It("leader.Elect: deadline → errors.Is context.DeadlineExceeded", func() {
+			releasedRow("mid-12")
+			lockRow("mid-12")
+			err := leader.Elect(expired(), newLease(), "mid-12", leader.Config{}, noFn)
+			Expect(errors.Is(err, context.DeadlineExceeded)).To(BeTrue(), "%v", err)
+		})
+
+		It("worker.Runner.Run: cancellation → errors.Is context.Canceled", func() {
+			releasedRow("mid-13")
+			lockRow("mid-13")
+			err := newRunner(newLease()).Run(cancelled(), "mid-13")
+			Expect(errors.Is(err, context.Canceled)).To(BeTrue(), "%v", err)
+		})
+
+		It("worker.Runner.Run: deadline → errors.Is context.DeadlineExceeded", func() {
+			releasedRow("mid-14")
+			lockRow("mid-14")
+			err := newRunner(newLease()).Run(expired(), "mid-14")
+			Expect(errors.Is(err, context.DeadlineExceeded)).To(BeTrue(), "%v", err)
 		})
 	})
 })

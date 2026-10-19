@@ -11,7 +11,8 @@ import (
 
 // Config holds configuration for a Lease instance.
 type Config struct {
-	// TTL is the time-to-live for acquired leases. Required; zero or negative returns an error.
+	// TTL is the time-to-live for acquired leases. Required; New returns an
+	// error for zero, for a negative value, and for any value below 1ms.
 	TTL time.Duration
 
 	// HolderID is the identifier of the entity that will hold leases. Required; empty returns an error.
@@ -20,6 +21,11 @@ type Config struct {
 	// Observer is the LeaseObserver that will be notified of lease events. Optional; nil defaults to noopObserver.
 	Observer LeaseObserver
 }
+
+// The minTTL constant is the smallest TTL New accepts. A shorter TTL would be
+// shorter than the one-millisecond offset Release writes into the past
+// (ADR-0012), and PostgreSQL intervals resolve only to the microsecond.
+const minTTL = time.Millisecond
 
 // leaseClient implements the Lease interface. It wraps a Backend and delegates
 // all operations to it, translating between the exported Token API and the
@@ -30,25 +36,37 @@ type leaseClient struct {
 	obs LeaseObserver // never nil after New()
 }
 
-// New returns a new Lease instance backed by the provided Backend. Returns an error
-// if the backend is nil, TTL is zero or negative, or HolderID is empty.
+// New returns a new Lease instance backed by the provided Backend. Every error
+// it returns matches ErrConfigInvalid with errors.Is:
+//   - ErrNilBackend if b is nil.
+//   - "worklease: New: TTL is required" if cfg.TTL is zero.
+//   - "worklease: New: HolderID is required" if cfg.HolderID is empty.
+//   - "worklease: New: TTL must be positive, got <TTL>" if cfg.TTL is negative.
+//   - "worklease: New: TTL must be at least 1ms, got <TTL>" if cfg.TTL is
+//     below 1ms.
+//
+// The checks run in that order, and the first failing check is returned.
 func New(b backend.Backend, cfg Config) (Lease, error) {
 	// ===== STEP 1: Validate Required Fields =====
 	if b == nil {
-		return nil, fmt.Errorf("worklease: New: backend is required")
+		return nil, ErrNilBackend
 	}
 
 	if cfg.TTL == 0 {
-		return nil, fmt.Errorf("worklease: New: TTL is required")
+		return nil, &configError{msg: "worklease: New: TTL is required"}
 	}
 
 	if cfg.HolderID == "" {
-		return nil, fmt.Errorf("worklease: New: HolderID is required")
+		return nil, &configError{msg: "worklease: New: HolderID is required"}
 	}
 
 	// ===== STEP 2: Reject Invalid Values =====
 	if cfg.TTL < 0 {
-		return nil, fmt.Errorf("worklease: New: TTL must be positive, got %v", cfg.TTL)
+		return nil, &configError{msg: fmt.Sprintf("worklease: New: TTL must be positive, got %v", cfg.TTL)}
+	}
+
+	if cfg.TTL < minTTL {
+		return nil, &configError{msg: fmt.Sprintf("worklease: New: TTL must be at least 1ms, got %v", cfg.TTL)}
 	}
 
 	// ===== STEP 3: Initialize and Return =====
@@ -60,7 +78,8 @@ func New(b backend.Backend, cfg Config) (Lease, error) {
 
 // newToken converts a backend LeaseRecord to an exported Token. The deadline is
 // the local monotonic bound on the lease window — the time the acquiring backend
-// call started plus TTL — which never exceeds the true expiry.
+// call started plus TTL — which, under a constant offset between the local and
+// backend clocks, never exceeds the true expiry.
 func newToken(r backend.LeaseRecord, deadline time.Time) Token {
 	return Token{
 		workID:       r.WorkID,
@@ -193,12 +212,21 @@ func (c *leaseClient) ReadCheckpoint(ctx context.Context, token Token) (Checkpoi
 
 // Forget permanently deletes the lease record for token's workID. Returns
 // ErrFenced if the fencing token no longer matches the stored lease, or if no
-// record exists for token's workID. Forget does not invoke any LeaseObserver
-// method — this is a deliberate v0.6 scope boundary, not an oversight.
+// record exists for token's workID. Every call is reported to OnForget,
+// followed by OnFenced with OperationForget when the backend returns ErrFenced.
 func (c *leaseClient) Forget(ctx context.Context, token Token) error {
+	// ===== STEP 1: Delegate to Backend =====
 	record := toRecord(token)
+	start := time.Now()
 	err := c.b.Forget(ctx, record)
 
+	// ===== STEP 2: Observe =====
+	c.obs.OnForget(ctx, ForgetEvent{Token: token, Duration: time.Since(start), Err: err})
+	if errors.Is(err, ErrFenced) {
+		c.obs.OnFenced(ctx, FencedEvent{Token: token, Operation: OperationForget})
+	}
+
+	// ===== STEP 3: Wrap =====
 	if errors.Is(err, ErrFenced) {
 		return fmt.Errorf("worklease: Forget: workID=%q holderID=%q: %w", token.WorkID(), token.HolderID(), ErrFenced)
 	}

@@ -138,6 +138,38 @@ var _ = Describe("pool", func() {
 				Expect(p).To(BeNil())
 			})
 		})
+		Context("when cfg.WorkIDs contains an empty string", func() {
+			It("returns ErrEmptyWorkID naming the index, which satisfies errors.Is(ErrConfigInvalid)", func() {
+				p, err := pool.New(mockLease, pool.Config{WorkIDs: []string{"w1", ""}}, func(_ context.Context, _ string, _ worklease.Token, _ worklease.Checkpoint) ([]byte, error) {
+					return nil, nil
+				})
+				Expect(errors.Is(err, pool.ErrEmptyWorkID)).To(BeTrue())
+				Expect(errors.Is(err, pool.ErrConfigInvalid)).To(BeTrue())
+				Expect(err.Error()).To(ContainSubstring("WorkIDs[1]"))
+				Expect(p).To(BeNil())
+			})
+		})
+		Context("when cfg.WorkIDs contains a duplicate", func() {
+			It("returns ErrDuplicateWorkID naming the work ID and both indices, which satisfies errors.Is(ErrConfigInvalid)", func() {
+				p, err := pool.New(mockLease, pool.Config{WorkIDs: []string{"w1", "w2", "w1"}}, func(_ context.Context, _ string, _ worklease.Token, _ worklease.Checkpoint) ([]byte, error) {
+					return nil, nil
+				})
+				Expect(errors.Is(err, pool.ErrDuplicateWorkID)).To(BeTrue())
+				Expect(errors.Is(err, pool.ErrConfigInvalid)).To(BeTrue())
+				Expect(err.Error()).To(ContainSubstring(`WorkIDs[0] and WorkIDs[2] are both "w1"`))
+				Expect(p).To(BeNil())
+			})
+		})
+		Context("when cfg.WorkIDs contains several invalid entries", func() {
+			It("reports the first invalid entry in index order", func() {
+				p, err := pool.New(mockLease, pool.Config{WorkIDs: []string{"w1", "w1", ""}}, func(_ context.Context, _ string, _ worklease.Token, _ worklease.Checkpoint) ([]byte, error) {
+					return nil, nil
+				})
+				Expect(errors.Is(err, pool.ErrDuplicateWorkID)).To(BeTrue())
+				Expect(errors.Is(err, pool.ErrEmptyWorkID)).To(BeFalse())
+				Expect(p).To(BeNil())
+			})
+		})
 		Context("with valid config", func() {
 			It("returns a non-nil Pool", func() {
 				p, err := pool.New(mockLease, pool.Config{WorkIDs: []string{"w1"}}, func(_ context.Context, _ string, _ worklease.Token, _ worklease.Checkpoint) ([]byte, error) {

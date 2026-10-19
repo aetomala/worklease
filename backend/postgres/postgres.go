@@ -1,3 +1,18 @@
+// Package postgres implements the worklease Backend on PostgreSQL.
+//
+// No operation opens an explicit transaction: each statement runs in its own
+// implicit transaction at the session's default isolation level. The backend
+// requires READ COMMITTED, the PostgreSQL default. Under REPEATABLE READ or
+// SERIALIZABLE, a contended Acquire fails with a serialization error (SQLSTATE
+// 40001) instead of returning worklease.ErrLeaseHeld, and concurrent Renew or
+// Release calls on one lease can fail the same way. Fencing stays correct at
+// every level, because a serialization failure aborts the statement and never
+// reports success. If the database or role defaults to another level, pin READ
+// COMMITTED for the role worklease connects as, for example with ALTER ROLE
+// ... SET default_transaction_isolation = 'read committed'.
+//
+// The schema is in schema.sql in this package's directory. Applying and
+// migrating it is the caller's responsibility (ADR-0017).
 package postgres
 
 import (
@@ -25,6 +40,7 @@ SET holder_id      = EXCLUDED.holder_id,
     prev_exit_mode = COALESCE(worklease_leases.exit_mode, 'expired'),
     prev_holder_id = worklease_leases.holder_id,
     exit_mode      = NULL,
+    acquired_at    = NOW(),
     updated_at     = NOW()
 WHERE worklease_leases.expires_at < NOW()
 RETURNING fencing_token, expires_at`
@@ -92,6 +108,28 @@ WHERE updated_at < NOW() - $1::interval
   AND (exit_mode = 'retired' OR ($2 AND exit_mode IS NULL))`
 )
 
+// The formatInterval function formats d as a PostgreSQL interval of whole
+// microseconds, rounded up, so a stored expiry is never earlier than the
+// duration requested. PostgreSQL intervals resolve to the microsecond.
+func formatInterval(d time.Duration) string {
+	us := d / time.Microsecond
+	if d%time.Microsecond > 0 {
+		us++
+	}
+	return fmt.Sprintf("%d microseconds", us)
+}
+
+// The withCtxErr function returns err unchanged while ctx is live. Once ctx is
+// done, it returns an error that wraps both err and ctx.Err(), so callers can
+// match the context error with errors.Is and still inspect the driver error
+// with errors.As.
+func withCtxErr(ctx context.Context, err error) error {
+	if ctxErr := ctx.Err(); ctxErr != nil {
+		return fmt.Errorf("%w (%w)", err, ctxErr)
+	}
+	return err
+}
+
 // postgresBackend implements the Backend interface using PostgreSQL.
 type postgresBackend struct {
 	db *sql.DB
@@ -114,7 +152,7 @@ func New(db *sql.DB) (backend.Backend, error) {
 // acquired lease details on success.
 func (p *postgresBackend) Acquire(ctx context.Context, workID, holderID string, ttl time.Duration) (backend.LeaseRecord, error) {
 	// ===== STEP 1: Execute INSERT/UPDATE with RETURNING =====
-	ttlStr := fmt.Sprintf("%.6f seconds", ttl.Seconds())
+	ttlStr := formatInterval(ttl)
 	var fencingToken uint64
 	var expiresAt time.Time
 	err := p.db.QueryRowContext(ctx, queryAcquire, workID, holderID, ttlStr).Scan(&fencingToken, &expiresAt)
@@ -123,7 +161,7 @@ func (p *postgresBackend) Acquire(ctx context.Context, workID, holderID string, 
 		return backend.LeaseRecord{}, worklease.ErrLeaseHeld
 	}
 	if err != nil {
-		return backend.LeaseRecord{}, fmt.Errorf("postgres: Acquire: exec failed: %w", err)
+		return backend.LeaseRecord{}, fmt.Errorf("postgres: Acquire: exec failed: %w", withCtxErr(ctx, err))
 	}
 
 	// ===== STEP 2: Return LeaseRecord =====
@@ -140,16 +178,16 @@ func (p *postgresBackend) Acquire(ctx context.Context, workID, holderID string, 
 // writing, if the holder has already declared an exit with Release.
 func (p *postgresBackend) Checkpoint(ctx context.Context, record backend.LeaseRecord, state []byte, ttl time.Duration) error {
 	// ===== STEP 1: Write State and Extend the Lease =====
-	ttlStr := fmt.Sprintf("%.6f seconds", ttl.Seconds())
+	ttlStr := formatInterval(ttl)
 	result, err := p.db.ExecContext(ctx, queryCheckpoint, state, ttlStr, record.WorkID, record.HolderID, record.FencingToken)
 	if err != nil {
-		return fmt.Errorf("postgres: Checkpoint: %w", err)
+		return fmt.Errorf("postgres: Checkpoint: %w", withCtxErr(ctx, err))
 	}
 
 	// ===== STEP 2: Check Rows Affected =====
 	n, err := result.RowsAffected()
 	if err != nil {
-		return fmt.Errorf("postgres: Checkpoint: %w", err)
+		return fmt.Errorf("postgres: Checkpoint: %w", withCtxErr(ctx, err))
 	}
 	if n > 0 {
 		return nil
@@ -162,7 +200,7 @@ func (p *postgresBackend) Checkpoint(ctx context.Context, record backend.LeaseRe
 		return worklease.ErrFenced
 	}
 	if err != nil {
-		return fmt.Errorf("postgres: Checkpoint: %w", err)
+		return fmt.Errorf("postgres: Checkpoint: %w", withCtxErr(ctx, err))
 	}
 
 	return worklease.ErrLeaseExpired
@@ -173,16 +211,16 @@ func (p *postgresBackend) Checkpoint(ctx context.Context, record backend.LeaseRe
 // the lease has already expired.
 func (p *postgresBackend) Renew(ctx context.Context, record backend.LeaseRecord, ttl time.Duration) error {
 	// ===== STEP 1: Execute UPDATE =====
-	ttlStr := fmt.Sprintf("%.6f seconds", ttl.Seconds())
+	ttlStr := formatInterval(ttl)
 	result, err := p.db.ExecContext(ctx, queryRenew, ttlStr, record.WorkID, record.HolderID, record.FencingToken)
 	if err != nil {
-		return fmt.Errorf("postgres: Renew: %w", err)
+		return fmt.Errorf("postgres: Renew: %w", withCtxErr(ctx, err))
 	}
 
 	// ===== STEP 2: Check Rows Affected =====
 	n, err := result.RowsAffected()
 	if err != nil {
-		return fmt.Errorf("postgres: Renew: %w", err)
+		return fmt.Errorf("postgres: Renew: %w", withCtxErr(ctx, err))
 	}
 	if n == 0 {
 		// ===== STEP 3: Distinguish Fenced vs Expired =====
@@ -192,7 +230,7 @@ func (p *postgresBackend) Renew(ctx context.Context, record backend.LeaseRecord,
 			if errors.Is(err, sql.ErrNoRows) {
 				return worklease.ErrFenced
 			}
-			return fmt.Errorf("postgres: Renew: %w", err)
+			return fmt.Errorf("postgres: Renew: %w", withCtxErr(ctx, err))
 		}
 		return worklease.ErrLeaseExpired
 	}
@@ -213,13 +251,13 @@ func (p *postgresBackend) Release(ctx context.Context, record backend.LeaseRecor
 	// ===== STEP 2: Record Exit and Expire Immediately =====
 	result, err := p.db.ExecContext(ctx, queryRelease, record.WorkID, record.HolderID, record.FencingToken, mode.String())
 	if err != nil {
-		return fmt.Errorf("postgres: Release: %w", err)
+		return fmt.Errorf("postgres: Release: %w", withCtxErr(ctx, err))
 	}
 
 	// ===== STEP 3: Check Rows Affected =====
 	n, err := result.RowsAffected()
 	if err != nil {
-		return fmt.Errorf("postgres: Release: %w", err)
+		return fmt.Errorf("postgres: Release: %w", withCtxErr(ctx, err))
 	}
 	if n > 0 {
 		return nil
@@ -232,7 +270,7 @@ func (p *postgresBackend) Release(ctx context.Context, record backend.LeaseRecor
 		return worklease.ErrFenced
 	}
 	if err != nil {
-		return fmt.Errorf("postgres: Release: %w", err)
+		return fmt.Errorf("postgres: Release: %w", withCtxErr(ctx, err))
 	}
 
 	return worklease.ErrLeaseExpired
@@ -254,7 +292,7 @@ func (p *postgresBackend) ReadCheckpoint(ctx context.Context, record backend.Lea
 		return backend.Checkpoint{}, worklease.ErrFenced
 	}
 	if err != nil {
-		return backend.Checkpoint{}, fmt.Errorf("postgres: ReadCheckpoint: %w", err)
+		return backend.Checkpoint{}, fmt.Errorf("postgres: ReadCheckpoint: %w", withCtxErr(ctx, err))
 	}
 
 	// ===== STEP 2: Fence on Token =====
@@ -293,12 +331,12 @@ func exitModeFromSQL(s string) backend.ExitMode {
 func (p *postgresBackend) Forget(ctx context.Context, record backend.LeaseRecord) error {
 	result, err := p.db.ExecContext(ctx, queryForget, record.WorkID, record.HolderID, record.FencingToken)
 	if err != nil {
-		return fmt.Errorf("postgres: Forget: %w", err)
+		return fmt.Errorf("postgres: Forget: %w", withCtxErr(ctx, err))
 	}
 
 	n, err := result.RowsAffected()
 	if err != nil {
-		return fmt.Errorf("postgres: Forget: %w", err)
+		return fmt.Errorf("postgres: Forget: %w", withCtxErr(ctx, err))
 	}
 	if n == 0 {
 		return worklease.ErrFenced
@@ -314,12 +352,12 @@ func (p *postgresBackend) Sweep(ctx context.Context, opts backend.SweepOptions) 
 	retentionStr := fmt.Sprintf("%.6f seconds", opts.Retention.Seconds())
 	result, err := p.db.ExecContext(ctx, queryVacuumSweep, retentionStr, opts.IncludeExpired)
 	if err != nil {
-		return 0, fmt.Errorf("postgres: Sweep: %w", err)
+		return 0, fmt.Errorf("postgres: Sweep: %w", withCtxErr(ctx, err))
 	}
 
 	n, err := result.RowsAffected()
 	if err != nil {
-		return 0, fmt.Errorf("postgres: Sweep: %w", err)
+		return 0, fmt.Errorf("postgres: Sweep: %w", withCtxErr(ctx, err))
 	}
 
 	return n, nil

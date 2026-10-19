@@ -11,6 +11,41 @@ This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 
 ---
 
+## [v0.7.0] — 2026-10-19
+
+### Breaking
+
+- **PostgreSQL: the deprecated `clean_handoff` column is dropped (#86).** `schema.sql` no longer creates it. v0.6 and v0.7 never read or write it, so an existing table keeps working until you drop the column. Run `ALTER TABLE worklease_leases DROP COLUMN IF EXISTS clean_handoff` once no v0.5 process remains; after that, a rollback to v0.5 is not possible. See `UPGRADING.md`.
+- `worklease.New` rejects a TTL below 1ms (#90). A TTL below 1ms is shorter than the 1ms offset `Release` writes into the past (ADR-0012), and PostgreSQL intervals resolve only to the microsecond.
+- The PostgreSQL backend requires the READ COMMITTED isolation level, the PostgreSQL default (#89). Under REPEATABLE READ or SERIALIZABLE, a contended `Acquire` fails with SQLSTATE 40001 instead of returning `ErrLeaseHeld`. See the `backend/postgres` package documentation.
+- `NewVacuum` takes a `VacuumConfig` and returns an error: `NewVacuum(b, cfg) (*Vacuum, error)` (#91, #92). A nil backend returns `ErrNilBackend`, and `Sweep` on a zero-value or nil `*Vacuum` returns `ErrNilBackend` instead of panicking. `worklease.New` also returns `ErrNilBackend` for a nil backend; its message changes from `worklease: New: backend is required` to `worklease: backend is required`.
+- `LeaseObserver` gains `OnForget(ctx, ForgetEvent)` (#92). Custom implementations must add it. `Forget` reports every call to `OnForget`, and a fenced `Forget` also fires `OnFenced` with the new `OperationForget`.
+- `pool.New` rejects an empty work ID with `ErrEmptyWorkID` and a repeated work ID with `ErrDuplicateWorkID`, both satisfying `errors.Is(err, pool.ErrConfigInvalid)` (#97). Before, an empty ID failed every attempt and backed off forever, and a duplicate's second slot only polled the lease every `IdleInterval` while its sibling held it.
+- `leader.Elect` paces `Acquire` errors (#104). It returns `ErrLeaseHeld` only after waiting the new `leader.Config.IdleInterval` (default 1s, up to 20% jitter), and any other non-context `Acquire` error after `BackoffInterval`; context errors still return immediately. A follower looping on `Elect` no longer spins against the backend. Call `Lease.Acquire` directly for a single immediate attempt.
+
+### Added
+
+- `worklease.LeaseWindow(ctx)` reports the lease window the renewal goroutine tracks, from the renewal context or any context derived from it (#93). It advances with each successful renewal and, under a constant clock offset, never exceeds the true expiry. `Token.ExpiresAt()` remains the expiry recorded at acquisition.
+- `worklease.ErrNilBackend`, `worklease.VacuumConfig`, `worklease.VacuumObserver`, and `worklease.SweepEvent`. `VacuumObserver.OnSweep` reports each sweep's options, rows deleted, duration, and error (#91, #92).
+- `worklease.ForgetEvent`, `LeaseObserver.OnForget`, and `worklease.OperationForget` (#92).
+- `leader.Config.IdleInterval` (#104), and `pool.ErrEmptyWorkID` and `pool.ErrDuplicateWorkID` (#97).
+- `worklease.ErrConfigInvalid`: every error `worklease.New` returns, and `ErrNilBackend`, now match it with `errors.Is`, as `pool.ErrConfigInvalid` does for `pool.New` (#114). Messages are unchanged.
+
+### Fixed
+
+- `stopRenewal` no longer waits for an in-flight `Renew`, and the renewal context is cancelled with `ErrLeaseWindowExhausted` when the lease window closes, whether renewal is between ticks, backing off, or stalled in a `Renew` call (#88). Before, the window was checked only after a failed attempt, so work could run without a lease until the next tick or until a stalled call returned. Each `Renew` call runs with a deadline at the lease window. An abandoned call is reported to `OnRenew` with its context error, and its late result is discarded. The first window is the local start of the acquiring call plus TTL, so a database clock behind the application does not shorten it (#117).
+- The PostgreSQL backend rounds a TTL up to the next whole microsecond instead of to the nearest microsecond, so a stored expiry is never earlier than the requested TTL (#90).
+- The PostgreSQL backend now returns an error matching `ctx.Err()` when a statement is cancelled or hits its deadline mid-flight; before, only the driver error (`pq: canceling statement due to user request`) was wrapped, so `errors.Is(err, context.Canceled)` was false (#113). The driver error is still wrapped. `Lease.Acquire` with `WithWaitForLease`, `leader.Elect`, and `worker.Runner.Run` now return a matching error in that case. Present at least since v0.4.0; the v0.5 `WithWaitForLease` cancellation contract made it visible.
+- PostgreSQL: reacquiring a lease now sets `acquired_at` to the new holder's acquisition time; before, it kept the row's creation time (#118). No migration: rows correct themselves on their next reacquisition.
+
+### Chore
+
+- Go toolchain directive bumped from go1.26.8 to go1.26.9 for GO-2026-6617, GO-2026-6613, GO-2026-6612, GO-2026-6611, and GO-2026-6603 (`net/http`), GO-2026-6608 (`mime/multipart`), and GO-2026-6607 (`crypto/tls`), all reachable standard-library vulnerabilities fixed in go1.26.9. Four of them are also reported against `golang.org/x/net` v0.56.0, where govulncheck finds no call from worklease code; `x/net` stays at v0.56.0 because v0.60.0 requires Go 1.26. The `go 1.25.0` floor is unchanged.
+- The `integration/` suite runs every `worker`, `leader`, and `pool` composition spec on both the in-memory and PostgreSQL backends (#87). The PostgreSQL run uses its own schema, `worklease_integration`, and fails rather than skips when `WORKLEASE_REQUIRE_POSTGRES` is set.
+- A PostgreSQL test stalls `Renew` on a real half-open connection through an in-process proxy (#115), and new specs pin memory `Sweep` iteration, renewal backoff, and the poll and renewal interval options (#116).
+
+---
+
 ## [v0.6.0] — 2026-10-06
 
 ### Breaking

@@ -50,7 +50,10 @@ type memoryConfig struct {
 
 // WithClock overrides the clock used for all time.Now() calls inside the
 // memory backend. The default clock uses time.Now().
-// Use WithClock to inject a fake clock in tests.
+// Use WithClock to inject a fake clock in tests. Advancing an injected clock
+// expires leases in storage while their holders' local windows, measured on
+// the real monotonic clock, stay open; fencing then rejects the old holders'
+// writes, as with a backend clock that steps forward.
 func WithClock(c Clock) Option {
 	return func(cfg *memoryConfig) {
 		cfg.clock = c
