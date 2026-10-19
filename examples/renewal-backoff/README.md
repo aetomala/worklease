@@ -62,7 +62,7 @@ fires on the wait path — only on the immediate fail-fast path (no `WithWaitFor
 
 **`WithRenewalBackoff` and terminal `ErrLeaseExpired`** — `StartRenewal` retries transient
 non-fencing `Renew` errors with exponential backoff bounded by the lease window. The window
-starts as the earlier of `token.ExpiresAt()` and the local acquire time plus TTL, and
+starts at the local start of the acquiring call plus TTL, and
 advances after every successful renewal. In Scenario 2, a fake clock lets storage find the
 lease lapsed while the local lease window is still open: the scenario advances it past the
 TTL right after `StartRenewal`, so the first `Renew`, at the default interval (TTL/2),

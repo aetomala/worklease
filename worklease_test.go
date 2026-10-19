@@ -248,6 +248,64 @@ var _ = Describe("worklease", func() {
 			Expect(err).To(BeNil())
 			Expect(lease).NotTo(BeNil())
 		})
+
+		Context("configuration errors match ErrConfigInvalid (#114)", func() {
+			It("nil backend → ErrNilBackend, which also matches ErrConfigInvalid", func() {
+				_, err := worklease.New(nil, cfg)
+				Expect(err).To(BeIdenticalTo(worklease.ErrNilBackend))
+				Expect(errors.Is(err, worklease.ErrConfigInvalid)).To(BeTrue())
+			})
+
+			It("zero TTL → matches ErrConfigInvalid with message \"worklease: New: TTL is required\"", func() {
+				badCfg := cfg
+				badCfg.TTL = 0
+				_, err := worklease.New(mockB, badCfg)
+				Expect(errors.Is(err, worklease.ErrConfigInvalid)).To(BeTrue())
+				Expect(err.Error()).To(Equal("worklease: New: TTL is required"))
+			})
+
+			It("empty HolderID → matches ErrConfigInvalid with message \"worklease: New: HolderID is required\"", func() {
+				badCfg := cfg
+				badCfg.HolderID = ""
+				_, err := worklease.New(mockB, badCfg)
+				Expect(errors.Is(err, worklease.ErrConfigInvalid)).To(BeTrue())
+				Expect(err.Error()).To(Equal("worklease: New: HolderID is required"))
+			})
+
+			It("negative TTL → matches ErrConfigInvalid with message \"worklease: New: TTL must be positive, got -1s\"", func() {
+				badCfg := cfg
+				badCfg.TTL = -time.Second
+				_, err := worklease.New(mockB, badCfg)
+				Expect(errors.Is(err, worklease.ErrConfigInvalid)).To(BeTrue())
+				Expect(err.Error()).To(Equal("worklease: New: TTL must be positive, got -1s"))
+			})
+
+			It("TTL below 1ms → matches ErrConfigInvalid with message \"worklease: New: TTL must be at least 1ms, got 999µs\"", func() {
+				badCfg := cfg
+				badCfg.TTL = 999 * time.Microsecond
+				_, err := worklease.New(mockB, badCfg)
+				Expect(errors.Is(err, worklease.ErrConfigInvalid)).To(BeTrue())
+				Expect(err.Error()).To(Equal("worklease: New: TTL must be at least 1ms, got 999µs"))
+			})
+
+			It("zero TTL and empty HolderID → the TTL check runs first, so the message is \"worklease: New: TTL is required\"", func() {
+				badCfg := cfg
+				badCfg.TTL = 0
+				badCfg.HolderID = ""
+				_, err := worklease.New(mockB, badCfg)
+				Expect(errors.Is(err, worklease.ErrConfigInvalid)).To(BeTrue())
+				Expect(err.Error()).To(Equal("worklease: New: TTL is required"))
+			})
+
+			It("negative TTL and empty HolderID → required fields are checked before values, so the message is \"worklease: New: HolderID is required\"", func() {
+				badCfg := cfg
+				badCfg.TTL = -time.Second
+				badCfg.HolderID = ""
+				_, err := worklease.New(mockB, badCfg)
+				Expect(errors.Is(err, worklease.ErrConfigInvalid)).To(BeTrue())
+				Expect(err.Error()).To(Equal("worklease: New: HolderID is required"))
+			})
+		})
 	})
 
 	// ===== PHASE 3: Core Operations =====
@@ -306,12 +364,23 @@ var _ = Describe("worklease", func() {
 
 		It("uses default poll interval 2s when WithPollInterval not set", func() {
 			lease, _ := worklease.New(mockB, cfg)
-			mockB.EXPECT().Acquire(gomock.Any(), "w1", "test-worker", gomock.Any()).Return(backend.LeaseRecord{}, worklease.ErrLeaseHeld).AnyTimes()
-			// With default 2s poll interval, this should timeout before succeeding (100ms timeout < 2s poll interval)
-			shortCtx, shortCancel := context.WithTimeout(ctx, 100*time.Millisecond)
-			defer shortCancel()
-			_, err := lease.Acquire(shortCtx, "w1", worklease.WithWaitForLease())
+			// Record when each poll reaches the backend. Calls run on the caller's
+			// goroutine, so no lock is needed.
+			var calls []time.Time
+			mockB.EXPECT().Acquire(gomock.Any(), "w1", "test-worker", gomock.Any()).DoAndReturn(
+				func(context.Context, string, string, time.Duration) (backend.LeaseRecord, error) {
+					calls = append(calls, time.Now())
+					return backend.LeaseRecord{}, worklease.ErrLeaseHeld
+				}).AnyTimes()
+			// At the default 2s interval, exactly two polls fit in 3s: at t=0 and t=2s.
+			longCtx, longCancel := context.WithTimeout(ctx, 3*time.Second)
+			defer longCancel()
+			_, err := lease.Acquire(longCtx, "w1", worklease.WithWaitForLease())
 			Expect(errors.Is(err, context.DeadlineExceeded)).To(BeTrue())
+			Expect(calls).To(HaveLen(2))
+			gap := calls[1].Sub(calls[0])
+			Expect(gap).To(BeNumerically(">=", 1900*time.Millisecond))
+			Expect(gap).To(BeNumerically("<", 2300*time.Millisecond))
 		})
 
 		It("uses configured poll interval when set via WithPollInterval", func() {
@@ -844,20 +913,22 @@ var _ = Describe("worklease", func() {
 		})
 
 		It("non-fencing error → retries with backoff, then cancels renewCtx with cause ErrLeaseWindowExhausted once the lease window closes", func() {
-			lease, _ := worklease.New(mockB, cfg)
-			// Short lease window so the bounded-retry loop exhausts it quickly.
+			// Short TTL so the bounded-retry loop exhausts the window quickly.
+			shortCfg := cfg
+			shortCfg.TTL = 150 * time.Millisecond
+			lease, _ := worklease.New(mockB, shortCfg)
 			record := backend.LeaseRecord{
 				WorkID:       "w1",
 				HolderID:     "test-worker",
 				FencingToken: 1,
 				ExpiresAt:    time.Now().Add(150 * time.Millisecond),
 			}
-			mockB.EXPECT().Acquire(gomock.Any(), "w1", "test-worker", 30*time.Second).Return(record, nil)
+			mockB.EXPECT().Acquire(gomock.Any(), "w1", "test-worker", 150*time.Millisecond).Return(record, nil)
 			token, _ := lease.Acquire(ctx, "w1")
 
 			// Every renewal attempt fails with a non-fencing error, so the goroutine
 			// retries until the lease window is exhausted (v0.5 bounded-retry contract).
-			mockB.EXPECT().Renew(gomock.Any(), record, 30*time.Second).Return(errors.New("connection lost")).AnyTimes()
+			mockB.EXPECT().Renew(gomock.Any(), record, 150*time.Millisecond).Return(errors.New("connection lost")).AnyTimes()
 
 			renewCtx, stopRenewal := lease.StartRenewal(ctx, token,
 				worklease.WithRenewalInterval(10*time.Millisecond),
@@ -1169,16 +1240,50 @@ var _ = Describe("worklease", func() {
 			})
 		})
 
+		It("with WithWaitForLease, the first window starts at the attempt that succeeded", func() {
+			shortCfg := cfg
+			shortCfg.TTL = 300 * time.Millisecond
+			lease, _ := worklease.New(mockB, shortCfg)
+			record := backend.LeaseRecord{WorkID: "w1", HolderID: "test-worker", FencingToken: 1, ExpiresAt: time.Now().Add(time.Hour)}
+			// The first attempt finds the lease held; the second, one poll later, succeeds.
+			var firstCall time.Time
+			gomock.InOrder(
+				mockB.EXPECT().Acquire(gomock.Any(), "w1", "test-worker", 300*time.Millisecond).DoAndReturn(
+					func(context.Context, string, string, time.Duration) (backend.LeaseRecord, error) {
+						firstCall = time.Now()
+						return backend.LeaseRecord{}, worklease.ErrLeaseHeld
+					}),
+				mockB.EXPECT().Acquire(gomock.Any(), "w1", "test-worker", 300*time.Millisecond).Return(record, nil),
+			)
+			mockB.EXPECT().Renew(gomock.Any(), gomock.Any(), gomock.Any()).Times(0)
+			token, err := lease.Acquire(ctx, "w1", worklease.WithWaitForLease(), worklease.WithPollInterval(400*time.Millisecond))
+			Expect(err).NotTo(HaveOccurred())
+
+			renewCtx, stopRenewal := lease.StartRenewal(ctx, token, worklease.WithRenewalInterval(time.Second))
+			defer stopRenewal()
+
+			// The window starts at the successful attempt, at least one poll after the
+			// first call, so it is still open although the first call is over a TTL ago.
+			time.Sleep(50 * time.Millisecond)
+			Expect(renewCtx.Err()).To(BeNil())
+			w, ok := worklease.LeaseWindow(renewCtx)
+			Expect(ok).To(BeTrue())
+			Expect(w).To(BeTemporally(">=", firstCall.Add(400*time.Millisecond+300*time.Millisecond)))
+		})
+
 		Context("when the window closes between renewal ticks (#88)", func() {
 			It("cancels renewCtx with cause ErrLeaseWindowExhausted before the next tick, without calling Renew", func() {
-				lease, _ := worklease.New(mockB, cfg)
+				shortCfg := cfg
+				shortCfg.TTL = 100 * time.Millisecond
+				lease, _ := worklease.New(mockB, shortCfg)
+				// ExpiresAt is an hour away, so only the local window can close renewCtx.
 				record := backend.LeaseRecord{
 					WorkID:       "w1",
 					HolderID:     "test-worker",
 					FencingToken: 1,
-					ExpiresAt:    time.Now().Add(100 * time.Millisecond),
+					ExpiresAt:    time.Now().Add(time.Hour),
 				}
-				mockB.EXPECT().Acquire(gomock.Any(), "w1", "test-worker", 30*time.Second).Return(record, nil)
+				mockB.EXPECT().Acquire(gomock.Any(), "w1", "test-worker", 100*time.Millisecond).Return(record, nil)
 				token, _ := lease.Acquire(ctx, "w1")
 				mockB.EXPECT().Renew(gomock.Any(), gomock.Any(), gomock.Any()).Times(0)
 
@@ -1190,21 +1295,67 @@ var _ = Describe("worklease", func() {
 			})
 
 			It("cancels renewCtx at once when StartRenewal is called after the window has closed", func() {
-				lease, _ := worklease.New(mockB, cfg)
+				shortCfg := cfg
+				shortCfg.TTL = 50 * time.Millisecond
+				lease, _ := worklease.New(mockB, shortCfg)
+				// ExpiresAt is an hour away; the window closes because the TTL elapses
+				// locally before StartRenewal is called.
 				record := backend.LeaseRecord{
 					WorkID:       "w1",
 					HolderID:     "test-worker",
 					FencingToken: 1,
-					ExpiresAt:    time.Now().Add(-time.Second),
+					ExpiresAt:    time.Now().Add(time.Hour),
 				}
-				mockB.EXPECT().Acquire(gomock.Any(), "w1", "test-worker", 30*time.Second).Return(record, nil)
+				mockB.EXPECT().Acquire(gomock.Any(), "w1", "test-worker", 50*time.Millisecond).Return(record, nil)
 				token, _ := lease.Acquire(ctx, "w1")
 				mockB.EXPECT().Renew(gomock.Any(), gomock.Any(), gomock.Any()).Times(0)
+				time.Sleep(60 * time.Millisecond)
 
 				renewCtx, stopRenewal := lease.StartRenewal(ctx, token)
 				defer stopRenewal()
 
 				Eventually(renewCtx.Done(), 50*time.Millisecond).Should(BeClosed())
+				Expect(context.Cause(renewCtx)).To(MatchError(worklease.ErrLeaseWindowExhausted))
+			})
+		})
+
+		Context("first window ignores the backend's expiry timestamp (#117)", func() {
+			// startWith acquires through the mock with a 300ms TTL and the given
+			// ExpiresAt, and starts renewal with a tick far beyond the window.
+			startWith := func(expiresAt time.Time) (context.Context, func()) {
+				shortCfg := cfg
+				shortCfg.TTL = 300 * time.Millisecond
+				lease, _ := worklease.New(mockB, shortCfg)
+				record := backend.LeaseRecord{WorkID: "w1", HolderID: "test-worker", FencingToken: 1, ExpiresAt: expiresAt}
+				mockB.EXPECT().Acquire(gomock.Any(), "w1", "test-worker", 300*time.Millisecond).Return(record, nil)
+				mockB.EXPECT().Renew(gomock.Any(), gomock.Any(), gomock.Any()).Times(0)
+				token, err := lease.Acquire(ctx, "w1")
+				Expect(err).NotTo(HaveOccurred())
+				return lease.StartRenewal(ctx, token, worklease.WithRenewalInterval(time.Second))
+			}
+
+			It("a past ExpiresAt does not cancel renewCtx before the local window closes", func() {
+				renewCtx, stopRenewal := startWith(time.Now().Add(-time.Hour))
+				defer stopRenewal()
+				time.Sleep(200 * time.Millisecond)
+				Expect(renewCtx.Err()).To(BeNil())
+				Eventually(renewCtx.Done(), 300*time.Millisecond).Should(BeClosed())
+				Expect(context.Cause(renewCtx)).To(MatchError(worklease.ErrLeaseWindowExhausted))
+			})
+
+			It("a zero ExpiresAt does not cancel renewCtx before the local window closes", func() {
+				renewCtx, stopRenewal := startWith(time.Time{})
+				defer stopRenewal()
+				time.Sleep(200 * time.Millisecond)
+				Expect(renewCtx.Err()).To(BeNil())
+				Eventually(renewCtx.Done(), 300*time.Millisecond).Should(BeClosed())
+				Expect(context.Cause(renewCtx)).To(MatchError(worklease.ErrLeaseWindowExhausted))
+			})
+
+			It("a future ExpiresAt does not extend the window past the local start plus TTL", func() {
+				renewCtx, stopRenewal := startWith(time.Now().Add(time.Hour))
+				defer stopRenewal()
+				Eventually(renewCtx.Done(), 500*time.Millisecond).Should(BeClosed())
 				Expect(context.Cause(renewCtx)).To(MatchError(worklease.ErrLeaseWindowExhausted))
 			})
 		})
@@ -1229,7 +1380,7 @@ var _ = Describe("worklease", func() {
 			Expect(w.IsZero()).To(BeTrue())
 		})
 
-		It("returns the initial window, between acquire start plus TTL and the earlier of token.ExpiresAt() and acquire end plus TTL", func() {
+		It("returns the initial window, between acquire start plus TTL and acquire end plus TTL", func() {
 			lease := memLease(memory.New(), 30*time.Second)
 			before := time.Now()
 			token, err := lease.Acquire(ctx, "w1")
@@ -1241,12 +1392,8 @@ var _ = Describe("worklease", func() {
 			w, ok := worklease.LeaseWindow(renewCtx)
 			Expect(ok).To(BeTrue())
 
-			upper := after.Add(30 * time.Second)
-			if token.ExpiresAt().Before(upper) {
-				upper = token.ExpiresAt()
-			}
 			Expect(w).To(BeTemporally(">=", before.Add(30*time.Second)))
-			Expect(w).To(BeTemporally("<=", upper))
+			Expect(w).To(BeTemporally("<=", after.Add(30*time.Second)))
 		})
 
 		It("advances after a successful renewal", func() {
@@ -1674,11 +1821,13 @@ var _ = Describe("worklease", func() {
 			})
 
 			It("increments RenewEvent.Attempt on each retry until the lease window is exhausted", func() {
-				lease, _ := worklease.New(mockB, cfg)
-				// Short window so the bounded-retry loop produces several attempts then exhausts.
+				// Short TTL so the bounded-retry loop produces several attempts then exhausts.
+				shortCfg := cfg
+				shortCfg.TTL = 120 * time.Millisecond
+				lease, _ := worklease.New(mockB, shortCfg)
 				record := backend.LeaseRecord{WorkID: "w1", HolderID: "test-worker", FencingToken: 1, ExpiresAt: time.Now().Add(120 * time.Millisecond)}
-				mockB.EXPECT().Acquire(gomock.Any(), "w1", "test-worker", 30*time.Second).Return(record, nil)
-				mockB.EXPECT().Renew(gomock.Any(), record, 30*time.Second).Return(errors.New("connection lost")).AnyTimes()
+				mockB.EXPECT().Acquire(gomock.Any(), "w1", "test-worker", 120*time.Millisecond).Return(record, nil)
+				mockB.EXPECT().Renew(gomock.Any(), record, 120*time.Millisecond).Return(errors.New("connection lost")).AnyTimes()
 
 				token, _ := lease.Acquire(ctx, "w1")
 				renewCtx, stopRenewal := lease.StartRenewal(ctx, token,

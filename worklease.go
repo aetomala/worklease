@@ -36,9 +36,16 @@ type leaseClient struct {
 	obs LeaseObserver // never nil after New()
 }
 
-// New returns a new Lease instance backed by the provided Backend. Returns
-// ErrNilBackend if the backend is nil, and an error if TTL is zero, negative,
-// or below 1ms, or HolderID is empty.
+// New returns a new Lease instance backed by the provided Backend. Every error
+// it returns matches ErrConfigInvalid with errors.Is:
+//   - ErrNilBackend if b is nil.
+//   - "worklease: New: TTL is required" if cfg.TTL is zero.
+//   - "worklease: New: HolderID is required" if cfg.HolderID is empty.
+//   - "worklease: New: TTL must be positive, got <TTL>" if cfg.TTL is negative.
+//   - "worklease: New: TTL must be at least 1ms, got <TTL>" if cfg.TTL is
+//     below 1ms.
+//
+// The checks run in that order, and the first failing check is returned.
 func New(b backend.Backend, cfg Config) (Lease, error) {
 	// ===== STEP 1: Validate Required Fields =====
 	if b == nil {
@@ -46,20 +53,20 @@ func New(b backend.Backend, cfg Config) (Lease, error) {
 	}
 
 	if cfg.TTL == 0 {
-		return nil, fmt.Errorf("worklease: New: TTL is required")
+		return nil, &configError{msg: "worklease: New: TTL is required"}
 	}
 
 	if cfg.HolderID == "" {
-		return nil, fmt.Errorf("worklease: New: HolderID is required")
+		return nil, &configError{msg: "worklease: New: HolderID is required"}
 	}
 
 	// ===== STEP 2: Reject Invalid Values =====
 	if cfg.TTL < 0 {
-		return nil, fmt.Errorf("worklease: New: TTL must be positive, got %v", cfg.TTL)
+		return nil, &configError{msg: fmt.Sprintf("worklease: New: TTL must be positive, got %v", cfg.TTL)}
 	}
 
 	if cfg.TTL < minTTL {
-		return nil, fmt.Errorf("worklease: New: TTL must be at least 1ms, got %v", cfg.TTL)
+		return nil, &configError{msg: fmt.Sprintf("worklease: New: TTL must be at least 1ms, got %v", cfg.TTL)}
 	}
 
 	// ===== STEP 3: Initialize and Return =====
@@ -71,7 +78,8 @@ func New(b backend.Backend, cfg Config) (Lease, error) {
 
 // newToken converts a backend LeaseRecord to an exported Token. The deadline is
 // the local monotonic bound on the lease window — the time the acquiring backend
-// call started plus TTL — which never exceeds the true expiry.
+// call started plus TTL — which, under a constant offset between the local and
+// backend clocks, never exceeds the true expiry.
 func newToken(r backend.LeaseRecord, deadline time.Time) Token {
 	return Token{
 		workID:       r.WorkID,

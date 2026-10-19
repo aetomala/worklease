@@ -21,20 +21,24 @@ This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 
 ### Added
 
-- `worklease.LeaseWindow(ctx)` reports the lease window the renewal goroutine tracks, from the renewal context or any context derived from it (#93). It advances with each successful renewal and never exceeds the true expiry. `Token.ExpiresAt()` remains the expiry recorded at acquisition.
+- `worklease.LeaseWindow(ctx)` reports the lease window the renewal goroutine tracks, from the renewal context or any context derived from it (#93). It advances with each successful renewal and, under a constant clock offset, never exceeds the true expiry. `Token.ExpiresAt()` remains the expiry recorded at acquisition.
 - `worklease.ErrNilBackend`, `worklease.VacuumConfig`, `worklease.VacuumObserver`, and `worklease.SweepEvent`. `VacuumObserver.OnSweep` reports each sweep's options, rows deleted, duration, and error (#91, #92).
 - `worklease.ForgetEvent`, `LeaseObserver.OnForget`, and `worklease.OperationForget` (#92).
 - `leader.Config.IdleInterval` (#104), and `pool.ErrEmptyWorkID` and `pool.ErrDuplicateWorkID` (#97).
+- `worklease.ErrConfigInvalid`: every error `worklease.New` returns, and `ErrNilBackend`, now match it with `errors.Is`, as `pool.ErrConfigInvalid` does for `pool.New` (#114). Messages are unchanged.
 
 ### Fixed
 
-- `stopRenewal` no longer waits for an in-flight `Renew`, and the renewal context is cancelled with `ErrLeaseWindowExhausted` when the lease window closes, whether renewal is between ticks, backing off, or stalled in a `Renew` call (#88). Before, the window was checked only after a failed attempt, so work could run without a lease until the next tick or until a stalled call returned. Each `Renew` call runs with a deadline at the lease window. An abandoned call is reported to `OnRenew` with its context error, and its late result is discarded.
+- `stopRenewal` no longer waits for an in-flight `Renew`, and the renewal context is cancelled with `ErrLeaseWindowExhausted` when the lease window closes, whether renewal is between ticks, backing off, or stalled in a `Renew` call (#88). Before, the window was checked only after a failed attempt, so work could run without a lease until the next tick or until a stalled call returned. Each `Renew` call runs with a deadline at the lease window. An abandoned call is reported to `OnRenew` with its context error, and its late result is discarded. The first window is the local start of the acquiring call plus TTL, so a database clock behind the application does not shorten it (#117).
 - The PostgreSQL backend rounds a TTL up to the next whole microsecond instead of to the nearest microsecond, so a stored expiry is never earlier than the requested TTL (#90).
+- The PostgreSQL backend now returns an error matching `ctx.Err()` when a statement is cancelled or hits its deadline mid-flight; before, only the driver error (`pq: canceling statement due to user request`) was wrapped, so `errors.Is(err, context.Canceled)` was false (#113). The driver error is still wrapped. `Lease.Acquire` with `WithWaitForLease`, `leader.Elect`, and `worker.Runner.Run` now return a matching error in that case. Present at least since v0.4.0; the v0.5 `WithWaitForLease` cancellation contract made it visible.
+- PostgreSQL: reacquiring a lease now sets `acquired_at` to the new holder's acquisition time; before, it kept the row's creation time (#118). No migration: rows correct themselves on their next reacquisition.
 
 ### Chore
 
 - Go toolchain directive bumped from go1.26.8 to go1.26.9 for GO-2026-6617, GO-2026-6613, GO-2026-6612, GO-2026-6611, and GO-2026-6603 (`net/http`), GO-2026-6608 (`mime/multipart`), and GO-2026-6607 (`crypto/tls`), all reachable standard-library vulnerabilities fixed in go1.26.9. Four of them are also reported against `golang.org/x/net` v0.56.0, where govulncheck finds no call from worklease code; `x/net` stays at v0.56.0 because v0.60.0 requires Go 1.26. The `go 1.25.0` floor is unchanged.
 - The `integration/` suite runs every `worker`, `leader`, and `pool` composition spec on both the in-memory and PostgreSQL backends (#87). The PostgreSQL run uses its own schema, `worklease_integration`, and fails rather than skips when `WORKLEASE_REQUIRE_POSTGRES` is set.
+- A PostgreSQL test stalls `Renew` on a real half-open connection through an in-process proxy (#115), and new specs pin memory `Sweep` iteration, renewal backoff, and the poll and renewal interval options (#116).
 
 ---
 

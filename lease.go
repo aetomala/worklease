@@ -31,10 +31,26 @@ var (
 	// Inspect via context.Cause(renewCtx) — not returned directly from any method.
 	ErrLeaseWindowExhausted = errors.New(msgLeaseWindowExhausted)
 
+	// ErrConfigInvalid is the parent sentinel for configuration errors: every
+	// error worklease.New returns, and ErrNilBackend wherever it is returned.
+	// Match it with errors.Is.
+	ErrConfigInvalid = errors.New("worklease: invalid configuration")
+
 	// ErrNilBackend is returned by New and NewVacuum when the backend is nil,
-	// and by Vacuum.Sweep on a Vacuum that NewVacuum did not build.
-	ErrNilBackend = errors.New(msgNilBackend)
+	// and by Vacuum.Sweep on a Vacuum that NewVacuum did not build. It matches
+	// ErrConfigInvalid.
+	ErrNilBackend error = &configError{msg: msgNilBackend}
 )
+
+// The configError type is a configuration error whose message is exactly msg
+// and which matches ErrConfigInvalid with errors.Is.
+type configError struct {
+	msg string
+}
+
+func (e *configError) Error() string { return e.msg }
+
+func (e *configError) Unwrap() error { return ErrConfigInvalid }
 
 // ExitMode records how a lease holder left a lease. It is an alias for
 // backend.ExitMode; the canonical definition lives in package backend because

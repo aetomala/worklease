@@ -434,7 +434,10 @@ var (
     // ErrRetire is returned, or wrapped, by a work function to release with ExitRetired.
     ErrRetire = errors.New("worklease: retire work ID")
 
-    // ErrNilBackend is returned by New and NewVacuum for a nil backend (v0.7).
+    // ErrConfigInvalid is the parent sentinel for configuration errors (v0.7, #114).
+    ErrConfigInvalid = errors.New("worklease: invalid configuration")
+
+    // ErrNilBackend is returned by New and NewVacuum for a nil backend; it matches ErrConfigInvalid (v0.7).
     ErrNilBackend = errors.New("worklease: backend is required")
 )
 ```
@@ -573,6 +576,7 @@ SET holder_id      = EXCLUDED.holder_id,
     prev_exit_mode = COALESCE(worklease_leases.exit_mode, 'expired'),
     prev_holder_id = worklease_leases.holder_id,
     exit_mode      = NULL,
+    acquired_at    = NOW(),
     updated_at     = NOW()
 WHERE worklease_leases.expires_at < NOW()
 RETURNING fencing_token, expires_at
@@ -792,10 +796,9 @@ were fenced" from "the lease window ran out" by inspecting `context.Cause(renewC
 A non-fencing error from `Backend.Renew` no longer cancels `renewCtx` on the first failure.
 The goroutine retries with exponential backoff plus additive jitter, bounded strictly by the
 lease window — it never renews past the point where it could still be the legitimate owner.
-The window starts as the earlier of `token.ExpiresAt()` and the local acquire start plus TTL,
-and advances to the local start of each successful `Renew` plus TTL. The local bounds use the
-monotonic clock, so a backend clock running ahead of the local clock cannot extend retries
-past the true expiry (v0.6, PR #83). When the window is exhausted, it cancels with cause
+The window starts at the local start of the acquiring call plus TTL, and advances to the local
+start of each successful `Renew` plus TTL (#117: the backend's expiry timestamp no longer
+affects it). When the window is exhausted, it cancels with cause
 `ErrLeaseWindowExhausted`. A fencing error is never retried, and `ErrLeaseExpired` from `Renew`
 ends renewal at once (#84). See the [ADR-0013 amendment](adr/0013-renewal-goroutine-retry-policy.md). Each attempt is reported to `OnRenew` via `RenewEvent.Attempt` (1-based,
 incremented per retry). Configure the policy with `WithRenewalBackoff(initial, max, jitter)`
@@ -1409,7 +1412,7 @@ make ci   # lint, build, test (all three targets)
 
 ## Residual Risks
 
-**R1 — Clock skew across workers.** Lease expiry is decided by the database clock: `Acquire`, `Renew`, and `Release` compare `expires_at` with the server's `NOW()`. The renewal goroutine bounds its retries with a local monotonic window (acquire start plus TTL, advanced after each successful `Renew`), so a local clock that runs slow relative to the database can let a holder believe its lease is live slightly longer than storage does. Fencing still rejects its writes once a successor acquires. The one-millisecond past offset that `Release` writes (ADR-0012) assumes at least millisecond clock resolution. Since v0.7 the opposite skew matters too. The first lease window is the earlier of `Token.ExpiresAt()`, which is in database time, and the local acquire start plus TTL, and the renewal goroutine cancels `renewCtx` as soon as that window closes. A database clock that runs behind the application clock therefore shortens the first window by the skew. With the default renewal interval (TTL/2), a skew above half the TTL closes it before the first renewal; a skew of one TTL or more, or a `Backend` that returns a zero or past `ExpiresAt`, cancels `renewCtx` with `ErrLeaseWindowExhausted` as soon as `StartRenewal` runs, although storage still holds the lease. Once a renewal succeeds, the window is measured on the local monotonic clock and the skew no longer shortens it. Keep the database and application clocks within a small fraction of the shortest TTL, and make test fakes return a real `ExpiresAt`.
+**R1 — Clock skew across workers.** Lease expiry is decided by the database clock: `Acquire`, `Renew`, and `Release` compare `expires_at` with the server's `NOW()`. The renewal goroutine bounds its retries with a local monotonic window (acquire start plus TTL, advanced after each successful `Renew`), so a local clock that runs slow relative to the database can let a holder believe its lease is live slightly longer than storage does. Fencing still rejects its writes once a successor acquires. The one-millisecond past offset that `Release` writes (ADR-0012) assumes at least millisecond clock resolution. Since v0.7 the holder's window never compares the database clock with its own: it starts at the local start of the acquiring call plus TTL (#117), and the database computes the stored expiry from its own time when it runs the statement, which is never earlier. A constant clock offset in either direction therefore cannot shorten or extend the window. A database clock that steps forward during a lease (an NTP step, a VM clock resync) or runs fast can still expire the lease before the holder's window closes, so a successor may acquire while the old holder's `renewCtx` is live; fencing then rejects the old holder's writes. This was already true of every renewed window. The memory backend with an injected `Clock` behaves the same way when the clock is advanced: storage frees the lease while the holder's window stays open.
 
 **R2 — Renewal goroutine leak on a missed `stopRenewal`.** If a caller of `StartRenewal` never calls `stopRenewal()`, the goroutine runs until the parent context is cancelled, the lease is fenced, or the lease window closes. Call `defer stopRenewal()` immediately after `StartRenewal`. `worker.Runner` and `leader.Elect` do this themselves. Since v0.7, `stopRenewal` does not wait for an in-flight `Renew`: at most one abandoned backend call per `StartRenewal` may outlive it, ending when that call ends — for lib/pq on a half-open connection, when TCP keepalive gives up.
 
