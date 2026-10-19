@@ -346,12 +346,23 @@ var _ = Describe("worklease", func() {
 
 		It("uses default poll interval 2s when WithPollInterval not set", func() {
 			lease, _ := worklease.New(mockB, cfg)
-			mockB.EXPECT().Acquire(gomock.Any(), "w1", "test-worker", gomock.Any()).Return(backend.LeaseRecord{}, worklease.ErrLeaseHeld).AnyTimes()
-			// With default 2s poll interval, this should timeout before succeeding (100ms timeout < 2s poll interval)
-			shortCtx, shortCancel := context.WithTimeout(ctx, 100*time.Millisecond)
-			defer shortCancel()
-			_, err := lease.Acquire(shortCtx, "w1", worklease.WithWaitForLease())
+			// Record when each poll reaches the backend. Calls run on the caller's
+			// goroutine, so no lock is needed.
+			var calls []time.Time
+			mockB.EXPECT().Acquire(gomock.Any(), "w1", "test-worker", gomock.Any()).DoAndReturn(
+				func(context.Context, string, string, time.Duration) (backend.LeaseRecord, error) {
+					calls = append(calls, time.Now())
+					return backend.LeaseRecord{}, worklease.ErrLeaseHeld
+				}).AnyTimes()
+			// At the default 2s interval, exactly two polls fit in 3s: at t=0 and t=2s.
+			longCtx, longCancel := context.WithTimeout(ctx, 3*time.Second)
+			defer longCancel()
+			_, err := lease.Acquire(longCtx, "w1", worklease.WithWaitForLease())
 			Expect(errors.Is(err, context.DeadlineExceeded)).To(BeTrue())
+			Expect(calls).To(HaveLen(2))
+			gap := calls[1].Sub(calls[0])
+			Expect(gap).To(BeNumerically(">=", 1900*time.Millisecond))
+			Expect(gap).To(BeNumerically("<", 2300*time.Millisecond))
 		})
 
 		It("uses configured poll interval when set via WithPollInterval", func() {
