@@ -248,6 +248,46 @@ var _ = Describe("worklease", func() {
 			Expect(err).To(BeNil())
 			Expect(lease).NotTo(BeNil())
 		})
+
+		Context("configuration errors match ErrConfigInvalid (#114)", func() {
+			It("nil backend → ErrNilBackend, which also matches ErrConfigInvalid", func() {
+				_, err := worklease.New(nil, cfg)
+				Expect(err).To(BeIdenticalTo(worklease.ErrNilBackend))
+				Expect(errors.Is(err, worklease.ErrConfigInvalid)).To(BeTrue())
+			})
+
+			It("zero TTL → matches ErrConfigInvalid with message \"worklease: New: TTL is required\"", func() {
+				badCfg := cfg
+				badCfg.TTL = 0
+				_, err := worklease.New(mockB, badCfg)
+				Expect(errors.Is(err, worklease.ErrConfigInvalid)).To(BeTrue())
+				Expect(err.Error()).To(Equal("worklease: New: TTL is required"))
+			})
+
+			It("empty HolderID → matches ErrConfigInvalid with message \"worklease: New: HolderID is required\"", func() {
+				badCfg := cfg
+				badCfg.HolderID = ""
+				_, err := worklease.New(mockB, badCfg)
+				Expect(errors.Is(err, worklease.ErrConfigInvalid)).To(BeTrue())
+				Expect(err.Error()).To(Equal("worklease: New: HolderID is required"))
+			})
+
+			It("negative TTL → matches ErrConfigInvalid with message \"worklease: New: TTL must be positive, got -1s\"", func() {
+				badCfg := cfg
+				badCfg.TTL = -time.Second
+				_, err := worklease.New(mockB, badCfg)
+				Expect(errors.Is(err, worklease.ErrConfigInvalid)).To(BeTrue())
+				Expect(err.Error()).To(Equal("worklease: New: TTL must be positive, got -1s"))
+			})
+
+			It("TTL below 1ms → matches ErrConfigInvalid with message \"worklease: New: TTL must be at least 1ms, got 999µs\"", func() {
+				badCfg := cfg
+				badCfg.TTL = 999 * time.Microsecond
+				_, err := worklease.New(mockB, badCfg)
+				Expect(errors.Is(err, worklease.ErrConfigInvalid)).To(BeTrue())
+				Expect(err.Error()).To(Equal("worklease: New: TTL must be at least 1ms, got 999µs"))
+			})
+		})
 	})
 
 	// ===== PHASE 3: Core Operations =====
