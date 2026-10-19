@@ -472,6 +472,51 @@ var _ = Describe("Backend (postgres)", func() {
 		})
 	})
 
+	// storedSpan returns expires_at - acquired_at for workID, measured in SQL so
+	// only the server clock is involved.
+	storedSpan := func(workID string) time.Duration {
+		var us float64
+		Expect(db.QueryRowContext(ctx,
+			"SELECT EXTRACT(EPOCH FROM (expires_at - acquired_at)) * 1000000 FROM worklease_leases WHERE work_id = $1",
+			workID).Scan(&us)).To(Succeed())
+		return time.Duration(us) * time.Microsecond
+	}
+	stamps := func(workID string) (acquiredAt, updatedAt time.Time) {
+		Expect(db.QueryRowContext(ctx,
+			"SELECT acquired_at, updated_at FROM worklease_leases WHERE work_id = $1",
+			workID).Scan(&acquiredAt, &updatedAt)).To(Succeed())
+		return acquiredAt, updatedAt
+	}
+
+	It("Acquire stores an expiry at least ttl after the server's acquisition time, rounding 1500ns up", func() {
+		_, err := b.Acquire(ctx, "ttl-1", "holder-a", 1500*time.Nanosecond)
+		Expect(err).NotTo(HaveOccurred())
+		Expect(storedSpan("ttl-1")).To(BeNumerically(">=", 1500*time.Nanosecond))
+
+		time.Sleep(time.Millisecond) // the 1500ns lease has expired; reacquire it
+		_, err = b.Acquire(ctx, "ttl-1", "holder-b", 30*time.Second)
+		Expect(err).NotTo(HaveOccurred())
+		Expect(storedSpan("ttl-1")).To(BeNumerically(">=", 30*time.Second))
+	})
+
+	It("Acquire on reacquisition sets acquired_at to the reacquisition time", func() {
+		rec, err := b.Acquire(ctx, "acq-1", "holder-a", 30*time.Second)
+		Expect(err).NotTo(HaveOccurred())
+		first, _ := stamps("acq-1")
+
+		Expect(b.Renew(ctx, rec, 30*time.Second)).To(Succeed())
+		afterRenew, _ := stamps("acq-1")
+		Expect(afterRenew.Equal(first)).To(BeTrue(), "Renew changed acquired_at")
+
+		Expect(b.Release(ctx, rec, backend.ExitFinished)).To(Succeed())
+		time.Sleep(10 * time.Millisecond)
+		_, err = b.Acquire(ctx, "acq-1", "holder-b", 30*time.Second)
+		Expect(err).NotTo(HaveOccurred())
+		acquiredAt, updatedAt := stamps("acq-1")
+		Expect(acquiredAt).To(BeTemporally(">", first))
+		Expect(acquiredAt.Equal(updatedAt)).To(BeTrue(), "acquired_at %v, updated_at %v", acquiredAt, updatedAt)
+	})
+
 	Context("when a statement is cancelled mid-flight (#113)", func() {
 		// holdLock runs query on a second connection inside an open transaction,
 		// so a backend statement on the locked row or table blocks inside

@@ -28,12 +28,16 @@ import (
 //   - Parent context cancelled: ctx.Done() fires. The goroutine exits; renewCtx
 //     auto-cancels as a child of ctx and the goroutine sets no cause.
 //
-// The lease window starts as the earlier of token.ExpiresAt() and the local
-// start time of the acquiring backend call plus TTL. After every successful
-// renewal it advances to the local start time of that Renew call plus TTL. The
-// local bounds use the monotonic clock, so they never exceed the true expiry
-// regardless of skew between the local and backend clocks. LeaseWindow reads
-// the current window from renewCtx.
+// The lease window starts as the local start time of the acquiring backend
+// call plus TTL; token.ExpiresAt(), stamped by the backend's clock, does not
+// affect it. After every successful renewal it advances to the local start
+// time of that Renew call plus TTL. Because a backend computes the stored
+// expiry from a reading of its own clock taken during the call, which is never
+// before the local start, a constant offset between the local and backend clocks
+// cannot make these bounds exceed the true expiry. A backend clock that steps
+// forward or runs fast during the lease can still expire it before the window
+// closes; fencing then rejects the old holder's writes. LeaseWindow reads the
+// current window from renewCtx.
 //
 // Each Renew call runs on its own goroutine, with a context derived from ctx
 // whose deadline is the lease window at the time of the call. The renewal
@@ -115,13 +119,13 @@ func (c *leaseClient) StartRenewal(ctx context.Context, token Token, opts ...Ren
 
 // LeaseWindow returns the end of the lease window tracked by the renewal
 // goroutine whose renewal context is ctx or the nearest ancestor of ctx. The
-// window starts as the earlier of the token's ExpiresAt and the local start of
-// the acquiring backend call plus TTL, and advances to the local start of each
-// successful renewal plus TTL. It is measured on the local monotonic clock, so
-// it never exceeds the true expiry. The ok result is false when ctx does not
-// descend from a renewal context, and once that renewal context is done: after
-// fencing, an exhausted window, or cancellation of its parent. After
-// stopRenewal the window stays valid and stops advancing.
+// window starts as the local start of the acquiring backend call plus TTL, and
+// advances to the local start of each successful renewal plus TTL. It is
+// measured on the local monotonic clock, so under a constant offset between the
+// local and backend clocks it never exceeds the true expiry. The ok result is
+// false when ctx does not descend from a renewal context, and once that renewal
+// context is done: after fencing, an exhausted window, or cancellation of its
+// parent. After stopRenewal the window stays valid and stops advancing.
 func LeaseWindow(ctx context.Context) (deadline time.Time, ok bool) {
 	// ===== STEP 1: Find the tracked window =====
 	tw, _ := ctx.Value(leaseWindowKey{}).(*trackedWindow)
@@ -152,14 +156,12 @@ type trackedWindow struct {
 	done <-chan struct{}
 }
 
-// initialWindow returns the end of the lease window known at acquisition: the
-// earlier of the backend-reported expiry and the token's local deadline. A zero
-// deadline — a Token not produced by Acquire — falls back to ExpiresAt.
+// The initialWindow function returns the first lease window for token: the
+// local start of the acquiring backend call plus TTL. A token not produced by
+// Acquire, such as Token{}, has a zero deadline, so its window is already
+// closed.
 func initialWindow(token Token) time.Time {
-	if !token.deadline.IsZero() && token.deadline.Before(token.expiresAt) {
-		return token.deadline
-	}
-	return token.expiresAt
+	return token.deadline
 }
 
 // renewCycle runs one renewal cycle: an initial Renew attempt followed, on a

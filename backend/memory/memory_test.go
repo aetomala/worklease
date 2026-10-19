@@ -314,6 +314,12 @@ var _ = Describe("Backend (memory)", func() {
 		})
 
 		Describe("Backend.Acquire", func() {
+			It("Acquire stores an expiry exactly ttl after the backend clock", func() {
+				rec, err := b.Acquire(ctx, "w-ttl", "h1", 7*time.Second)
+				Expect(err).NotTo(HaveOccurred())
+				Expect(rec.ExpiresAt.Equal(fc.Now().Add(7*time.Second))).To(BeTrue(), "ExpiresAt %v", rec.ExpiresAt)
+			})
+
 			Context("when the lease exists and has not expired per the injected clock", func() {
 				It("returns ErrLeaseHeld", func() {
 					_, err := b.Acquire(ctx, "w1", "h1", 10*time.Second)

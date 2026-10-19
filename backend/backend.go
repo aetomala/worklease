@@ -90,6 +90,10 @@ type Checkpoint struct {
 type Backend interface {
 	// Acquire attempts to acquire a lease for the given work. Returns ErrLeaseHeld
 	// if the lease for this workID is held and has not expired.
+	// The stored expiry is at least ttl after a reading of the backend's clock
+	// taken during the call, never earlier than the moment the call began; a
+	// backend that cannot represent ttl exactly rounds up. The library bounds its
+	// local lease window by this guarantee.
 	// On reacquisition of an expired row, Acquire records the row's declared
 	// exit (ExitExpired if none was declared) and holder ID as the new lease's
 	// previous exit and previous holder, and clears the declared exit, in the
