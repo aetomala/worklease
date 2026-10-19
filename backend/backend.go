@@ -82,6 +82,11 @@ type Checkpoint struct {
 
 // Backend defines the contract for worklease storage backends. All methods are
 // single-attempt — retry policy is the caller's responsibility.
+//
+// Every method must honor ctx. When a method fails because ctx was cancelled
+// or its deadline passed, including while a statement or request is in
+// flight, the returned error must satisfy errors.Is(err, ctx.Err()). It may
+// also wrap the underlying driver error; the PostgreSQL backend wraps both.
 type Backend interface {
 	// Acquire attempts to acquire a lease for the given work. Returns ErrLeaseHeld
 	// if the lease for this workID is held and has not expired.

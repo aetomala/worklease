@@ -1,8 +1,12 @@
 package postgres
 
 import (
+	"context"
+	"errors"
 	"testing"
 	"time"
+
+	"github.com/lib/pq"
 )
 
 // TestFormatInterval verifies that formatInterval renders whole microseconds,
@@ -30,5 +34,40 @@ func TestFormatInterval(t *testing.T) {
 				t.Errorf("formatInterval(%v) = %q, want %q", tc.d, got, tc.want)
 			}
 		})
+	}
+}
+
+// TestWithCtxErr verifies that withCtxErr returns the driver error unchanged
+// while the context is live, and once it is done wraps both the driver error
+// and the context error, adding only the context error's text to the message.
+func TestWithCtxErr(t *testing.T) {
+	driverErr := &pq.Error{Code: "57014", Message: "canceling statement due to user request"}
+
+	if got := withCtxErr(context.Background(), driverErr); got != error(driverErr) {
+		t.Errorf("live ctx: withCtxErr returned %v, want the driver error unchanged", got)
+	}
+
+	cancelled, cancel := context.WithCancel(context.Background())
+	cancel()
+	got := withCtxErr(cancelled, driverErr)
+	if !errors.Is(got, context.Canceled) {
+		t.Errorf("cancelled ctx: errors.Is(%v, context.Canceled) = false", got)
+	}
+	var pqErr *pq.Error
+	if !errors.As(got, &pqErr) || pqErr.Code != "57014" {
+		t.Errorf("cancelled ctx: errors.As found no *pq.Error with code 57014 in %v", got)
+	}
+	if want := driverErr.Error() + " (context canceled)"; got.Error() != want {
+		t.Errorf("cancelled ctx: message = %q, want %q", got.Error(), want)
+	}
+
+	expired, cancelExpired := context.WithDeadline(context.Background(), time.Now().Add(-time.Second))
+	defer cancelExpired()
+	got = withCtxErr(expired, driverErr)
+	if !errors.Is(got, context.DeadlineExceeded) {
+		t.Errorf("expired ctx: errors.Is(%v, context.DeadlineExceeded) = false", got)
+	}
+	if !errors.As(got, &pqErr) {
+		t.Errorf("expired ctx: errors.As found no *pq.Error in %v", got)
 	}
 }
