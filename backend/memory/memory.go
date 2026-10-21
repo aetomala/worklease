@@ -160,7 +160,8 @@ func (mb *memoryBackend) Acquire(ctx context.Context, workID, holderID string, t
 // Checkpoint persists state associated with the current lease. If the holder ID
 // or fencing token does not match, ErrFenced is returned without modification.
 // Once the holder has declared an exit with Release, ErrLeaseExpired is returned
-// without writing. Checkpoint never writes an exit field.
+// without writing. Checkpoint never writes an exit field. A lease that lapsed
+// with no declared exit and no successor is revived: there is no expiry check.
 func (mb *memoryBackend) Checkpoint(ctx context.Context, record backend.LeaseRecord, state []byte, ttl time.Duration) error {
 	// ===== Check Context =====
 	if err := ctx.Err(); err != nil {

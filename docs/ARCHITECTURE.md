@@ -931,9 +931,9 @@ before the backend is called, so it produces no `OnRelease` event.
 (`OnCheckpoint`, `OnRenew`, `OnRelease`, or `OnForget`), then `OnFenced`. This order is mandatory.
 `OnFenced` fires on the **Release** and **Forget** paths as well as Checkpoint and Renew — `FencedEvent.Operation`
 identifies which. `OnReadCheckpoint` is **not** a fencing trigger: a fenced `ReadCheckpoint`
-surfaces only through `ReadCheckpointEvent.Err`. `ErrLeaseExpired` from `Checkpoint` or
-`Release` (an exit already declared, or a lapsed lease) is reported through the operation
-event's `Err` and does not fire `OnFenced`.
+surfaces only through `ReadCheckpointEvent.Err`. `ErrLeaseExpired` from `Checkpoint` (an exit
+already declared) or from `Release` (an exit already declared, or a lapsed lease) is reported
+through the operation event's `Err` and does not fire `OnFenced`.
 
 **Duration contract.** `Duration` measures the single final backend call only — never the
 `WithWaitForLease` poll loop. A caller that needs cumulative wait-loop time records its own

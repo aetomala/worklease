@@ -12,6 +12,14 @@ This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 ### Chore
 
 - Go toolchain directive bumped from go1.26.9 to go1.26.10 for GO-2026-6809 (`crypto/x509`), a reachable standard-library vulnerability fixed in go1.26.10. The `go 1.25.0` floor is unchanged.
+- `New(nil, Config{})` has a spec that pins the nil-backend check first in the documented check order (#120).
+- A test in `backend/postgres` requires all 15 PostgreSQL error sites to wrap with `withCtxErr`, so `make ci` fails if one is removed (#121).
+- A spec covers the renewal goroutine's closed-window check when the tick and the window timer are ready together (#122).
+
+### Documentation
+
+- `Lease.Checkpoint` and the backend `Checkpoint` comments state that a lapsed lease with no successor is revived by the write, and that `ErrLeaseExpired` follows only a declared exit (#127).
+- The observability example lists `OnForget` among the callbacks `OnFenced` accompanies (#123).
 
 ---
 

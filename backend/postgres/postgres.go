@@ -175,7 +175,9 @@ func (p *postgresBackend) Acquire(ctx context.Context, workID, holderID string, 
 
 // Checkpoint persists state and extends the lease. Returns ErrFenced if the
 // record no longer matches the stored lease, and ErrLeaseExpired, without
-// writing, if the holder has already declared an exit with Release.
+// writing, if the holder has already declared an exit with Release. A lease
+// that lapsed with no declared exit and no successor is revived: the write
+// matches on holder ID and fencing token, not on expiry.
 func (p *postgresBackend) Checkpoint(ctx context.Context, record backend.LeaseRecord, state []byte, ttl time.Duration) error {
 	// ===== STEP 1: Write State and Extend the Lease =====
 	ttlStr := formatInterval(ttl)
