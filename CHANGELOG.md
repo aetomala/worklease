@@ -9,6 +9,10 @@ This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 
 ## [Unreleased]
 
+### Chore
+
+- Go toolchain directive bumped from go1.26.9 to go1.26.10 for GO-2026-6809 (`crypto/x509`), a reachable standard-library vulnerability fixed in go1.26.10. The `go 1.25.0` floor is unchanged.
+
 ---
 
 ## [v0.7.0] — 2026-10-19
