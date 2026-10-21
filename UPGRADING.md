@@ -1,5 +1,9 @@
 # Upgrading worklease
 
+## v0.7.0 → v0.7.1
+
+No code or schema change is required. v0.7.1 adds specs and documentation only, and moves the toolchain directive to go1.26.10; the `go 1.25.0` floor is unchanged.
+
 ## v0.6.x → v0.7.0
 
 v0.7 hardens the API before the 1.0 freeze. Most changes turn configurations that never worked into errors at construction; the others are listed below.
