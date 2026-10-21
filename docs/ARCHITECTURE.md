@@ -1513,6 +1513,15 @@ make ci   # lint, build, test (all three targets)
 - Start the first lease window from the local clock only (#117)
 - Set `acquired_at` on PostgreSQL reacquisition (#118)
 
+### v0.7.1 — Released (v0.7.1, 2026-10-21)
+
+- Pin the nil-backend position in the `New` check order with a spec (#120)
+- Enforce the `withCtxErr` call-site count in the PostgreSQL backend tests (#121)
+- Cover the closed-window check when the renewal tick fires (#122)
+- List `OnForget` among the callbacks `OnFenced` accompanies in the observability example (#123)
+- Document that `Checkpoint` revives a lapsed lease instead of returning `ErrLeaseExpired` (#127)
+- Bump the Go toolchain to 1.26.10 for GO-2026-6809 (#128)
+
 ### Unscheduled (post-1.0)
 
 - Redis backend
@@ -1555,4 +1564,4 @@ ADR-0012, ADR-0013, and ADR-0016. v0.7 adds dated amendments to ADR-0002, ADR-00
 
 ---
 
-*Last updated: October 2026 — v0.7 (v0.7.0)*
+*Last updated: October 2026 — v0.7 (v0.7.1)*
