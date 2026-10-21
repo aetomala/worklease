@@ -1341,8 +1341,9 @@ var _ = Describe("worklease", func() {
 				// With the window closed and a 1ns tick, the tick wait finds the window
 				// timer and the ticker both ready, and select picks one at random. Only
 				// the ticker branch reaches the closed-window check, so each trial
-				// exercises it about half the time: 100 trials miss a missing check with
-				// probability about 2^-100. On correct code no outcome calls Renew.
+				// exercises it roughly half the time (40-50% measured): 100 trials miss
+				// a missing check with probability below 10^-20. On correct code no
+				// outcome calls Renew.
 				const trials = 100
 				counter := &countRenew{Backend: memory.New()}
 				spy := &spyObserver{}
