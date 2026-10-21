@@ -3,6 +3,8 @@ package postgres
 import (
 	"context"
 	"errors"
+	"os"
+	"strings"
 	"testing"
 	"time"
 
@@ -69,5 +71,24 @@ func TestWithCtxErr(t *testing.T) {
 	}
 	if !errors.As(got, &pqErr) {
 		t.Errorf("expired ctx: errors.As found no *pq.Error in %v", got)
+	}
+}
+
+// TestWithCtxErrCallSites verifies that every error postgres.go returns from a
+// database call is wrapped with withCtxErr. Specs cover only the sites whose
+// statement can be stalled; this count guards the rest (#121).
+func TestWithCtxErrCallSites(t *testing.T) {
+	const wantWrapped = 15 // a new call site must raise this count
+
+	src, err := os.ReadFile("postgres.go")
+	if err != nil {
+		t.Fatalf("read postgres.go: %v", err)
+	}
+
+	if got := strings.Count(string(src), "withCtxErr(ctx, err)"); got != wantWrapped {
+		t.Errorf("postgres.go has %d withCtxErr(ctx, err) call sites, want %d; if you added a database call, raise wantWrapped", got, wantWrapped)
+	}
+	if got := strings.Count(string(src), `%w", err)`); got != 0 {
+		t.Errorf(`postgres.go has %d bare %%w", err) wraps, want 0; wrap the error with withCtxErr(ctx, err)`, got)
 	}
 }

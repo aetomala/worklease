@@ -102,7 +102,13 @@ func toRecord(t Token) backend.LeaseRecord {
 
 // Checkpoint persists state associated with the current lease. The caller must
 // pass a valid Token obtained from Acquire. Returns ErrFenced if the
-// token's fencing token no longer matches the stored lease.
+// token's fencing token no longer matches the stored lease, including when the
+// lease lapsed and another holder has since acquired it.
+// Checkpoint returns ErrLeaseExpired, without writing, only once this holder has
+// declared an exit with Release; a declared exit cannot be undone by a late
+// write. Stop any background checkpoint loop when it sees ErrLeaseExpired.
+// A lease whose TTL lapsed with no declared exit and no successor is not an
+// error: the write succeeds and revives the lease.
 func (c *leaseClient) Checkpoint(ctx context.Context, token Token, state []byte) error {
 	// ===== Validate and Delegate =====
 	record := toRecord(token)

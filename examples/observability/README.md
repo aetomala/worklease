@@ -90,7 +90,7 @@ stable identity of a single holding, so the example stores the acquire time keye
 as an in-flight gauge rather than a completed observation.
 
 **`OnFenced` enables a dedicated fencing counter** — when an operation is fenced, `OnFenced`
-fires *in addition to* the operation-specific callback (`OnCheckpoint`/`OnRenew`/`OnRelease`),
+fires *in addition to* the operation-specific callback (`OnCheckpoint`/`OnRenew`/`OnRelease`/`OnForget`),
 and `FencedEvent.Operation` identifies which. Incrementing one counter in `OnFenced` gives an
 accurate fencing rate without inspecting error values in every operation callback. The example
 triggers a real fencing event: holder A's lease expires (fake clock advance), holder B

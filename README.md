@@ -480,7 +480,9 @@ Requires Go 1.25+. PostgreSQL backend requires PostgreSQL 12+.
 
 ## Status
 
-v0.7.0 is the latest release line. The core lease model (`Lease`, `Token`, fencing, options, sentinels) is stable; v0.7 changes several signatures and behaviors, so read `UPGRADING.md` before upgrading.
+v0.7.1 is the latest release line. The core lease model (`Lease`, `Token`, fencing, options, sentinels) is stable; v0.7 changes several signatures and behaviors, so read `UPGRADING.md` before upgrading from v0.6.
+
+v0.7.1 is a patch on v0.7.0 with no API, behavior, or schema change. It adds specs and a CI-enforced check that guard v0.7 guarantees (the `New` check order, the closed-window check in the renewal goroutine, and context-matching PostgreSQL errors), states in the `Checkpoint` docs that a lapsed lease with no successor is revived by the write, and builds with Go 1.26.10.
 
 v0.7 bounds renewal by the lease window. Each `Renew` call runs with a deadline at the window, `stopRenewal` no longer waits for an in-flight call, and the renewal context is cancelled with `ErrLeaseWindowExhausted` when the window closes, even while a `Renew` call is stalled. Work code reads the window with `worklease.LeaseWindow(ctx)`. Errors become matchable: every `worklease.New` error matches `ErrConfigInvalid`, and a PostgreSQL statement cancelled mid-flight returns an error matching `ctx.Err()`. `Forget` and `Vacuum.Sweep` are observable through `LeaseObserver.OnForget` and `VacuumObserver`, and the `integration/` suite runs on both backends.
 
@@ -499,6 +501,7 @@ Breaking changes: `worklease.New` rejects a TTL below 1ms; the PostgreSQL backen
 - **v0.5.0** — bounded renewal retry (`WithRenewalBackoff`, `ErrLeaseWindowExhausted`, `RenewEvent.Attempt`); global fencing sequence on both backends; single-statement `Acquire` with `RETURNING`; ctx-aware `Acquire` cancellation under `WithWaitForLease` (breaking — see `UPGRADING.md`)
 - **v0.6.0** — caller-governed row lifecycle: `Lease.Forget`, `worklease.Vacuum.Sweep` (breaking — new `Backend`/`Lease` interface methods for custom implementations; see `UPGRADING.md`); explicit exit modes (ADR-0018) — schema migration required, see `UPGRADING.md`
 - **v0.7.0** — renewal bounded by the lease window (`LeaseWindow`, per-attempt `Renew` deadline, `stopRenewal` no longer waits on backend I/O); `ErrConfigInvalid` and context-matching PostgreSQL errors; observable `Forget` and `Sweep` (`OnForget`, `VacuumObserver`); 1ms TTL floor, READ COMMITTED, `NewVacuum(b, cfg)`, `pool.New` work ID validation, `Elect` pacing (breaking — see `UPGRADING.md`)
+- **v0.7.1** — patch: specs and a CI-enforced check for v0.7 guarantees, `Checkpoint` revival documented, Go 1.26.10 toolchain; no API, behavior, or schema change
 
 ### Future
 - Redis backend, etcd backend (unscheduled, post-1.0)
