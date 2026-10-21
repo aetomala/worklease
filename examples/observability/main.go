@@ -12,7 +12,7 @@
 //     keyed on token.FencingToken() — the fencing token is the stable identity of a
 //     single holding, so it is the correct correlation key.
 //  4. A dedicated fencing counter via OnFenced, which fires *in addition to* the
-//     operation callback (OnCheckpoint/OnRenew/OnRelease) — so a fencing metric can be
+//     operation callback (OnCheckpoint/OnRenew/OnRelease/OnForget) — so a fencing metric can be
 //     incremented in one place without parsing error values out of every operation.
 //  5. Renewal retry tracking via RenewEvent.Attempt — Attempt > 1 means the v0.5
 //     renewal goroutine retried after a transient non-fencing error (e.g., a Postgres
@@ -182,7 +182,7 @@ func (m *metricsObserver) OnSweep(_ context.Context, e worklease.SweepEvent) {
 
 // OnFenced fires in addition to the operation-specific callback when an operation is
 // fenced. Incrementing a single counter here gives an accurate fencing rate without
-// inspecting error values in OnCheckpoint/OnRenew/OnRelease. e.Operation identifies
+// inspecting error values in OnCheckpoint/OnRenew/OnRelease/OnForget. e.Operation identifies
 // which operation triggered it.
 func (m *metricsObserver) OnFenced(_ context.Context, e worklease.FencedEvent) {
 	m.mu.Lock()
