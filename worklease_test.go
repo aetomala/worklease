@@ -170,6 +170,17 @@ func (failRenew) Renew(_ context.Context, _ backend.LeaseRecord, _ time.Duration
 	return errors.New("storage unavailable")
 }
 
+// countRenew wraps a Backend and counts every Renew call.
+type countRenew struct {
+	backend.Backend
+	calls atomic.Int64
+}
+
+func (c *countRenew) Renew(ctx context.Context, rec backend.LeaseRecord, ttl time.Duration) error {
+	c.calls.Add(1)
+	return c.Backend.Renew(ctx, rec, ttl)
+}
+
 var _ = Describe("worklease", func() {
 	var (
 		ctx    context.Context
@@ -254,6 +265,14 @@ var _ = Describe("worklease", func() {
 				_, err := worklease.New(nil, cfg)
 				Expect(err).To(BeIdenticalTo(worklease.ErrNilBackend))
 				Expect(errors.Is(err, worklease.ErrConfigInvalid)).To(BeTrue())
+			})
+
+			It("nil backend and an empty Config → the nil-backend check runs first, so the error is ErrNilBackend (#120)", func() {
+				// The empty Config also fails the TTL and HolderID checks, so only the
+				// documented order makes the nil-backend error the one returned.
+				lease, err := worklease.New(nil, worklease.Config{})
+				Expect(err).To(BeIdenticalTo(worklease.ErrNilBackend))
+				Expect(lease).To(BeNil())
 			})
 
 			It("zero TTL → matches ErrConfigInvalid with message \"worklease: New: TTL is required\"", func() {
@@ -1316,6 +1335,34 @@ var _ = Describe("worklease", func() {
 
 				Eventually(renewCtx.Done(), 50*time.Millisecond).Should(BeClosed())
 				Expect(context.Cause(renewCtx)).To(MatchError(worklease.ErrLeaseWindowExhausted))
+			})
+
+			It("cancels renewCtx without calling Renew or emitting OnRenew when the tick fires on a closed window (#122)", func() {
+				// With the window closed and a 1ns tick, the tick wait finds the window
+				// timer and the ticker both ready, and select picks one at random. Only
+				// the ticker branch reaches the closed-window check, so each trial
+				// exercises it about half the time: 100 trials miss a missing check with
+				// probability about 2^-100. On correct code no outcome calls Renew.
+				const trials = 100
+				counter := &countRenew{Backend: memory.New()}
+				spy := &spyObserver{}
+				lease, err := worklease.New(counter, worklease.Config{TTL: time.Millisecond, HolderID: "test-worker", Observer: spy})
+				Expect(err).NotTo(HaveOccurred())
+				token, err := lease.Acquire(ctx, "w1")
+				Expect(err).NotTo(HaveOccurred())
+				time.Sleep(5 * time.Millisecond) // the 1ms window is now closed
+
+				for range trials {
+					renewCtx, stopRenewal := lease.StartRenewal(ctx, token, worklease.WithRenewalInterval(time.Nanosecond))
+					Eventually(renewCtx.Done(), time.Second, time.Millisecond).Should(BeClosed())
+					stopRenewal()
+					Expect(context.Cause(renewCtx)).To(MatchError(worklease.ErrLeaseWindowExhausted))
+				}
+
+				Expect(counter.calls.Load()).To(BeZero())
+				spy.mu.Lock()
+				defer spy.mu.Unlock()
+				Expect(spy.renewCalls).To(BeEmpty())
 			})
 		})
 
