@@ -112,6 +112,18 @@ var _ = Describe("Runner", func() {
 			Expect(err).NotTo(HaveOccurred())
 			Expect(r).NotTo(BeNil())
 		})
+
+		Context("configuration errors (v0.8)", func() {
+			It("ErrLeaseRequired and ErrWorkFnRequired match worklease.ErrConfigInvalid", func() {
+				Expect(errors.Is(worker.ErrLeaseRequired, worklease.ErrConfigInvalid)).To(BeTrue())
+				Expect(errors.Is(worker.ErrWorkFnRequired, worklease.ErrConfigInvalid)).To(BeTrue())
+			})
+
+			It("ErrLeaseRequired and ErrWorkFnRequired keep their messages", func() {
+				Expect(worker.ErrLeaseRequired.Error()).To(Equal("worker: lease is required"))
+				Expect(worker.ErrWorkFnRequired.Error()).To(Equal("worker: work function is required"))
+			})
+		})
 	})
 
 	// ===== PHASE 2: Run — Successful Exits =====
