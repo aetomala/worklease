@@ -127,15 +127,29 @@ type SlotRetiredEvent struct {
 	WorkID string
 }
 
-// noopPoolObserver is a pool.Observer that discards all slot lifecycle events.
-// Substituted when Config.Observer is nil.
-type noopPoolObserver struct{}
+// NoopObserver is an Observer that discards every slot lifecycle event. New
+// substitutes it when Config.Observer is nil. Embed it in an observer type to
+// implement only the methods of interest; the embedding type keeps compiling
+// when a later release adds a method to Observer.
+type NoopObserver struct{}
 
-func (noopPoolObserver) OnSlotAcquired(_ context.Context, _ SlotAcquiredEvent) {}
-func (noopPoolObserver) OnSlotLost(_ context.Context, _ SlotLostEvent)         {}
-func (noopPoolObserver) OnSlotBackoff(_ context.Context, _ SlotBackoffEvent)   {}
-func (noopPoolObserver) OnSlotDead(_ context.Context, _ SlotDeadEvent)         {}
-func (noopPoolObserver) OnSlotRetired(_ context.Context, _ SlotRetiredEvent)   {}
+// The compile-time assertion below keeps NoopObserver in step with Observer.
+var _ Observer = NoopObserver{}
+
+// OnSlotAcquired discards the event.
+func (NoopObserver) OnSlotAcquired(_ context.Context, _ SlotAcquiredEvent) {}
+
+// OnSlotLost discards the event.
+func (NoopObserver) OnSlotLost(_ context.Context, _ SlotLostEvent) {}
+
+// OnSlotBackoff discards the event.
+func (NoopObserver) OnSlotBackoff(_ context.Context, _ SlotBackoffEvent) {}
+
+// OnSlotDead discards the event.
+func (NoopObserver) OnSlotDead(_ context.Context, _ SlotDeadEvent) {}
+
+// OnSlotRetired discards the event.
+func (NoopObserver) OnSlotRetired(_ context.Context, _ SlotRetiredEvent) {}
 
 // WorkFn is the work function executed per slot.
 // The workID argument identifies the slot. The token argument is the current
@@ -265,7 +279,7 @@ func New(lease worklease.Lease, cfg Config, fn WorkFn) (*Pool, error) {
 	// ===== STEP 6: Inject NoOp observer when nil =====
 	obs := cfg.Observer
 	if obs == nil {
-		obs = noopPoolObserver{}
+		obs = NoopObserver{}
 	}
 
 	return &Pool{
