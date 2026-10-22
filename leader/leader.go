@@ -10,11 +10,27 @@ import (
 	"github.com/aetomala/worklease"
 )
 
+// Error message constant for the leader configuration sentinel.
+const (
+	msgLeaseRequired = "leader: lease is required"
+)
+
 // Sentinel errors for leader operations.
 var (
-	// ErrLeaseRequired is returned by Elect when lease is nil.
-	ErrLeaseRequired = errors.New("leader: lease is required")
+	// ErrLeaseRequired is returned by Elect when lease is nil. It matches
+	// worklease.ErrConfigInvalid with errors.Is.
+	ErrLeaseRequired error = &configError{msg: msgLeaseRequired}
 )
+
+// The configError type is a configuration error whose message is exactly msg
+// and which matches worklease.ErrConfigInvalid with errors.Is.
+type configError struct {
+	msg string
+}
+
+func (e *configError) Error() string { return e.msg }
+
+func (e *configError) Unwrap() error { return worklease.ErrConfigInvalid }
 
 // defaultCleanupTimeout bounds Release when Config.CleanupTimeout is zero or
 // negative.
