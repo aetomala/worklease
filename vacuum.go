@@ -28,6 +28,8 @@ type VacuumConfig struct {
 
 // VacuumObserver receives a callback after each Vacuum.Sweep backend call.
 // It is called synchronously. Implementations must not block or panic.
+//
+// A minor release may add a method to VacuumObserver. Embed NoopVacuumObserver in an observer type so that it keeps compiling.
 type VacuumObserver interface {
 	// OnSweep is called after every Sweep backend call, successful or not. It
 	// is not called when Sweep returns ErrNilBackend or ErrRetentionRequired,
@@ -63,7 +65,8 @@ func (NoopVacuumObserver) OnSweep(_ context.Context, _ SweepEvent) {}
 // declared exit. Rows released with ExitFinished or ExitAbandoned, and rows
 // currently held, are never deleted. A deleted row's checkpoint is gone: the
 // next holder of that work ID sees ExitNone and empty state, and a holder
-// whose row was deleted gets ErrFenced. Build a Vacuum with NewVacuum.
+// whose row was deleted gets ErrFenced. Build a Vacuum with NewVacuum. A Vacuum
+// is safe for concurrent use if its Backend and its VacuumObserver are.
 type Vacuum struct {
 	b   backend.Backend
 	obs VacuumObserver
@@ -85,11 +88,15 @@ func NewVacuum(b backend.Backend, cfg VacuumConfig) (*Vacuum, error) {
 	return &Vacuum{b: b, obs: obs}, nil
 }
 
-// Sweep returns ErrNilBackend, without calling the backend or the observer, on
-// a Vacuum that NewVacuum did not build, including a nil *Vacuum. It returns
-// ErrRetentionRequired, also without either call, if opts.Retention <= 0.
-// Otherwise it calls the backend, reports the outcome to the configured
-// VacuumObserver, and returns the backend's result unchanged.
+// Sweep deletes rows that are not currently held and were last updated more than
+// opts.Retention ago: rows released with ExitRetired and, with
+// opts.IncludeExpired, rows whose lease expired with no declared exit. It returns the
+// number of rows the backend reported deleted. Sweep returns ErrNilBackend, without
+// calling the backend or the observer, on a Vacuum that NewVacuum did not build,
+// including a nil *Vacuum. It returns ErrRetentionRequired, also without either
+// call, if opts.Retention <= 0. Otherwise it calls the backend, reports the
+// outcome to the configured VacuumObserver, and returns the backend's result
+// unchanged.
 func (v *Vacuum) Sweep(ctx context.Context, opts SweepOptions) (int64, error) {
 	// ===== STEP 1: Validate the Vacuum and the Options =====
 	if v == nil || v.b == nil {

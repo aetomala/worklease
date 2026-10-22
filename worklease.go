@@ -102,7 +102,7 @@ func toRecord(t Token) backend.LeaseRecord {
 
 // Checkpoint persists state associated with the current lease. The caller must
 // pass a valid Token obtained from Acquire. Returns ErrFenced if the
-// token's fencing token no longer matches the stored lease, including when the
+// token's holder ID or fencing token no longer matches the stored lease, including when the
 // lease lapsed and another holder has since acquired it.
 // Checkpoint returns ErrLeaseExpired, without writing, only once this holder has
 // declared an exit with Release; a declared exit cannot be undone by a late
@@ -132,7 +132,7 @@ func (c *leaseClient) Checkpoint(ctx context.Context, token Token, state []byte)
 }
 
 // Renew extends the lease expiration time. Returns ErrFenced if the token's
-// fencing token no longer matches the stored lease, or ErrLeaseExpired if the
+// holder ID or fencing token no longer matches the stored lease, or ErrLeaseExpired if the
 // lease has already expired.
 func (c *leaseClient) Renew(ctx context.Context, token Token) error {
 	// ===== Validate and Delegate =====
@@ -217,7 +217,7 @@ func (c *leaseClient) ReadCheckpoint(ctx context.Context, token Token) (Checkpoi
 }
 
 // Forget permanently deletes the lease record for token's workID. Returns
-// ErrFenced if the fencing token no longer matches the stored lease, or if no
+// ErrFenced if the holder ID or fencing token no longer matches the stored lease, or if no
 // record exists for token's workID. Every call is reported to OnForget,
 // followed by OnFenced with OperationForget when the backend returns ErrFenced.
 func (c *leaseClient) Forget(ctx context.Context, token Token) error {

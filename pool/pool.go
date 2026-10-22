@@ -1,3 +1,5 @@
+// Package pool runs a work function for each of a set of work IDs, holding a
+// worklease lease while each one runs.
 package pool
 
 import (
@@ -61,6 +63,10 @@ func (e *configError) Unwrap() error { return worklease.ErrConfigInvalid }
 // runner.Run call. A permanent error causes the slot goroutine to exit without
 // reacquiring. Implement this interface on a custom error type; pool provides
 // no concrete implementation.
+//
+// Pool finds a PermanentError through error wrapping with errors.As and drops
+// the slot only when its Permanent method returns true. A PermanentError whose
+// Permanent method returns false does not suppress reacquisition.
 type PermanentError interface {
 	error
 	Permanent() bool
@@ -80,6 +86,8 @@ func (e *permanentErr) Unwrap() error   { return e.cause }
 // Observer receives callbacks on slot lifecycle transitions.
 // All methods are called synchronously. Implementations must not block or panic.
 // The zero value of Config.Observer is nil; the library substitutes a no-op.
+//
+// A minor release may add a method to Observer. Embed NoopObserver in an observer type so that it keeps compiling.
 type Observer interface {
 	// OnSlotAcquired is called when a slot's Runner.Run begins executing WorkFn.
 	OnSlotAcquired(ctx context.Context, e SlotAcquiredEvent)
@@ -179,7 +187,7 @@ type Config struct {
 	// entry and ErrDuplicateWorkID for a repeated one.
 	WorkIDs []string
 
-	// AcquireOptions are passed to each slot's internal Runner. Passing
+	// AcquireOptions are passed to each slot's internal Runner. Optional. Passing
 	// worklease.WithWaitForLease returns ErrWithWaitForLeaseProhibited from New.
 	AcquireOptions []worklease.AcquireOption
 
@@ -204,6 +212,7 @@ type Config struct {
 	// BackoffInterval is the wait before reacquiring a slot after Runner.Run
 	// returns a non-permanent error other than ErrFenced and ErrLeaseHeld.
 	// Zero or negative means 1s. No jitter.
+	// The zero value differs from leader.Config.BackoffInterval, where zero or negative means no sleep.
 	BackoffInterval time.Duration
 
 	// CleanupTimeout is passed to each slot's Runner. It bounds the final
@@ -219,7 +228,8 @@ type Config struct {
 // Pool distributes a fixed set of work IDs across competing processes.
 // Multiple Pool instances — one per process — share a backend and collectively
 // cover the work ID set. Rebalancing is emergent from lease acquisition races.
-// Pool uses one worker.Runner per active slot internally.
+// Pool uses one worker.Runner per active slot internally. Run is not safe to
+// call concurrently on the same Pool; ActiveSlots is safe for concurrent use.
 type Pool struct {
 	lease  worklease.Lease
 	cfg    Config
@@ -412,7 +422,9 @@ func sleep(ctx context.Context, d time.Duration) bool {
 	}
 }
 
-// ActiveSlots returns the work IDs currently held by this Pool instance.
+// ActiveSlots returns the work IDs whose WorkFn is currently executing in this
+// Pool instance. A slot that is acquiring, reading its checkpoint, in backoff, or
+// completing its final Checkpoint and Release is not included.
 // Safe for concurrent use.
 func (p *Pool) ActiveSlots() []string {
 	p.mu.Lock()
