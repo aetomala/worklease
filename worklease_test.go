@@ -2263,4 +2263,36 @@ var _ = Describe("worklease", func() {
 			})
 		})
 	})
+
+	// ===== PHASE 8: v0.8 API audit =====
+	Describe("Sentinel re-exports (v0.8)", func() {
+		Context("the sentinels are the identical values of the backend sentinels", func() {
+			It("worklease.ErrFenced is backend.ErrFenced", func() {
+				Expect(worklease.ErrFenced).To(BeIdenticalTo(backend.ErrFenced))
+				Expect(errors.Is(backend.ErrFenced, worklease.ErrFenced)).To(BeTrue())
+			})
+
+			It("worklease.ErrLeaseHeld is backend.ErrLeaseHeld", func() {
+				Expect(worklease.ErrLeaseHeld).To(BeIdenticalTo(backend.ErrLeaseHeld))
+				Expect(errors.Is(backend.ErrLeaseHeld, worklease.ErrLeaseHeld)).To(BeTrue())
+			})
+
+			It("worklease.ErrLeaseExpired is backend.ErrLeaseExpired", func() {
+				Expect(worklease.ErrLeaseExpired).To(BeIdenticalTo(backend.ErrLeaseExpired))
+				Expect(errors.Is(backend.ErrLeaseExpired, worklease.ErrLeaseExpired)).To(BeTrue())
+			})
+
+			It("worklease.ErrInvalidExitMode is backend.ErrInvalidExitMode", func() {
+				Expect(worklease.ErrInvalidExitMode).To(BeIdenticalTo(backend.ErrInvalidExitMode))
+				Expect(errors.Is(backend.ErrInvalidExitMode, worklease.ErrInvalidExitMode)).To(BeTrue())
+			})
+
+			It("each of the four sentinels keeps its v0.7 message", func() {
+				Expect(worklease.ErrFenced.Error()).To(Equal("worklease: fenced — lease acquired by another holder"))
+				Expect(worklease.ErrLeaseHeld.Error()).To(Equal("worklease: lease is currently held"))
+				Expect(worklease.ErrLeaseExpired.Error()).To(Equal("worklease: lease has expired"))
+				Expect(worklease.ErrInvalidExitMode.Error()).To(Equal("worklease: invalid exit mode"))
+			})
+		})
+	})
 })
