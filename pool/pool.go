@@ -13,13 +13,20 @@ import (
 	"github.com/aetomala/worklease/worker"
 )
 
+// Error message constant for the pool configuration parent sentinel.
+const (
+	msgConfigInvalid = "pool: invalid configuration"
+)
+
 // Sentinel errors for pool operations.
 var (
 	// ErrConfigInvalid is the parent sentinel for all pool configuration errors.
-	ErrConfigInvalid = errors.New("pool: invalid configuration")
+	// It matches worklease.ErrConfigInvalid with errors.Is, so one check covers
+	// configuration errors from every package.
+	ErrConfigInvalid error = &configError{msg: msgConfigInvalid}
 
-	// ErrNilLease is returned by New when lease is nil.
-	ErrNilLease = fmt.Errorf("pool: lease is required: %w", ErrConfigInvalid)
+	// ErrLeaseRequired is returned by New when lease is nil.
+	ErrLeaseRequired = fmt.Errorf("pool: lease is required: %w", ErrConfigInvalid)
 
 	// ErrEmptyWorkIDs is returned by New when cfg.WorkIDs is empty.
 	ErrEmptyWorkIDs = fmt.Errorf("pool: WorkIDs must not be empty: %w", ErrConfigInvalid)
@@ -38,6 +45,16 @@ var (
 	// ErrAllSlotsDead is returned by Run when every slot exited via PermanentError.
 	ErrAllSlotsDead = errors.New("pool: all slots permanently dead")
 )
+
+// The configError type is a configuration error whose message is exactly msg
+// and which matches worklease.ErrConfigInvalid with errors.Is.
+type configError struct {
+	msg string
+}
+
+func (e *configError) Error() string { return e.msg }
+
+func (e *configError) Unwrap() error { return worklease.ErrConfigInvalid }
 
 // PermanentError is implemented by errors returned from WorkFn that should
 // suppress slot reacquisition. Pool checks errors.As(err, &pe) after each
@@ -199,16 +216,17 @@ type Pool struct {
 }
 
 // New constructs a Pool. Does not start slot acquisition — call Run.
-// Returns ErrNilLease if lease is nil, ErrEmptyWorkIDs if cfg.WorkIDs is empty,
-// ErrEmptyWorkID if an entry of cfg.WorkIDs is the empty string,
+// Returns ErrLeaseRequired if lease is nil, ErrEmptyWorkIDs if cfg.WorkIDs is
+// empty, ErrEmptyWorkID if an entry of cfg.WorkIDs is the empty string,
 // ErrDuplicateWorkID if a work ID appears more than once, and
 // ErrWithWaitForLeaseProhibited if cfg.AcquireOptions includes WithWaitForLease.
-// All five satisfy errors.Is(err, ErrConfigInvalid). Entries are checked in
-// index order, and the first invalid entry is reported.
+// All five satisfy errors.Is(err, ErrConfigInvalid) and errors.Is(err,
+// worklease.ErrConfigInvalid). Entries are checked in index order, and the
+// first invalid entry is reported.
 func New(lease worklease.Lease, cfg Config, fn WorkFn) (*Pool, error) {
 	// ===== STEP 1: Nil lease check =====
 	if lease == nil {
-		return nil, ErrNilLease
+		return nil, ErrLeaseRequired
 	}
 
 	// ===== STEP 2: Empty WorkIDs check =====
