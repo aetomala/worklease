@@ -1,3 +1,6 @@
+// Package backend defines the storage contract that worklease backends
+// implement, the types shared across it, and the sentinel errors that backends
+// return. Package worklease re-exports the sentinels as identical values.
 package backend
 
 import (
@@ -87,6 +90,14 @@ type Checkpoint struct {
 // or its deadline passed, including while a statement or request is in
 // flight, the returned error must satisfy errors.Is(err, ctx.Err()). It may
 // also wrap the underlying driver error; the PostgreSQL backend wraps both.
+//
+// Every method must be safe for concurrent use: the renewal goroutine calls
+// Renew while the caller calls Checkpoint, Release, or ReadCheckpoint on the
+// same lease.
+//
+// The method set of Backend is fixed from v1.0. A capability added after v1.0
+// arrives as a separate optional interface that the library finds by type
+// assertion, so existing implementations keep compiling.
 type Backend interface {
 	// Acquire attempts to acquire a lease for the given work. Returns ErrLeaseHeld
 	// if the lease for this workID is held and has not expired.

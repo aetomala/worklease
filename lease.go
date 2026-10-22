@@ -11,19 +11,29 @@ import (
 
 // Error message constants for lease operations.
 const (
-	msgFenced               = "worklease: fenced — lease acquired by another holder"
-	msgLeaseHeld            = "worklease: lease is currently held"
-	msgLeaseExpired         = "worklease: lease has expired"
 	msgLeaseWindowExhausted = "worklease: lease window exhausted before renewal succeeded"
 	msgAcquireCancelled     = "worklease: acquire cancelled"
 	msgNilBackend           = "worklease: backend is required"
 )
 
-// Sentinel errors for Lease operations.
+// Sentinel errors for Lease operations. ErrFenced, ErrLeaseHeld, and
+// ErrLeaseExpired are the identical values of the sentinels of the same name in
+// package backend, so errors.Is matches either name.
 var (
-	ErrFenced       = errors.New(msgFenced)
-	ErrLeaseHeld    = errors.New(msgLeaseHeld)
-	ErrLeaseExpired = errors.New(msgLeaseExpired)
+	// ErrFenced is returned by Checkpoint, Renew, Release, ReadCheckpoint, and
+	// Forget when the token no longer matches the stored lease or when no record
+	// exists for the work ID. It is the same value as backend.ErrFenced.
+	ErrFenced = backend.ErrFenced
+
+	// ErrLeaseHeld is returned by Acquire when the lease for the work ID is held
+	// and has not expired. It is the same value as backend.ErrLeaseHeld.
+	ErrLeaseHeld = backend.ErrLeaseHeld
+
+	// ErrLeaseExpired is returned by Renew when the lease has already expired, by
+	// Release when the lease has expired or this holder already declared an exit,
+	// and by Checkpoint only once this holder has declared an exit with Release.
+	// It is the same value as backend.ErrLeaseExpired.
+	ErrLeaseExpired = backend.ErrLeaseExpired
 
 	// ErrLeaseWindowExhausted is set as the cancel cause of the renewal context
 	// when the renewal goroutine exhausts the remaining lease window without a
@@ -80,16 +90,16 @@ const (
 // holder exited. It is an alias for backend.Checkpoint.
 type Checkpoint = backend.Checkpoint
 
-// Error message constants for the exit-mode sentinels.
+// Error message constant for the retire sentinel.
 const (
-	msgInvalidExitMode = "worklease: invalid exit mode"
-	msgRetire          = "worklease: retire work ID"
+	msgRetire = "worklease: retire work ID"
 )
 
 var (
 	// ErrInvalidExitMode is returned by Release when mode is not ExitFinished,
-	// ExitAbandoned, or ExitRetired.
-	ErrInvalidExitMode = errors.New(msgInvalidExitMode)
+	// ExitAbandoned, or ExitRetired. It is the same value as
+	// backend.ErrInvalidExitMode.
+	ErrInvalidExitMode = backend.ErrInvalidExitMode
 
 	// ErrRetire is returned, or wrapped, by a work function to declare that its
 	// work ID is complete permanently. Runner.Run in package worker, Elect in
