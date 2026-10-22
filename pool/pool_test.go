@@ -106,13 +106,35 @@ var _ = Describe("pool", func() {
 
 	Describe("New", func() {
 		Context("when lease is nil", func() {
-			It("returns ErrNilLease which satisfies errors.Is(ErrConfigInvalid)", func() {
+			It("returns ErrLeaseRequired which satisfies errors.Is(ErrConfigInvalid)", func() {
 				p, err := pool.New(nil, pool.Config{WorkIDs: []string{"w1"}}, func(_ context.Context, _ string, _ worklease.Token, _ worklease.Checkpoint) ([]byte, error) {
 					return nil, nil
 				})
-				Expect(errors.Is(err, pool.ErrNilLease)).To(BeTrue())
+				Expect(errors.Is(err, pool.ErrLeaseRequired)).To(BeTrue())
 				Expect(errors.Is(err, pool.ErrConfigInvalid)).To(BeTrue())
 				Expect(p).To(BeNil())
+			})
+		})
+		Context("configuration errors match worklease.ErrConfigInvalid (v0.8)", func() {
+			It("every pool configuration sentinel matches pool.ErrConfigInvalid and worklease.ErrConfigInvalid", func() {
+				for _, err := range []error{pool.ErrConfigInvalid, pool.ErrLeaseRequired, pool.ErrEmptyWorkIDs, pool.ErrEmptyWorkID, pool.ErrDuplicateWorkID, pool.ErrWithWaitForLeaseProhibited} {
+					Expect(errors.Is(err, pool.ErrConfigInvalid)).To(BeTrue(), err.Error())
+					Expect(errors.Is(err, worklease.ErrConfigInvalid)).To(BeTrue(), err.Error())
+				}
+			})
+
+			It("ErrAllSlotsDead does not match worklease.ErrConfigInvalid", func() {
+				Expect(errors.Is(pool.ErrAllSlotsDead, worklease.ErrConfigInvalid)).To(BeFalse())
+			})
+
+			It("the pool sentinel messages are unchanged", func() {
+				Expect(pool.ErrConfigInvalid.Error()).To(Equal("pool: invalid configuration"))
+				Expect(pool.ErrLeaseRequired.Error()).To(Equal("pool: lease is required: pool: invalid configuration"))
+				Expect(pool.ErrEmptyWorkIDs.Error()).To(Equal("pool: WorkIDs must not be empty: pool: invalid configuration"))
+				Expect(pool.ErrEmptyWorkID.Error()).To(Equal("pool: work ID must not be empty: pool: invalid configuration"))
+				Expect(pool.ErrDuplicateWorkID.Error()).To(Equal("pool: duplicate work ID: pool: invalid configuration"))
+				Expect(pool.ErrWithWaitForLeaseProhibited.Error()).To(Equal("pool: WithWaitForLease is prohibited in AcquireOptions: pool: invalid configuration"))
+				Expect(pool.ErrAllSlotsDead.Error()).To(Equal("pool: all slots permanently dead"))
 			})
 		})
 		Context("when cfg.WorkIDs is empty", func() {

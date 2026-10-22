@@ -59,6 +59,13 @@ var _ = Describe("leader", func() {
 			})
 		})
 
+		Context("nil lease (v0.8)", func() {
+			It("ErrLeaseRequired matches worklease.ErrConfigInvalid and keeps its message", func() {
+				Expect(errors.Is(leader.ErrLeaseRequired, worklease.ErrConfigInvalid)).To(BeTrue())
+				Expect(leader.ErrLeaseRequired.Error()).To(Equal("leader: lease is required"))
+			})
+		})
+
 		Context("when Acquire returns ErrLeaseHeld", func() {
 			It("returns ErrLeaseHeld without calling fn", func() {
 				mockLease.EXPECT().Acquire(gomock.Any(), "work-1").Return(worklease.Token{}, worklease.ErrLeaseHeld)
