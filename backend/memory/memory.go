@@ -1,3 +1,5 @@
+// Package memory implements the worklease Backend in process memory. It is
+// intended for tests and single-process use.
 package memory
 
 import (
@@ -7,7 +9,6 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/aetomala/worklease"
 	"github.com/aetomala/worklease/backend"
 )
 
@@ -111,7 +112,7 @@ func (mb *memoryBackend) Acquire(ctx context.Context, workID, holderID string, t
 	// ===== STEP 3: Evaluate Expiry =====
 	if exists && !mb.clock.Now().After(r.expiresAt) {
 		// Lease is held and not expired
-		return backend.LeaseRecord{}, worklease.ErrLeaseHeld
+		return backend.LeaseRecord{}, backend.ErrLeaseHeld
 	}
 
 	// ===== STEP 4: Determine New Fencing Token, Preserve Checkpoint, Capture Previous Exit =====
@@ -177,14 +178,14 @@ func (mb *memoryBackend) Checkpoint(ctx context.Context, record backend.LeaseRec
 
 	// ===== STEP 3: Check Fencing Token =====
 	if !exists || !r.heldBy(record) {
-		return worklease.ErrFenced
+		return backend.ErrFenced
 	}
 
 	// ===== STEP 4: Refuse After a Declared Exit =====
 	// A declared exit cannot be undone by a late write (D12). A lapsed lease
 	// with no declared exit can still be revived: no expiry check here.
 	if r.exitMode != backend.ExitNone {
-		return worklease.ErrLeaseExpired
+		return backend.ErrLeaseExpired
 	}
 
 	// ===== STEP 5: Update Checkpoint =====
@@ -220,14 +221,14 @@ func (mb *memoryBackend) Renew(ctx context.Context, record backend.LeaseRecord, 
 
 	// ===== STEP 3: Check Fencing Token =====
 	if !exists || !r.heldBy(record) {
-		return worklease.ErrFenced
+		return backend.ErrFenced
 	}
 
 	// ===== STEP 4: Check Expiry =====
 	// A lease is renewable only while now < expiresAt — mirrors postgres
 	// expires_at > NOW(), so both backends refuse renewal at the boundary.
 	if !mb.clock.Now().Before(r.expiresAt) {
-		return worklease.ErrLeaseExpired
+		return backend.ErrLeaseExpired
 	}
 
 	// ===== STEP 5: Extend Expiration =====
@@ -245,7 +246,7 @@ func (mb *memoryBackend) Renew(ctx context.Context, record backend.LeaseRecord, 
 func (mb *memoryBackend) Release(ctx context.Context, record backend.LeaseRecord, mode backend.ExitMode) error {
 	// ===== Validate Mode =====
 	if mode != backend.ExitFinished && mode != backend.ExitAbandoned && mode != backend.ExitRetired {
-		return worklease.ErrInvalidExitMode
+		return backend.ErrInvalidExitMode
 	}
 
 	// ===== Check Context =====
@@ -262,14 +263,14 @@ func (mb *memoryBackend) Release(ctx context.Context, record backend.LeaseRecord
 
 	// ===== STEP 3: Check Fencing Token =====
 	if !exists || !r.heldBy(record) {
-		return worklease.ErrFenced
+		return backend.ErrFenced
 	}
 
 	// ===== STEP 4: Check Expiry =====
 	// Live only while now < expiresAt — mirrors postgres expires_at > NOW(). A
 	// second Release after a declared exit lands here too (D17).
 	if !r.expiresAt.After(mb.clock.Now()) {
-		return worklease.ErrLeaseExpired
+		return backend.ErrLeaseExpired
 	}
 
 	// ===== STEP 5: Record Exit and Expire Immediately =====
@@ -300,7 +301,7 @@ func (mb *memoryBackend) ReadCheckpoint(ctx context.Context, record backend.Leas
 
 	// ===== STEP 3: Check Fencing Token =====
 	if !exists || r.fencingToken != record.FencingToken {
-		return backend.Checkpoint{}, worklease.ErrFenced
+		return backend.Checkpoint{}, backend.ErrFenced
 	}
 
 	// ===== STEP 4: Return Checkpoint and Previous Exit =====
@@ -327,7 +328,7 @@ func (mb *memoryBackend) Forget(ctx context.Context, record backend.LeaseRecord)
 
 	r, exists := mb.records[record.WorkID]
 	if !exists || !r.heldBy(record) {
-		return worklease.ErrFenced
+		return backend.ErrFenced
 	}
 
 	delete(mb.records, record.WorkID)
