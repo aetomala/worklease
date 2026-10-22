@@ -45,11 +45,17 @@ type SweepEvent struct {
 	Err      error
 }
 
-// The noopVacuumObserver type discards sweep events. NewVacuum substitutes it
-// when VacuumConfig.Observer is nil.
-type noopVacuumObserver struct{}
+// NoopVacuumObserver is a VacuumObserver that discards every event. NewVacuum
+// substitutes it when VacuumConfig.Observer is nil. Embed it in an observer type
+// so that the embedding type keeps compiling when a later release adds a method
+// to VacuumObserver.
+type NoopVacuumObserver struct{}
 
-func (noopVacuumObserver) OnSweep(_ context.Context, _ SweepEvent) {}
+// The compile-time assertion below keeps NoopVacuumObserver in step with VacuumObserver.
+var _ VacuumObserver = NoopVacuumObserver{}
+
+// OnSweep discards the event.
+func (NoopVacuumObserver) OnSweep(_ context.Context, _ SweepEvent) {}
 
 // Vacuum performs age-based bulk cleanup of lease rows. Sweep deletes rows
 // released with ExitRetired once they are older than SweepOptions.Retention
@@ -74,7 +80,7 @@ func NewVacuum(b backend.Backend, cfg VacuumConfig) (*Vacuum, error) {
 	// ===== STEP 2: Initialize and Return =====
 	obs := cfg.Observer
 	if obs == nil {
-		obs = noopVacuumObserver{}
+		obs = NoopVacuumObserver{}
 	}
 	return &Vacuum{b: b, obs: obs}, nil
 }

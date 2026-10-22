@@ -193,6 +193,20 @@ type Token struct {
 	deadline     time.Time // Local monotonic bound — Acquire start plus TTL; zero if unknown
 }
 
+// NewToken returns a Token holding the given fields, for tests and fakes that
+// need a Token value without acquiring a lease. NewToken does not call a backend
+// and does not validate its arguments. A Token it returns has no local lease
+// window, so the window that StartRenewal bounds renewal by is already closed.
+// Use Acquire to obtain a Token for a real lease.
+func NewToken(workID, holderID string, fencingToken uint64, expiresAt time.Time) Token {
+	return Token{
+		workID:       workID,
+		holderID:     holderID,
+		fencingToken: fencingToken,
+		expiresAt:    expiresAt,
+	}
+}
+
 // WorkID returns the identifier for the unit of work being leased.
 func (t Token) WorkID() string {
 	return t.workID
@@ -354,16 +368,50 @@ type LeaseObserver interface {
 	OnFenced(ctx context.Context, e FencedEvent)
 }
 
-// Operation identifies the Lease operation that triggered a fencing event.
+// Operation identifies the Lease operation that triggered a fencing event. The
+// zero value is not a valid Operation.
 type Operation uint8
 
-// Operation values for fencing events.
+// Operation values for fencing events. The values start at 1 so that the zero
+// value is not a valid Operation.
 const (
-	OperationCheckpoint Operation = iota
+	// OperationCheckpoint identifies a Checkpoint call.
+	OperationCheckpoint Operation = iota + 1
+
+	// OperationRenew identifies a Renew call.
 	OperationRenew
+
+	// OperationRelease identifies a Release call.
 	OperationRelease
+
+	// OperationForget identifies a Forget call.
 	OperationForget
 )
+
+// Text forms of each Operation, as returned by Operation.String.
+const (
+	operationTextCheckpoint = "Checkpoint"
+	operationTextRenew      = "Renew"
+	operationTextRelease    = "Release"
+	operationTextForget     = "Forget"
+)
+
+// String returns "Checkpoint", "Renew", "Release", or "Forget". Any other value
+// formats as "Operation(<n>)".
+func (o Operation) String() string {
+	switch o {
+	case OperationCheckpoint:
+		return operationTextCheckpoint
+	case OperationRenew:
+		return operationTextRenew
+	case OperationRelease:
+		return operationTextRelease
+	case OperationForget:
+		return operationTextForget
+	default:
+		return fmt.Sprintf("Operation(%d)", uint8(o))
+	}
+}
 
 // AcquireEvent carries the result of one backend acquire attempt.
 // Duration is the duration of that backend call only — not the wait loop.
@@ -436,14 +484,32 @@ type FencedEvent struct {
 	Operation Operation
 }
 
-// noopObserver is a LeaseObserver that discards all events.
-// Substituted when Config.Observer is nil.
-type noopObserver struct{}
+// NoopObserver is a LeaseObserver that discards every event. The library
+// substitutes it when Config.Observer is nil. Embed it in an observer type to
+// implement only the methods of interest; the embedding type keeps compiling
+// when a later release adds a method to LeaseObserver.
+type NoopObserver struct{}
 
-func (noopObserver) OnAcquire(_ context.Context, _ AcquireEvent)               {}
-func (noopObserver) OnCheckpoint(_ context.Context, _ CheckpointEvent)         {}
-func (noopObserver) OnRenew(_ context.Context, _ RenewEvent)                   {}
-func (noopObserver) OnRelease(_ context.Context, _ ReleaseEvent)               {}
-func (noopObserver) OnReadCheckpoint(_ context.Context, _ ReadCheckpointEvent) {}
-func (noopObserver) OnForget(_ context.Context, _ ForgetEvent)                 {}
-func (noopObserver) OnFenced(_ context.Context, _ FencedEvent)                 {}
+// The compile-time assertion below keeps NoopObserver in step with LeaseObserver.
+var _ LeaseObserver = NoopObserver{}
+
+// OnAcquire discards the event.
+func (NoopObserver) OnAcquire(_ context.Context, _ AcquireEvent) {}
+
+// OnCheckpoint discards the event.
+func (NoopObserver) OnCheckpoint(_ context.Context, _ CheckpointEvent) {}
+
+// OnRenew discards the event.
+func (NoopObserver) OnRenew(_ context.Context, _ RenewEvent) {}
+
+// OnRelease discards the event.
+func (NoopObserver) OnRelease(_ context.Context, _ ReleaseEvent) {}
+
+// OnReadCheckpoint discards the event.
+func (NoopObserver) OnReadCheckpoint(_ context.Context, _ ReadCheckpointEvent) {}
+
+// OnForget discards the event.
+func (NoopObserver) OnForget(_ context.Context, _ ForgetEvent) {}
+
+// OnFenced discards the event.
+func (NoopObserver) OnFenced(_ context.Context, _ FencedEvent) {}

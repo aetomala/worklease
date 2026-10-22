@@ -18,7 +18,7 @@ type Config struct {
 	// HolderID is the identifier of the entity that will hold leases. Required; empty returns an error.
 	HolderID string
 
-	// Observer is the LeaseObserver that will be notified of lease events. Optional; nil defaults to noopObserver.
+	// Observer is the LeaseObserver that will be notified of lease events. Optional; nil defaults to NoopObserver.
 	Observer LeaseObserver
 }
 
@@ -71,7 +71,7 @@ func New(b backend.Backend, cfg Config) (Lease, error) {
 
 	// ===== STEP 3: Initialize and Return =====
 	if cfg.Observer == nil {
-		cfg.Observer = noopObserver{}
+		cfg.Observer = NoopObserver{}
 	}
 	return &leaseClient{b: b, cfg: cfg, obs: cfg.Observer}, nil
 }
