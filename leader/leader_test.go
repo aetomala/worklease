@@ -13,8 +13,8 @@ import (
 
 	"github.com/aetomala/worklease"
 	"github.com/aetomala/worklease/backend/memory"
+	"github.com/aetomala/worklease/internal/testutil"
 	"github.com/aetomala/worklease/leader"
-	"github.com/aetomala/worklease/testutil"
 )
 
 var (

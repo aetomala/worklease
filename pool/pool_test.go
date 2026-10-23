@@ -12,8 +12,8 @@ import (
 	"go.uber.org/mock/gomock"
 
 	"github.com/aetomala/worklease"
+	"github.com/aetomala/worklease/internal/testutil"
 	"github.com/aetomala/worklease/pool"
-	"github.com/aetomala/worklease/testutil"
 )
 
 type testPermError struct{ msg string }
