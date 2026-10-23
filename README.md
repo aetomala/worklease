@@ -401,7 +401,13 @@ Configuration errors are matchable: every error `worklease.New` returns, and `Er
 ### PostgreSQL (v0.1)
 
 ```go
-import "github.com/aetomala/worklease/backend/postgres"
+import (
+    "database/sql"
+
+    _ "github.com/lib/pq" // any database/sql PostgreSQL driver; the backend does not register one
+
+    "github.com/aetomala/worklease/backend/postgres"
+)
 
 db, _ := sql.Open("postgres", dsn)
 backend, _ := postgres.New(db)

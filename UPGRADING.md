@@ -2,7 +2,7 @@
 
 ## v0.7.1 → v0.8.0
 
-v0.8 audits the API before the 1.0 freeze. No schema change is required. Three changes break callers.
+v0.8 audits the API before the 1.0 freeze. No schema change is required. Four changes break callers.
 
 ### `testutil` is no longer importable
 
@@ -15,6 +15,10 @@ Replace the identifier. The message is unchanged, and so is the `errors.Is(err, 
 ### `Operation` values start at 1
 
 `worklease.OperationCheckpoint` is 1, `OperationRenew` 2, `OperationRelease` 3, `OperationForget` 4. A zero `Operation` is no longer `OperationCheckpoint`. Compare with the named constants; do not store the numbers.
+
+### `backend/postgres` no longer registers a driver
+
+Import a `database/sql` PostgreSQL driver in your program, for example `_ "github.com/lib/pq"`. Without one, `sql.Open("postgres", dsn)` returns an `unknown driver` error.
 
 ### No change needed
 

@@ -14,6 +14,7 @@ This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 - The package `github.com/aetomala/worklease/testutil` no longer exists (#94). Its mocks moved to `internal/testutil`, which cannot be imported outside this module; generate mocks of `worklease.Lease` and `backend.Backend` with mockgen in your own module.
 - `pool.ErrNilLease` is renamed `pool.ErrLeaseRequired`; the message is unchanged. There is no alias.
 - `worklease.Operation` values now start at 1 (`OperationCheckpoint` is 1, `OperationRenew` 2, `OperationRelease` 3, `OperationForget` 4), so the zero `Operation` is no longer `OperationCheckpoint`. Code that stored or compared the numeric values must be rebuilt.
+- `backend/postgres` no longer imports `github.com/lib/pq`. Callers import a `database/sql` PostgreSQL driver themselves; a program that relied on the side-effect import now gets an `unknown driver` error from `sql.Open("postgres", …)` at run time. The README quick start shows the import.
 
 ### Added
 
