@@ -219,9 +219,11 @@ if deadline, ok := worklease.LeaseWindow(renewCtx); ok && time.Until(deadline) <
 
 | Error | Meaning |
 |---|---|
-| `ErrFenced` | A higher fencing token has been issued. This worker has been superseded. Stop writing to the lease store. |
+| `ErrFenced` | The token no longer matches the stored lease, or no record exists for the work ID. This worker has been superseded. Stop writing to the lease store. |
 | `ErrLeaseHeld` | The lease is currently held by another worker. |
 | `ErrLeaseExpired` | The lease expired before this operation completed. |
+
+The sentinels are defined in package `backend` and re-exported from `worklease` as the same values, so `errors.Is` matches either name.
 
 `ErrFenced` is the critical one. When `Checkpoint` or `Renew` returns `ErrFenced`, a successor has already acquired the lease and this worker is a zombie. Stop immediately — any further writes to the lease store will be rejected. Note that `ErrFenced` does not cancel in-flight external calls the worker may have already initiated; those must be made idempotent at the application layer.
 
@@ -298,7 +300,7 @@ if err != nil { ... }
 if err := p.Run(ctx); err != nil { ... }
 ```
 
-Return `worklease.ErrRetire` (or wrap it) from the work function to retire the work ID: the slot releases with `ExitRetired`, calls `OnSlotRetired`, and stops. Return a `PermanentError` to drop a slot without reacquisition — implement the interface on a custom type, or wrap an error with `pool.Permanent(err)`; the slot releases with `ExitAbandoned`. When every slot exits through a `PermanentError`, `Run` returns `pool.ErrAllSlotsDead`; if any slot retired, it returns `nil`. `ErrAllSlotsDead` requires every slot to be counted dead: a slot that observes cancellation of `ctx` before its `PermanentError` check exits uncounted, so if `ctx` is cancelled at the same moment the last slot fails, `Run` may return `nil` instead. A slot whose work ID another process holds waits `Config.IdleInterval` (default 1s, up to 20% jitter); a slot whose work function returned `nil` waits `Config.RerunInterval` (default 1s, up to 20% jitter) before running again; a slot whose work function failed waits `Config.BackoffInterval` (default 1s) and calls `OnSlotBackoff`. Set `pool.Config.Observer` to a `pool.Observer` to receive slot lifecycle events (`OnSlotAcquired` / `OnSlotLost` / `OnSlotBackoff` / `OnSlotDead` / `OnSlotRetired`), and call `ActiveSlots()` for a point-in-time view of slots currently executing their work function. Construction errors are distinct sentinels (`ErrNilLease` / `ErrEmptyWorkIDs` / `ErrEmptyWorkID` / `ErrDuplicateWorkID` / `ErrWithWaitForLeaseProhibited`) that all satisfy `errors.Is(err, pool.ErrConfigInvalid)`; every work ID must be non-empty and unique.
+Return `worklease.ErrRetire` (or wrap it) from the work function to retire the work ID: the slot releases with `ExitRetired`, calls `OnSlotRetired`, and stops. Return a `PermanentError` to drop a slot without reacquisition — implement the interface on a custom type, or wrap an error with `pool.Permanent(err)`; the slot releases with `ExitAbandoned`. When every slot exits through a `PermanentError`, `Run` returns `pool.ErrAllSlotsDead`; if any slot retired, it returns `nil`. `ErrAllSlotsDead` requires every slot to be counted dead: a slot that observes cancellation of `ctx` before its `PermanentError` check exits uncounted, so if `ctx` is cancelled at the same moment the last slot fails, `Run` may return `nil` instead. A slot whose work ID another process holds waits `Config.IdleInterval` (default 1s, up to 20% jitter); a slot whose work function returned `nil` waits `Config.RerunInterval` (default 1s, up to 20% jitter) before running again; a slot whose work function failed waits `Config.BackoffInterval` (default 1s) and calls `OnSlotBackoff`. Set `pool.Config.Observer` to a `pool.Observer` to receive slot lifecycle events (`OnSlotAcquired` / `OnSlotLost` / `OnSlotBackoff` / `OnSlotDead` / `OnSlotRetired`), and call `ActiveSlots()` for a point-in-time view of slots currently executing their work function. Construction errors are distinct sentinels (`ErrLeaseRequired` / `ErrEmptyWorkIDs` / `ErrEmptyWorkID` / `ErrDuplicateWorkID` / `ErrWithWaitForLeaseProhibited`) that all satisfy `errors.Is(err, pool.ErrConfigInvalid)` and `errors.Is(err, worklease.ErrConfigInvalid)`; every work ID must be non-empty and unique.
 
 ### checkpoint — Typed serialization helpers
 
@@ -307,6 +309,23 @@ Return `worklease.ErrRetire` (or wrap it) from the work function to retire the w
 ### Observability — LeaseObserver
 
 Set `worklease.Config.Observer` to a `LeaseObserver` to receive a synchronous callback after every lease operation — `OnAcquire`, `OnCheckpoint`, `OnRenew`, `OnRelease`, `OnReadCheckpoint`, and `OnForget` — each with an event struct carrying the `Token`, the error, and a `Duration` for the backend call. `OnFenced` fires in addition when `Checkpoint`, `Renew`, `Release`, or `Forget` is fenced. nil installs a no-op, so observability is fully opt-in. `Vacuum` is observed separately: set `worklease.VacuumConfig.Observer` to a `VacuumObserver` to receive `OnSweep` with each sweep's options, rows deleted, duration, and error. See [`examples/observability`](examples/observability/) for a stdlib-only implementation of both.
+
+#### Embedding a no-op observer
+
+`worklease.NoopObserver`, `worklease.NoopVacuumObserver`, and `pool.NoopObserver` discard every event. Embed one in your own observer to implement only the methods you need; your type keeps compiling when a later release adds an observer method. The same pattern applies to all three: embed the no-op type that matches the interface you implement.
+
+```go
+type acquireCounter struct {
+	worklease.NoopObserver
+	n atomic.Int64
+}
+
+func (c *acquireCounter) OnAcquire(_ context.Context, _ worklease.AcquireEvent) {
+	c.n.Add(1)
+}
+```
+
+Pass `&acquireCounter{}` as `worklease.Config.Observer`. A runnable version is `ExampleNoopObserver` in the package documentation. `FencedEvent.Operation` prints as `Checkpoint`, `Renew`, `Release`, or `Forget` when formatted with `%v`.
 
 ---
 
@@ -373,7 +392,7 @@ n, err := vacuum.Sweep(ctx, worklease.SweepOptions{
 
 `Forget` is reported to `LeaseObserver.OnForget`, and each `Sweep` that reaches the backend to `VacuumConfig.Observer`.
 
-Configuration errors are matchable: every error `worklease.New` returns, and `ErrNilBackend` from `NewVacuum` and `Vacuum.Sweep`, satisfies `errors.Is(err, worklease.ErrConfigInvalid)`.
+Configuration errors are matchable: every error `worklease.New` returns, and `ErrNilBackend` from `NewVacuum` and `Vacuum.Sweep`, satisfies `errors.Is(err, worklease.ErrConfigInvalid)`. So do the `pool` configuration sentinels (including `pool.ErrConfigInvalid`), `worker.ErrLeaseRequired`, `worker.ErrWorkFnRequired`, and `leader.ErrLeaseRequired`.
 
 ## Backends
 
@@ -505,7 +524,6 @@ Breaking changes: `worklease.New` rejects a TTL below 1ms; the PostgreSQL backen
 
 ### Future
 - Redis backend, etcd backend (unscheduled, post-1.0)
-- `Token` test constructor — unblocks table-driven tests that construct tokens directly
 
 ---
 
