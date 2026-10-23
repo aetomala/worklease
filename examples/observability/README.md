@@ -38,8 +38,8 @@ go run .
 Expected output (latency values vary run to run):
 
 ```
-holder-A checkpoint correctly fenced: worklease: Checkpoint: workID="report-2026-06" holderID="holder-A": worklease: fenced — lease acquired by another holder
-holder-A forget correctly fenced: worklease: Forget: workID="report-2026-06" holderID="holder-A": worklease: fenced — lease acquired by another holder
+holder-A checkpoint correctly fenced: worklease: Checkpoint: workID="report-2026-06" holderID="holder-A": worklease: fenced — the lease is no longer held by this token
+holder-A forget correctly fenced: worklease: Forget: workID="report-2026-06" holderID="holder-A": worklease: fenced — the lease is no longer held by this token
 vacuum swept 1 row(s)
 === lease metrics ===
 acquire          calls=5 errors=0 avg_latency=433ns
@@ -117,7 +117,9 @@ bodies and correlation logic are identical whether the sink is an in-memory map,
 counted like any other operation, and a fenced `Forget` also fires `OnFenced` with
 `OperationForget`: holder D forgets the row, then holder A's stale `Forget` is fenced. `Vacuum`
 takes its own observer, `VacuumConfig.Observer`; the same `metricsObserver` implements
-`VacuumObserver`, and `OnSweep` counts sweeps, rows deleted, and failed sweeps. The example
+`VacuumObserver`, and `OnSweep` counts sweeps, rows deleted, and failed sweeps. It embeds
+`worklease.NoopObserver` and `worklease.NoopVacuumObserver`, so it keeps compiling when a
+later release adds an observer method. The example
 retires a second work ID, advances the fake clock past the retention period, and sweeps it.
 
 ---
