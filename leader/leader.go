@@ -1,3 +1,5 @@
+// Package leader runs a function while holding a worklease lease, so that one
+// process at a time acts as the leader for a work ID.
 package leader
 
 import (
@@ -68,6 +70,7 @@ type Config struct {
 	// neither a context error nor worklease.ErrLeaseHeld. Zero or negative means
 	// no sleep. Fencing paths bypass the sleep, and cancellation of the context
 	// passed to Elect cuts it short.
+	// The zero value differs from pool.Config.BackoffInterval, where zero or negative means 1s.
 	BackoffInterval time.Duration
 
 	// CleanupTimeout bounds Release, which runs on a context that survives
@@ -96,7 +99,8 @@ func jitterWait(base time.Duration) time.Duration {
 	return base + time.Duration(idleJitter*float64(base)*rand.Float64())
 }
 
-// Elect acquires workID and calls fn under a managed renewal context.
+// Elect acquires workID and calls fn under a managed renewal context. Elect
+// returns ErrLeaseRequired, without calling Acquire, if lease is nil.
 // The fn argument receives a context that is cancelled if the lease is fenced,
 // if the lease window is exhausted, or if ctx is cancelled; fn must respect it.
 // Elect records fn's outcome as the exit mode: nil releases with ExitFinished,

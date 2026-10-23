@@ -1,3 +1,6 @@
+// Package checkpoint provides typed serialization helpers for worklease
+// checkpoints: the Codec interface, a JSON codec, and the generic Encode and
+// Decode functions.
 package checkpoint
 
 import (
@@ -5,10 +8,10 @@ import (
 	"fmt"
 )
 
-// Codec encodes and decodes checkpoint state. All implementations must treat a
-// nil data slice in Unmarshal as valid input — the generic Decode[T] helper
-// enforces the nil-safe invariant before delegating to the codec. All methods
-// are safe for concurrent use.
+// Codec encodes and decodes checkpoint state. The generic Decode[T] helper
+// returns the zero value for nil data without calling the codec, so an
+// implementation of Unmarshal need not accept a nil data slice. All methods are
+// safe for concurrent use.
 type Codec interface {
 	Marshal(v any) ([]byte, error)
 	Unmarshal(data []byte, v any) error

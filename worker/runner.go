@@ -1,3 +1,7 @@
+// Package worker runs a work function under a worklease lease: it acquires the
+// lease, passes the prior checkpoint to the function, and renews the lease while
+// the function runs. When the function returns it checkpoints any final state and
+// releases the lease, except when the lease was fenced or its window ran out.
 package worker
 
 import (

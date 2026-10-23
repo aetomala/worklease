@@ -842,4 +842,27 @@ var _ = Describe("pool", func() {
 			Expect(got).To(Equal(want))
 		})
 	})
+
+	Describe("NoopObserver (v0.8)", func() {
+		It("a struct embedding NoopObserver and overriding OnSlotAcquired counts OnSlotAcquired and tolerates every other event", func() {
+			spy := &slotAcquiredSpy{}
+			var obs pool.Observer = spy
+			Expect(func() {
+				obs.OnSlotAcquired(ctx, pool.SlotAcquiredEvent{})
+				obs.OnSlotLost(ctx, pool.SlotLostEvent{})
+				obs.OnSlotBackoff(ctx, pool.SlotBackoffEvent{})
+				obs.OnSlotDead(ctx, pool.SlotDeadEvent{})
+				obs.OnSlotRetired(ctx, pool.SlotRetiredEvent{})
+			}).NotTo(Panic())
+			Expect(spy.n).To(Equal(1))
+		})
+	})
 })
+
+// The slotAcquiredSpy type embeds pool.NoopObserver and counts OnSlotAcquired calls.
+type slotAcquiredSpy struct {
+	pool.NoopObserver
+	n int
+}
+
+func (s *slotAcquiredSpy) OnSlotAcquired(_ context.Context, _ pool.SlotAcquiredEvent) { s.n++ }
