@@ -124,7 +124,7 @@ state, workErr := run(renewCtx, token, prior.State)
 stopRenewal()
 
 if errors.Is(workErr, worklease.ErrFenced) || errors.Is(context.Cause(renewCtx), worklease.ErrFenced) {
-    return worklease.ErrFenced // a successor holds the lease; record nothing
+    return worklease.ErrFenced // a successor holds the lease or its record was removed; record nothing
 }
 
 // Final writes must survive cancellation of ctx without hanging shutdown.
@@ -225,6 +225,8 @@ if deadline, ok := worklease.LeaseWindow(renewCtx); ok && time.Until(deadline) <
 
 The sentinels are defined in package `backend` and re-exported from `worklease` as the same values, so `errors.Is` matches either name.
 
+Match sentinels with `errors.Is`. The text of an error message is not part of the compatibility promise and may change in a minor release; such changes are listed under `### Changed` in `CHANGELOG.md`.
+
 `ErrFenced` is the critical one. When `Checkpoint` or `Renew` returns `ErrFenced`, a successor has already acquired the lease or its record was removed, and this worker is a zombie. Stop immediately — any further writes to the lease store will be rejected. Note that `ErrFenced` does not cancel in-flight external calls the worker may have already initiated; those must be made idempotent at the application layer.
 
 ---
@@ -235,7 +237,7 @@ The sentinels are defined in package `backend` and re-exported from `worklease` 
 
 `v0.5.0` changes `Acquire` with `WithWaitForLease`: on context cancellation or deadline while waiting it now returns an error wrapping `ctx.Err()` (satisfying `errors.Is(err, context.Canceled)` / `context.DeadlineExceeded`) instead of bare `ErrLeaseHeld`. This is a runtime break for callers that treated `ErrLeaseHeld` as their sole wait-loop termination signal; the synchronous no-wait path is unchanged. The renewal goroutine also now retries transient errors with backoff bounded by the lease window rather than stopping on the first error (configure with `WithRenewalBackoff`).
 
-`v0.4.0` redesigns `LeaseObserver` from flat parameters to event structs (adds `OnReadCheckpoint`, fires `OnFenced` on the Release path, adds `Duration`), and `pool.New` now returns distinct config sentinels (`ErrNilLease` / `ErrEmptyWorkIDs` / `ErrWithWaitForLeaseProhibited`, all wrapping `ErrConfigInvalid`) while `pool.Pool.Run` returns `ErrAllSlotsDead` when every slot dies permanently.
+`v0.4.0` redesigns `LeaseObserver` from flat parameters to event structs (adds `OnReadCheckpoint`, fires `OnFenced` on the Release path, adds `Duration`), and `pool.New` now returns distinct config sentinels (`ErrNilLease`, renamed `ErrLeaseRequired` in v0.8 / `ErrEmptyWorkIDs` / `ErrWithWaitForLeaseProhibited`, all wrapping `ErrConfigInvalid`) while `pool.Pool.Run` returns `ErrAllSlotsDead` when every slot dies permanently.
 
 `v0.3.0` includes a breaking change in the `checkpoint` package: `Codec.Encode` and `Codec.Decode` are renamed to `Marshal` and `Unmarshal`. Callers using `checkpoint.JSON()` are unaffected.
 
