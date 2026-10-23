@@ -1,5 +1,31 @@
 # Upgrading worklease
 
+## v0.7.1 → v0.8.0
+
+v0.8 audits the API before the 1.0 freeze. No schema change is required. Three changes break callers.
+
+### `testutil` is no longer importable
+
+The mocks moved to `internal/testutil`, which cannot be imported outside this module. Generate your own with mockgen in package mode (`mockgen github.com/aetomala/worklease Lease` and `mockgen github.com/aetomala/worklease/backend Backend`), or with `-source` against a checkout of the library.
+
+### `pool.ErrNilLease` is `pool.ErrLeaseRequired`
+
+Replace the identifier. The message is unchanged, and so is the `errors.Is(err, pool.ErrConfigInvalid)` match.
+
+### `Operation` values start at 1
+
+`worklease.OperationCheckpoint` is 1, `OperationRenew` 2, `OperationRelease` 3, `OperationForget` 4. A zero `Operation` is no longer `OperationCheckpoint`. Compare with the named constants; do not store the numbers.
+
+### No change needed
+
+- `errors.Is(err, worklease.ErrFenced)` and the other three sentinels match as before. They are now defined in package `backend` and re-exported, so backend authors import `backend` only.
+- `errors.Is(err, worklease.ErrConfigInvalid)` now also matches `pool.ErrConfigInvalid` and its sentinels, `worker.ErrLeaseRequired`, `worker.ErrWorkFnRequired`, and `leader.ErrLeaseRequired`.
+
+### Added
+
+- To receive only some observer events, embed `worklease.NoopObserver`, `worklease.NoopVacuumObserver`, or `pool.NoopObserver`.
+- To build a `Token` in a test without acquiring a lease, call `worklease.NewToken`.
+
 ## v0.7.0 → v0.7.1
 
 No code or schema change is required. v0.7.1 adds specs and documentation only, and moves the toolchain directive to go1.26.10; the `go 1.25.0` floor is unchanged.
