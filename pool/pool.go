@@ -24,7 +24,7 @@ const (
 var (
 	// ErrConfigInvalid is the parent sentinel for all pool configuration errors.
 	// It matches worklease.ErrConfigInvalid with errors.Is, so one check covers
-	// configuration errors from every package.
+	// configuration errors from the worklease, pool, worker, and leader packages.
 	ErrConfigInvalid error = &configError{msg: msgConfigInvalid}
 
 	// ErrLeaseRequired is returned by New when lease is nil.
