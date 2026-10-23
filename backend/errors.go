@@ -5,7 +5,7 @@ import "errors"
 // Error message constants for the sentinels in this package. The messages keep
 // the worklease: prefix so that error text is identical to v0.7.
 const (
-	msgFenced          = "worklease: fenced — lease acquired by another holder"
+	msgFenced          = "worklease: fenced — the lease is no longer held by this token"
 	msgLeaseHeld       = "worklease: lease is currently held"
 	msgLeaseExpired    = "worklease: lease has expired"
 	msgInvalidExitMode = "worklease: invalid exit mode"
