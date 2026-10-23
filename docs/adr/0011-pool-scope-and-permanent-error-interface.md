@@ -153,3 +153,7 @@ These are breaking at the margins (the `ErrConfigInvalid` message and the `Run`-
 ## Amendment (2026-10-17) — v0.7: empty and duplicate work IDs are rejected
 
 `pool.New` rejects an empty work ID with `ErrEmptyWorkID` (the error names its index) and a repeated work ID with `ErrDuplicateWorkID` (the error names the ID and both indices), both wrapping `ErrConfigInvalid` (#97). An empty ID failed every `Acquire` before reaching the backend and backed off forever; a duplicate added a second slot that only polled the lease every `IdleInterval` while its sibling held it. Entries are checked in index order, and the first invalid entry is reported.
+
+## Amendment (2026-10-21) — v0.8: pool sentinels
+
+pool.ErrNilLease is renamed pool.ErrLeaseRequired, and pool.ErrConfigInvalid now also matches worklease.ErrConfigInvalid (ADR-0019, #96). Messages are unchanged.
