@@ -455,7 +455,8 @@ var (
 The block is abridged; `vacuum.go` also declares `ErrRetentionRequired`.
 
 `ErrFenced` is the critical sentinel. When `Checkpoint` or `Renew` returns `ErrFenced`, it
-means a successor has already acquired the lease and this worker is a zombie. The correct
+means a successor has already acquired the lease or its record was removed, and this worker
+is a zombie. The correct
 response is to stop immediately — any further writes to the lease store will be rejected.
 Note that `ErrFenced` does not and cannot stop in-flight external calls (Stripe, S3, domain
 tables) that the worker may have already initiated. See

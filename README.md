@@ -154,7 +154,7 @@ If the worker is healthy but not at a checkpointable boundary yet:
 
 ```go
 if err := lease.Renew(ctx, token); err != nil {
-    // ErrFenced: a higher token has been issued — stop working.
+    // ErrFenced: a higher token has been issued or the record is gone — stop working.
     return err
 }
 ```
@@ -225,7 +225,7 @@ if deadline, ok := worklease.LeaseWindow(renewCtx); ok && time.Until(deadline) <
 
 The sentinels are defined in package `backend` and re-exported from `worklease` as the same values, so `errors.Is` matches either name.
 
-`ErrFenced` is the critical one. When `Checkpoint` or `Renew` returns `ErrFenced`, a successor has already acquired the lease and this worker is a zombie. Stop immediately — any further writes to the lease store will be rejected. Note that `ErrFenced` does not cancel in-flight external calls the worker may have already initiated; those must be made idempotent at the application layer.
+`ErrFenced` is the critical one. When `Checkpoint` or `Renew` returns `ErrFenced`, a successor has already acquired the lease or its record was removed, and this worker is a zombie. Stop immediately — any further writes to the lease store will be rejected. Note that `ErrFenced` does not cancel in-flight external calls the worker may have already initiated; those must be made idempotent at the application layer.
 
 ---
 
