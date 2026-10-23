@@ -57,6 +57,11 @@ import (
 // hold duration, and fencing events in memory. All methods are called synchronously
 // by the library, so the mutex is the only concurrency concern.
 type metricsObserver struct {
+	// The embedded no-op observers keep this example compiling when a later release
+	// adds an observer method; every method the example reports on is defined below.
+	worklease.NoopObserver
+	worklease.NoopVacuumObserver
+
 	mu sync.Mutex
 
 	// ===== Per-operation call counts and latency totals =====

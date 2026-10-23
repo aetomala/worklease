@@ -18,7 +18,7 @@ Replace the identifier. The message is unchanged, and so is the `errors.Is(err, 
 
 ### No change needed
 
-- `errors.Is(err, worklease.ErrFenced)` and the other three sentinels match as before. They are now defined in package `backend` and re-exported, so backend authors import `backend` only.
+- `errors.Is(err, worklease.ErrFenced)` and the other three sentinels match as before. They are now defined in package `backend` and re-exported, so backend authors import `backend` only. The text of the `ErrFenced` message changed to `worklease: fenced — the lease is no longer held by this token`; code that compares message text must use `errors.Is` instead.
 - `errors.Is(err, worklease.ErrConfigInvalid)` now also matches `pool.ErrConfigInvalid` and its sentinels, `worker.ErrLeaseRequired`, `worker.ErrWorkFnRequired`, and `leader.ErrLeaseRequired`.
 
 ### Added

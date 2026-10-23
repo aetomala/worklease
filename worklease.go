@@ -159,8 +159,9 @@ func (c *leaseClient) Renew(ctx context.Context, token Token) error {
 // Release records mode as this holder's exit and expires the lease
 // immediately. Returns ErrInvalidExitMode, without calling the backend or the
 // observer, if mode is not ExitFinished, ExitAbandoned, or ExitRetired.
-// Returns ErrFenced if the lease was acquired by another holder, and
-// ErrLeaseExpired if the lease has expired or an exit was already declared.
+// Returns ErrFenced if the lease was acquired by another holder or its record
+// was removed, and ErrLeaseExpired if the lease has expired or an exit was
+// already declared.
 func (c *leaseClient) Release(ctx context.Context, token Token, mode ExitMode) error {
 	// ===== STEP 1: Validate Mode =====
 	if mode != ExitFinished && mode != ExitAbandoned && mode != ExitRetired {

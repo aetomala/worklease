@@ -17,7 +17,7 @@ This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 
 ### Added
 
-- `backend.ErrFenced`, `backend.ErrLeaseHeld`, `backend.ErrLeaseExpired`, and `backend.ErrInvalidExitMode` (#95). The `worklease` sentinels of the same names are now the identical values, so `errors.Is` matches either name and every message is unchanged. The non-test code of `backend/memory`, `backend/postgres`, and `backend/conformance` no longer imports the root package.
+- `backend.ErrFenced`, `backend.ErrLeaseHeld`, `backend.ErrLeaseExpired`, and `backend.ErrInvalidExitMode` (#95). The `worklease` sentinels of the same names are now the identical values, so `errors.Is` matches either name. The messages of `ErrLeaseHeld`, `ErrLeaseExpired`, and `ErrInvalidExitMode` are unchanged; the message of `ErrFenced` changed (see Changed). The non-test code of `backend/memory`, `backend/postgres`, and `backend/conformance` no longer imports the root package.
 - `worklease.NoopObserver`, `worklease.NoopVacuumObserver`, and `pool.NoopObserver` (#96): embed one in an observer type to implement only the methods you need.
 - `worklease.Operation.String`.
 - `worklease.NewToken(workID, holderID, fencingToken, expiresAt)`: builds a `Token` for tests and fakes without acquiring a lease (#96). The token has no local lease window, so `StartRenewal` treats its window as already closed.
@@ -34,6 +34,7 @@ This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 - ADR-0019 records the placement of the shared contract types and sentinels and a keep, remove, or internalize decision for every exported identifier (#95, #96).
 - Godoc: per-sentinel docs; `Lease.Release` documents `ErrLeaseExpired` for a holder that already declared an exit; `Lease.Checkpoint`, `Renew`, and `Forget` name the holder ID in their `ErrFenced` condition; `Elect` documents `ErrLeaseRequired`; `Pool.ActiveSlots` documents that it lists slots whose `WorkFn` is executing; package comments for `backend`, `memory`, `checkpoint`, `leader`, `pool`, and `worker`.
 - Godoc: `ErrConfigInvalid` lists the `pool`, `worker`, and `leader` configuration sentinels as members and states that `postgres.New`'s nil database error is not one; `pool.ErrConfigInvalid` no longer claims to cover every package; the README and ARCHITECTURE descriptions of `ErrFenced` say that `Checkpoint` and `Renew` also return it when the record was removed.
+- The message of `ErrFenced` is now `worklease: fenced — the lease is no longer held by this token`: the sentinel is also returned when no record exists, after `Forget` or `Sweep`. Match it with `errors.Is`. The README states that message text is not part of the compatibility promise.
 
 ---
 

@@ -3,9 +3,10 @@ package backend
 import "errors"
 
 // Error message constants for the sentinels in this package. The messages keep
-// the worklease: prefix so that error text is identical to v0.7.
+// the worklease: prefix they had in v0.7. ErrFenced's text changed in v0.8
+// (ADR-0019, D-18); the other three are unchanged.
 const (
-	msgFenced          = "worklease: fenced — lease acquired by another holder"
+	msgFenced          = "worklease: fenced — the lease is no longer held by this token"
 	msgLeaseHeld       = "worklease: lease is currently held"
 	msgLeaseExpired    = "worklease: lease has expired"
 	msgInvalidExitMode = "worklease: invalid exit mode"

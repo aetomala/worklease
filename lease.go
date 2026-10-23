@@ -160,9 +160,9 @@ type Lease interface {
 	// successor reads mode as Checkpoint.PrevExit. Mode must be ExitFinished,
 	// ExitAbandoned, or ExitRetired; any other value returns ErrInvalidExitMode
 	// without calling the backend or the observer. Returns ErrFenced if the
-	// lease was acquired by another holder, and ErrLeaseExpired if the lease has
-	// expired or this holder already declared an exit, even when no successor has
-	// acquired it. A lapsed holder cannot
+	// lease was acquired by another holder or its record was removed, and
+	// ErrLeaseExpired if the lease has expired or this holder already declared an
+	// exit, even when no successor has acquired it. A lapsed holder cannot
 	// record an exit, so its successor sees ExitExpired. Call Release with the
 	// original ctx or a cleanup context, never the renewal context.
 	Release(ctx context.Context, token Token, mode ExitMode) error

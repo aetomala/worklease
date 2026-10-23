@@ -2287,8 +2287,8 @@ var _ = Describe("worklease", func() {
 				Expect(errors.Is(backend.ErrInvalidExitMode, worklease.ErrInvalidExitMode)).To(BeTrue())
 			})
 
-			It("each of the four sentinels keeps its v0.7 message", func() {
-				Expect(worklease.ErrFenced.Error()).To(Equal("worklease: fenced — lease acquired by another holder"))
+			It("each of the four sentinels has its documented message", func() {
+				Expect(worklease.ErrFenced.Error()).To(Equal("worklease: fenced — the lease is no longer held by this token"))
 				Expect(worklease.ErrLeaseHeld.Error()).To(Equal("worklease: lease is currently held"))
 				Expect(worklease.ErrLeaseExpired.Error()).To(Equal("worklease: lease has expired"))
 				Expect(worklease.ErrInvalidExitMode.Error()).To(Equal("worklease: invalid exit mode"))
