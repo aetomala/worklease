@@ -13,6 +13,11 @@
 //
 // The schema is in schema.sql in this package's directory. Applying and
 // migrating it is the caller's responsibility (ADR-0017).
+//
+// New takes a *sql.DB and does not register a database driver: the caller
+// imports one and opens the *sql.DB. The package's own test suites run against
+// github.com/lib/pq only, and the documented behavior of a statement cancelled
+// mid-flight was observed with that driver.
 package postgres
 
 import (
@@ -21,8 +26,6 @@ import (
 	"errors"
 	"fmt"
 	"time"
-
-	_ "github.com/lib/pq"
 
 	"github.com/aetomala/worklease/backend"
 )
