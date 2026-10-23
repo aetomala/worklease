@@ -202,9 +202,10 @@ If Worker A holds fencing token 4 and its lease expires, Worker B acquires the l
 receives fencing token 5. Any write Worker A attempts with token 4 is now rejected — the
 backend holds token 5. This prevents zombie writes to the checkpoint store.
 
-The library owns fencing logic entirely. Callers cannot read or construct fencing tokens
-directly — they receive a `Token` value and pass it back to operations. The library validates
-the token on every write. See [ADR-0002](adr/0002-token-inspectable-via-methods.md).
+The library owns fencing logic entirely. Callers read a token's fields through accessor
+methods but never set them — they receive a `Token` value and pass it back to operations.
+The library validates the token on every write. See
+[ADR-0002](adr/0002-token-inspectable-via-methods.md).
 
 Tokens are monotonic but not contiguous. Every `Acquire` attempt draws from the sequence
 regardless of outcome — including attempts that find the lease held and return `ErrLeaseHeld`.
@@ -386,7 +387,8 @@ worker that has reached a meaningful state boundary should call `Checkpoint`.
 
 `Token` is a value type with unexported fields. Callers receive a `Token` from `Acquire` and
 pass it to all subsequent operations. The library validates the fencing token on every write.
-Callers cannot construct or mutate tokens — fencing is unconditionally library-enforced.
+Callers cannot mutate tokens. `NewToken` builds one for tests and fakes, and the backend still
+checks its holder ID and fencing token on every write — fencing is unconditionally library-enforced.
 
 ```go
 type Token struct {
