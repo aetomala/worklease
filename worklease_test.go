@@ -15,7 +15,7 @@ import (
 	"github.com/aetomala/worklease"
 	"github.com/aetomala/worklease/backend"
 	"github.com/aetomala/worklease/backend/memory"
-	"github.com/aetomala/worklease/testutil"
+	"github.com/aetomala/worklease/internal/testutil"
 )
 
 type spyObserver struct {

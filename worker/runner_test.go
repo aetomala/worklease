@@ -11,7 +11,7 @@ import (
 
 	"github.com/aetomala/worklease"
 	"github.com/aetomala/worklease/backend"
-	"github.com/aetomala/worklease/testutil"
+	"github.com/aetomala/worklease/internal/testutil"
 	"github.com/aetomala/worklease/worker"
 )
 
