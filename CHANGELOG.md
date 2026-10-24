@@ -9,6 +9,10 @@ This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 
 ## [Unreleased]
 
+---
+
+## [v0.8.0] — 2026-10-23
+
 ### Breaking
 
 - The package `github.com/aetomala/worklease/testutil` no longer exists (#94). Its mocks moved to `internal/testutil`, which cannot be imported outside this module; generate mocks of `worklease.Lease` and `backend.Backend` with mockgen in your own module.

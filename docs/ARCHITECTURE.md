@@ -1539,7 +1539,7 @@ make ci   # lint, build, test (all three targets)
 - Document that `Checkpoint` revives a lapsed lease instead of returning `ErrLeaseExpired` (#127)
 - Bump the Go toolchain to 1.26.10 for GO-2026-6809 (#128)
 
-### v0.8 — In progress
+### v0.8 — Released (v0.8.0, 2026-10-23)
 
 - Define the backend sentinels in package `backend` and re-export them from `worklease` (#95)
 - Move `testutil` to `internal/testutil` (#94)
@@ -1547,6 +1547,8 @@ make ci   # lint, build, test (all three targets)
 - Start `Operation` values at 1 and add `Operation.String`
 - Make the `pool`, `worker`, and `leader` configuration sentinels match `worklease.ErrConfigInvalid`; rename `pool.ErrNilLease` to `pool.ErrLeaseRequired`
 - Add `worklease.NewToken` for tests and fakes (#96)
+- Change the `ErrFenced` message, which is also returned for a removed record, and state that message text is not part of the compatibility promise
+- Stop importing `github.com/lib/pq` from `backend/postgres`; callers import a database driver
 
 ### Unscheduled (post-1.0)
 
@@ -1591,4 +1593,4 @@ ADR-0012, ADR-0013, and ADR-0016. v0.7 adds dated amendments to ADR-0002, ADR-00
 
 ---
 
-*Last updated: October 2026 — v0.7 (v0.7.1)*
+*Last updated: October 2026 — v0.8 (v0.8.0)*
