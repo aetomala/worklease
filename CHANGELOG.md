@@ -11,6 +11,38 @@ This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 
 ---
 
+## [v0.8.0] — 2026-10-23
+
+### Breaking
+
+- The package `github.com/aetomala/worklease/testutil` no longer exists (#94). Its mocks moved to `internal/testutil`, which cannot be imported outside this module; generate mocks of `worklease.Lease` and `backend.Backend` with mockgen in your own module.
+- `pool.ErrNilLease` is renamed `pool.ErrLeaseRequired`; the message is unchanged. There is no alias.
+- `worklease.Operation` values now start at 1 (`OperationCheckpoint` is 1, `OperationRenew` 2, `OperationRelease` 3, `OperationForget` 4), so the zero `Operation` is no longer `OperationCheckpoint`. Code that stored or compared the numeric values must be rebuilt.
+- `backend/postgres` no longer imports `github.com/lib/pq`. Callers import a `database/sql` PostgreSQL driver themselves; a program that relied on the side-effect import now gets an `unknown driver` error from `sql.Open("postgres", …)` at run time. The README quick start shows the import.
+
+### Added
+
+- `backend.ErrFenced`, `backend.ErrLeaseHeld`, `backend.ErrLeaseExpired`, and `backend.ErrInvalidExitMode` (#95). The `worklease` sentinels of the same names are now the identical values, so `errors.Is` matches either name. The messages of `ErrLeaseHeld`, `ErrLeaseExpired`, and `ErrInvalidExitMode` are unchanged; the message of `ErrFenced` changed (see Changed). The non-test code of `backend/memory`, `backend/postgres`, and `backend/conformance` no longer imports the root package.
+- `worklease.NoopObserver`, `worklease.NoopVacuumObserver`, and `pool.NoopObserver` (#96): embed one in an observer type to implement only the methods you need.
+- `worklease.Operation.String`.
+- `worklease.NewToken(workID, holderID, fencingToken, expiresAt)`: builds a `Token` for tests and fakes without acquiring a lease (#96). The token has no local lease window, so `StartRenewal` treats its window as already closed.
+- `ExampleNewToken`.
+- `ExampleNoopObserver`.
+
+### Changed
+
+- `pool.ErrConfigInvalid`, `worker.ErrLeaseRequired`, `worker.ErrWorkFnRequired`, and `leader.ErrLeaseRequired` now match `worklease.ErrConfigInvalid` with `errors.Is`; every message is unchanged.
+- `Lease`, `Backend`, `LeaseObserver`, `VacuumObserver`, and `pool.Observer` document how they may grow. `Lease` states that implementations outside this module are not a stable target, because a minor release may add a method to it, and that a wrapper or fake embeds `Lease`. The observer interfaces may gain methods in a minor release, and the `Backend` method set is fixed from v1.0. `Backend` documents that every method must be safe for concurrent use.
+- `checkpoint.Codec` godoc: `Decode` returns the zero value for nil data without calling the codec, so an implementation of `Unmarshal` need not accept a nil data slice.
+- `backend/conformance` documents that importing it adds Ginkgo and Gomega to the importing module's dependency graph.
+- The README "Future" list no longer includes the `Token` test constructor, which `NewToken` delivers (#96).
+- ADR-0019 records the placement of the shared contract types and sentinels and a keep, remove, or internalize decision for every exported identifier (#95, #96).
+- Godoc: per-sentinel docs; `Lease.Release` documents `ErrLeaseExpired` for a holder that already declared an exit; `Lease.Checkpoint`, `Renew`, and `Forget` name the holder ID in their `ErrFenced` condition; `Elect` documents `ErrLeaseRequired`; `Pool.ActiveSlots` documents that it lists slots whose `WorkFn` is executing; package comments for `backend`, `memory`, `checkpoint`, `leader`, `pool`, and `worker`.
+- Godoc: `ErrConfigInvalid` lists the `pool`, `worker`, and `leader` configuration sentinels as members and states that `postgres.New`'s nil database error is not one; `pool.ErrConfigInvalid` no longer claims to cover every package; the README and ARCHITECTURE descriptions of `ErrFenced` say that `Checkpoint` and `Renew` also return it when the record was removed.
+- The message of `ErrFenced` is now `worklease: fenced — the lease is no longer held by this token`: the sentinel is also returned when no record exists, after `Forget` or `Sweep`. Match it with `errors.Is`. The README states that message text is not part of the compatibility promise.
+
+---
+
 ## [v0.7.1] — 2026-10-21
 
 ### Chore

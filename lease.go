@@ -11,19 +11,29 @@ import (
 
 // Error message constants for lease operations.
 const (
-	msgFenced               = "worklease: fenced — lease acquired by another holder"
-	msgLeaseHeld            = "worklease: lease is currently held"
-	msgLeaseExpired         = "worklease: lease has expired"
 	msgLeaseWindowExhausted = "worklease: lease window exhausted before renewal succeeded"
 	msgAcquireCancelled     = "worklease: acquire cancelled"
 	msgNilBackend           = "worklease: backend is required"
 )
 
-// Sentinel errors for Lease operations.
+// Sentinel errors for Lease operations. ErrFenced, ErrLeaseHeld, and
+// ErrLeaseExpired are the identical values of the sentinels of the same name in
+// package backend, so errors.Is matches either name.
 var (
-	ErrFenced       = errors.New(msgFenced)
-	ErrLeaseHeld    = errors.New(msgLeaseHeld)
-	ErrLeaseExpired = errors.New(msgLeaseExpired)
+	// ErrFenced is returned by Checkpoint, Renew, Release, ReadCheckpoint, and
+	// Forget when the token no longer matches the stored lease or when no record
+	// exists for the work ID. It is the same value as backend.ErrFenced.
+	ErrFenced = backend.ErrFenced
+
+	// ErrLeaseHeld is returned by Acquire when the lease for the work ID is held
+	// and has not expired. It is the same value as backend.ErrLeaseHeld.
+	ErrLeaseHeld = backend.ErrLeaseHeld
+
+	// ErrLeaseExpired is returned by Renew when the lease has already expired, by
+	// Release when the lease has expired or this holder already declared an exit,
+	// and by Checkpoint only once this holder has declared an exit with Release.
+	// It is the same value as backend.ErrLeaseExpired.
+	ErrLeaseExpired = backend.ErrLeaseExpired
 
 	// ErrLeaseWindowExhausted is set as the cancel cause of the renewal context
 	// when the renewal goroutine exhausts the remaining lease window without a
@@ -32,8 +42,10 @@ var (
 	ErrLeaseWindowExhausted = errors.New(msgLeaseWindowExhausted)
 
 	// ErrConfigInvalid is the parent sentinel for configuration errors: every
-	// error worklease.New returns, and ErrNilBackend wherever it is returned.
-	// Match it with errors.Is.
+	// error worklease.New returns, ErrNilBackend wherever it is returned, and the
+	// configuration sentinels of the pool, worker, and leader packages. Errors
+	// from other packages, such as the nil database check of postgres.New, are not
+	// members. Match it with errors.Is.
 	ErrConfigInvalid = errors.New("worklease: invalid configuration")
 
 	// ErrNilBackend is returned by New and NewVacuum when the backend is nil,
@@ -57,22 +69,31 @@ func (e *configError) Unwrap() error { return ErrConfigInvalid }
 // package backend cannot import package worklease.
 type ExitMode = backend.ExitMode
 
-// Exit modes. Callers treat any mode they do not recognize as ExitExpired.
+// Exit modes. Callers must treat any value they do not recognize as ExitExpired, because modes may be added in later releases.
 const (
-	// ExitNone means there was no previous holder. Release never accepts it.
+	// ExitNone means there was no previous holder: the work ID was never
+	// acquired, or its row was removed by Forget or Sweep. Inferred; Release
+	// never accepts it.
 	ExitNone = backend.ExitNone
 
-	// ExitFinished means the run completed; the checkpoint is final state.
+	// ExitFinished means the run completed and the checkpoint is final state
+	// for that run. The work ID may be acquired again. Sweep never deletes a
+	// row whose last exit is ExitFinished, so release one-shot work with
+	// ExitRetired instead.
 	ExitFinished = backend.ExitFinished
 
-	// ExitAbandoned means the holder stopped deliberately without completing.
+	// ExitAbandoned means the holder stopped deliberately without completing,
+	// on error, cancellation, or shutdown. The checkpoint is partial state.
 	ExitAbandoned = backend.ExitAbandoned
 
-	// ExitRetired means the work ID is complete permanently.
+	// ExitRetired means the work ID is complete permanently. A successor
+	// should not redo the work. The row is eligible for Sweep.
 	ExitRetired = backend.ExitRetired
 
-	// ExitExpired means the lease expired with no recorded exit. Release never
-	// accepts it.
+	// ExitExpired means the lease expired with no recorded exit: a crash, a
+	// partition, or a renewal window that ran out. The checkpoint is partial
+	// state, and external effects may have happened after it. Inferred;
+	// Release never accepts it.
 	ExitExpired = backend.ExitExpired
 )
 
@@ -80,16 +101,16 @@ const (
 // holder exited. It is an alias for backend.Checkpoint.
 type Checkpoint = backend.Checkpoint
 
-// Error message constants for the exit-mode sentinels.
+// Error message constant for the retire sentinel.
 const (
-	msgInvalidExitMode = "worklease: invalid exit mode"
-	msgRetire          = "worklease: retire work ID"
+	msgRetire = "worklease: retire work ID"
 )
 
 var (
 	// ErrInvalidExitMode is returned by Release when mode is not ExitFinished,
-	// ExitAbandoned, or ExitRetired.
-	ErrInvalidExitMode = errors.New(msgInvalidExitMode)
+	// ExitAbandoned, or ExitRetired. It is the same value as
+	// backend.ErrInvalidExitMode.
+	ErrInvalidExitMode = backend.ErrInvalidExitMode
 
 	// ErrRetire is returned, or wrapped, by a work function to declare that its
 	// work ID is complete permanently. Runner.Run in package worker, Elect in
@@ -108,6 +129,10 @@ const (
 // Lease defines the contract for acquiring, managing, and renewing leases on
 // distributed work. Implementations are responsible for handling backend
 // storage, fencing, and expiration logic. All methods are safe for concurrent use.
+//
+// Lease is not a stable target for implementations outside this module: a minor
+// release may add a method to it. A wrapper or fake that must satisfy Lease
+// embeds the Lease interface so that it keeps compiling.
 type Lease interface {
 	// Acquire attempts to acquire a lease for the given workID. Returns ErrLeaseHeld
 	// if the lease for this workID is held and has not expired. If WithWaitForLease
@@ -116,7 +141,7 @@ type Lease interface {
 
 	// Checkpoint persists state associated with the current lease. The caller must
 	// pass a valid Token obtained from Acquire. Returns ErrFenced if the
-	// token's fencing token no longer matches the stored lease, including when the
+	// token's holder ID or fencing token no longer matches the stored lease, including when the
 	// lease lapsed and another holder has since acquired it.
 	// Checkpoint returns ErrLeaseExpired, without writing, only once this holder has
 	// declared an exit with Release; a declared exit cannot be undone by a late
@@ -126,7 +151,7 @@ type Lease interface {
 	Checkpoint(ctx context.Context, token Token, state []byte) error
 
 	// Renew extends the lease expiration time. Returns ErrFenced if the token's
-	// fencing token no longer matches the stored lease, or ErrLeaseExpired if the
+	// holder ID or fencing token no longer matches the stored lease, or ErrLeaseExpired if the
 	// lease has already expired.
 	Renew(ctx context.Context, token Token) error
 
@@ -135,8 +160,9 @@ type Lease interface {
 	// successor reads mode as Checkpoint.PrevExit. Mode must be ExitFinished,
 	// ExitAbandoned, or ExitRetired; any other value returns ErrInvalidExitMode
 	// without calling the backend or the observer. Returns ErrFenced if the
-	// lease was acquired by another holder, and ErrLeaseExpired if the lease has
-	// expired, even when no successor has acquired it. A lapsed holder cannot
+	// lease was acquired by another holder or its record was removed, and
+	// ErrLeaseExpired if the lease has expired or this holder already declared an
+	// exit, even when no successor has acquired it. A lapsed holder cannot
 	// record an exit, so its successor sees ExitExpired. Call Release with the
 	// original ctx or a cleanup context, never the renewal context.
 	Release(ctx context.Context, token Token, mode ExitMode) error
@@ -162,7 +188,7 @@ type Lease interface {
 	StartRenewal(ctx context.Context, token Token, opts ...RenewalOption) (renewCtx context.Context, stopRenewal func())
 
 	// Forget permanently deletes the lease record for token's workID. Returns
-	// ErrFenced if the fencing token no longer matches the stored lease, or if no
+	// ErrFenced if the holder ID or fencing token no longer matches the stored lease, or if no
 	// record exists for token's workID. Unlike Release, the record is not left
 	// behind for a future ReadCheckpoint — it is gone. Use only when a work ID is
 	// permanently retired. Every call is reported to LeaseObserver.OnForget, and
@@ -174,13 +200,27 @@ type Lease interface {
 // passed back to Checkpoint, Renew, Release, ReadCheckpoint, Forget, and
 // StartRenewal. Renew and Checkpoint do not return a new Token — the same Token
 // stays valid for the life of the lease. All fields are unexported; use accessor
-// methods to read them.
+// methods to read them. A Token is a value and is safe for concurrent use.
 type Token struct {
 	workID       string
 	holderID     string
 	fencingToken uint64
 	expiresAt    time.Time
 	deadline     time.Time // Local monotonic bound — Acquire start plus TTL; zero if unknown
+}
+
+// NewToken returns a Token holding the given fields, for tests and fakes that
+// need a Token value without acquiring a lease. NewToken does not call a backend
+// and does not validate its arguments. A Token it returns has no local lease
+// window, so the window that StartRenewal bounds renewal by is already closed.
+// Use Acquire to obtain a Token for a real lease.
+func NewToken(workID, holderID string, fencingToken uint64, expiresAt time.Time) Token {
+	return Token{
+		workID:       workID,
+		holderID:     holderID,
+		fencingToken: fencingToken,
+		expiresAt:    expiresAt,
+	}
 }
 
 // WorkID returns the identifier for the unit of work being leased.
@@ -310,6 +350,8 @@ func WithRenewalBackoff(initial, maxInterval time.Duration, jitter float64) Rene
 // LeaseObserver receives callbacks after each Lease operation.
 // All methods are called synchronously. Implementations must not block or panic.
 // The zero value of Config.Observer is nil; the library substitutes a no-op observer.
+//
+// A minor release may add a method to LeaseObserver. Embed NoopObserver in an observer type so that it keeps compiling.
 type LeaseObserver interface {
 	// OnAcquire is called after every backend acquire attempt, successful or not —
 	// once per poll when WithWaitForLease is set. e.Duration is the duration of
@@ -344,16 +386,50 @@ type LeaseObserver interface {
 	OnFenced(ctx context.Context, e FencedEvent)
 }
 
-// Operation identifies the Lease operation that triggered a fencing event.
+// Operation identifies the Lease operation that triggered a fencing event. The
+// zero value is not a valid Operation.
 type Operation uint8
 
-// Operation values for fencing events.
+// Operation values for fencing events. The values start at 1 so that the zero
+// value is not a valid Operation.
 const (
-	OperationCheckpoint Operation = iota
+	// OperationCheckpoint identifies a Checkpoint call.
+	OperationCheckpoint Operation = iota + 1
+
+	// OperationRenew identifies a Renew call.
 	OperationRenew
+
+	// OperationRelease identifies a Release call.
 	OperationRelease
+
+	// OperationForget identifies a Forget call.
 	OperationForget
 )
+
+// Text forms of each Operation, as returned by Operation.String.
+const (
+	operationTextCheckpoint = "Checkpoint"
+	operationTextRenew      = "Renew"
+	operationTextRelease    = "Release"
+	operationTextForget     = "Forget"
+)
+
+// String returns "Checkpoint", "Renew", "Release", or "Forget". Any other value
+// formats as "Operation(<n>)".
+func (o Operation) String() string {
+	switch o {
+	case OperationCheckpoint:
+		return operationTextCheckpoint
+	case OperationRenew:
+		return operationTextRenew
+	case OperationRelease:
+		return operationTextRelease
+	case OperationForget:
+		return operationTextForget
+	default:
+		return fmt.Sprintf("Operation(%d)", uint8(o))
+	}
+}
 
 // AcquireEvent carries the result of one backend acquire attempt.
 // Duration is the duration of that backend call only — not the wait loop.
@@ -426,14 +502,32 @@ type FencedEvent struct {
 	Operation Operation
 }
 
-// noopObserver is a LeaseObserver that discards all events.
-// Substituted when Config.Observer is nil.
-type noopObserver struct{}
+// NoopObserver is a LeaseObserver that discards every event. The library
+// substitutes it when Config.Observer is nil. Embed it in an observer type to
+// implement only the methods of interest; the embedding type keeps compiling
+// when a later release adds a method to LeaseObserver.
+type NoopObserver struct{}
 
-func (noopObserver) OnAcquire(_ context.Context, _ AcquireEvent)               {}
-func (noopObserver) OnCheckpoint(_ context.Context, _ CheckpointEvent)         {}
-func (noopObserver) OnRenew(_ context.Context, _ RenewEvent)                   {}
-func (noopObserver) OnRelease(_ context.Context, _ ReleaseEvent)               {}
-func (noopObserver) OnReadCheckpoint(_ context.Context, _ ReadCheckpointEvent) {}
-func (noopObserver) OnForget(_ context.Context, _ ForgetEvent)                 {}
-func (noopObserver) OnFenced(_ context.Context, _ FencedEvent)                 {}
+// The compile-time assertion below keeps NoopObserver in step with LeaseObserver.
+var _ LeaseObserver = NoopObserver{}
+
+// OnAcquire discards the event.
+func (NoopObserver) OnAcquire(_ context.Context, _ AcquireEvent) {}
+
+// OnCheckpoint discards the event.
+func (NoopObserver) OnCheckpoint(_ context.Context, _ CheckpointEvent) {}
+
+// OnRenew discards the event.
+func (NoopObserver) OnRenew(_ context.Context, _ RenewEvent) {}
+
+// OnRelease discards the event.
+func (NoopObserver) OnRelease(_ context.Context, _ ReleaseEvent) {}
+
+// OnReadCheckpoint discards the event.
+func (NoopObserver) OnReadCheckpoint(_ context.Context, _ ReadCheckpointEvent) {}
+
+// OnForget discards the event.
+func (NoopObserver) OnForget(_ context.Context, _ ForgetEvent) {}
+
+// OnFenced discards the event.
+func (NoopObserver) OnFenced(_ context.Context, _ FencedEvent) {}

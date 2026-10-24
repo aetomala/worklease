@@ -103,3 +103,7 @@ honor.
 ## Amendment (2026-10-17) — v0.7: integration specs run on both backends
 
 Parity at the `Backend` level did not cover the composition packages: every `integration/` spec used the memory backend, which is how a PostgreSQL-only shutdown defect shipped (#80). The `integration/` suite now registers every spec under two harnesses, memory and PostgreSQL, through `runIntegration` (#87). A harness provides a fresh backend per spec and an `expire(workID)` function: the memory harness advances a clock that otherwise follows real time, and the PostgreSQL harness moves `expires_at` into the past with SQL. No spec stays memory-only. The PostgreSQL run uses its own schema, `worklease_integration`, so it does not collide with the `backend/postgres` suite when `go test ./...` runs packages in parallel, and it fails rather than skips when `WORKLEASE_REQUIRE_POSTGRES` is set.
+
+## Amendment (2026-10-21) — v0.8: conformance imports backend only
+
+The sentinels the suite asserts are defined in package backend, so the non-test code of backend/conformance, backend/memory, and backend/postgres no longer imports the root package (ADR-0019, #95).

@@ -13,8 +13,8 @@ import (
 
 	"github.com/aetomala/worklease"
 	"github.com/aetomala/worklease/backend/memory"
+	"github.com/aetomala/worklease/internal/testutil"
 	"github.com/aetomala/worklease/leader"
-	"github.com/aetomala/worklease/testutil"
 )
 
 var (
@@ -56,6 +56,13 @@ var _ = Describe("leader", func() {
 					return nil
 				})
 				Expect(errors.Is(err, leader.ErrLeaseRequired)).To(BeTrue())
+			})
+		})
+
+		Context("nil lease (v0.8)", func() {
+			It("ErrLeaseRequired matches worklease.ErrConfigInvalid and keeps its message", func() {
+				Expect(errors.Is(leader.ErrLeaseRequired, worklease.ErrConfigInvalid)).To(BeTrue())
+				Expect(leader.ErrLeaseRequired.Error()).To(Equal("leader: lease is required"))
 			})
 		})
 

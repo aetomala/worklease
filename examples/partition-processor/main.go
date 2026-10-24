@@ -33,12 +33,12 @@ const (
 )
 
 // retiredLogger is a pool.Observer that logs slot retirements and ignores other events.
-type retiredLogger struct{ pool string }
+// Embedding pool.NoopObserver supplies the methods it ignores.
+type retiredLogger struct {
+	pool.NoopObserver
+	pool string
+}
 
-func (retiredLogger) OnSlotAcquired(context.Context, pool.SlotAcquiredEvent) {}
-func (retiredLogger) OnSlotLost(context.Context, pool.SlotLostEvent)         {}
-func (retiredLogger) OnSlotBackoff(context.Context, pool.SlotBackoffEvent)   {}
-func (retiredLogger) OnSlotDead(context.Context, pool.SlotDeadEvent)         {}
 func (l retiredLogger) OnSlotRetired(_ context.Context, e pool.SlotRetiredEvent) {
 	log.Printf("  [%s] OnSlotRetired: %s — slot stopped, work ID retired", l.pool, e.WorkID)
 }

@@ -1,3 +1,7 @@
+// Package worker runs a work function under a worklease lease: it acquires the
+// lease, passes the prior checkpoint to the function, and renews the lease while
+// the function runs. When the function returns it checkpoints any final state and
+// releases the lease, except when the lease was fenced or its window ran out.
 package worker
 
 import (
@@ -9,11 +13,31 @@ import (
 	"github.com/aetomala/worklease"
 )
 
-// Sentinel errors for Runner operations.
-var (
-	ErrLeaseRequired  = errors.New("worker: lease is required")
-	ErrWorkFnRequired = errors.New("worker: work function is required")
+// Error message constants for the Runner configuration sentinels.
+const (
+	msgLeaseRequired  = "worker: lease is required"
+	msgWorkFnRequired = "worker: work function is required"
 )
+
+// Sentinel errors for Runner operations. Each one matches
+// worklease.ErrConfigInvalid with errors.Is.
+var (
+	// ErrLeaseRequired is returned by NewRunner when cfg.Lease is nil.
+	ErrLeaseRequired error = &configError{msg: msgLeaseRequired}
+
+	// ErrWorkFnRequired is returned by NewRunner when cfg.WorkFn is nil.
+	ErrWorkFnRequired error = &configError{msg: msgWorkFnRequired}
+)
+
+// The configError type is a configuration error whose message is exactly msg
+// and which matches worklease.ErrConfigInvalid with errors.Is.
+type configError struct {
+	msg string
+}
+
+func (e *configError) Error() string { return e.msg }
+
+func (e *configError) Unwrap() error { return worklease.ErrConfigInvalid }
 
 // WorkFn is the work function signature accepted by Runner.Run.
 // The ctx argument is the renewal context; it is cancelled on fencing, when the

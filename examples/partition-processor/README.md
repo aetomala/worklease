@@ -90,7 +90,7 @@ returns nil, the slot waits `RerunInterval` and runs again. This continues until
 is cancelled, the slot returns a `PermanentError` or retires its work ID with `ErrRetire`, or
 the process exits.
 
-**`ActiveSlots` for observability** — `p.ActiveSlots()` returns the work IDs currently held
+**`ActiveSlots` for observability** — `p.ActiveSlots()` returns the work IDs whose `WorkFn` is currently executing
 by this pool instance. It is safe to call at any time, including while the pool is running.
 In a multi-process deployment this gives a live view of which partitions each process owns,
 which is useful for dashboards, health checks, and diagnosing rebalancing behavior. Scenario

@@ -202,9 +202,10 @@ If Worker A holds fencing token 4 and its lease expires, Worker B acquires the l
 receives fencing token 5. Any write Worker A attempts with token 4 is now rejected — the
 backend holds token 5. This prevents zombie writes to the checkpoint store.
 
-The library owns fencing logic entirely. Callers cannot read or construct fencing tokens
-directly — they receive a `Token` value and pass it back to operations. The library validates
-the token on every write. See [ADR-0002](adr/0002-token-inspectable-via-methods.md).
+The library owns fencing logic entirely. Callers read a token's fields through accessor
+methods but never set them — they receive a `Token` value and pass it back to operations.
+The library validates the token on every write. See
+[ADR-0002](adr/0002-token-inspectable-via-methods.md).
 
 Tokens are monotonic but not contiguous. Every `Acquire` attempt draws from the sequence
 regardless of outcome — including attempts that find the lease held and return `ErrLeaseHeld`.
@@ -308,12 +309,15 @@ specific use-case shape; callers use only what they need.
 ```
 worklease/
 ├── doc.go              # Package-level documentation
-├── lease.go            # Lease interface, Token, LeaseObserver + event structs + Operation, noopObserver, errors
+├── lease.go            # Lease interface, Token, LeaseObserver + event structs + Operation, NoopObserver, errors
 ├── worklease.go        # New() constructor, Config struct, leaseClient
 ├── acquire.go          # Acquire — wait+retry loop for WithWaitForLease
 ├── renewal.go          # StartRenewal — managed renewal goroutine
+├── vacuum.go           # Vacuum, NewVacuum, VacuumConfig, VacuumObserver + SweepEvent, NoopVacuumObserver, ErrRetentionRequired
 ├── backend/
-│   ├── backend.go          # Backend interface, LeaseRecord — internal to library
+│   ├── backend.go          # Backend interface, LeaseRecord — implemented by backend authors (method set fixed from v1.0)
+│   ├── errors.go           # ErrFenced, ErrLeaseHeld, ErrLeaseExpired, ErrInvalidExitMode — re-exported by worklease (v0.8)
+│   ├── importguard_test.go # TestBackendPackagesDoNotImportRoot (v0.8)
 │   ├── conformance/        # v0.4
 │   │   └── conformance.go  # RunSuite — backend-agnostic parity spec
 │   ├── postgres/
@@ -331,9 +335,10 @@ worklease/
 │   └── leader.go       # Elect, Config (with OnElected/OnLost/OnRelinquished — v0.4)
 ├── pool/               # v0.3
 │   └── pool.go         # Pool, WorkFn, PermanentError, Permanent, Observer, Config, New, sentinels
-├── testutil/
-│   ├── mock_backend.go # Generated Backend mock (mockgen)
-│   └── mock_lease.go   # Generated Lease + LeaseObserver mocks (mockgen)
+├── internal/
+│   └── testutil/
+│       ├── mock_backend.go # Generated Backend mock (mockgen)
+│       └── mock_lease.go   # Generated Lease + LeaseObserver mocks (mockgen)
 ├── examples/
 │   ├── subscription-cancellation/
 │   ├── cross-tenant-migration/
@@ -382,7 +387,8 @@ worker that has reached a meaningful state boundary should call `Checkpoint`.
 
 `Token` is a value type with unexported fields. Callers receive a `Token` from `Acquire` and
 pass it to all subsequent operations. The library validates the fencing token on every write.
-Callers cannot construct or mutate tokens — fencing is unconditionally library-enforced.
+Callers cannot mutate tokens. `NewToken` builds one for tests and fakes, and the backend still
+checks its holder ID and fencing token on every write — fencing is unconditionally library-enforced.
 
 ```go
 type Token struct {
@@ -398,6 +404,8 @@ func (t Token) HolderID() string     { return t.holderID }
 func (t Token) FencingToken() uint64 { return t.fencingToken }
 func (t Token) ExpiresAt() time.Time { return t.expiresAt }
 func (t Token) String() string       { ... }
+
+func NewToken(workID, holderID string, fencingToken uint64, expiresAt time.Time) Token // for tests and fakes; the Token has no local lease window
 ```
 
 `fmt.Stringer` is implemented so that `log.Printf("acquired %v", token)` works without caller
@@ -410,26 +418,27 @@ fields.
 
 ```go
 var (
-    // ErrFenced is returned by Checkpoint, Renew, Release, ReadCheckpoint, or Forget when a
-    // higher fencing token has been issued, or the row no longer exists. This worker has been
-    // superseded. Stop immediately.
-    ErrFenced = errors.New("worklease: fenced — lease acquired by another holder")
+    // ErrFenced is returned by Checkpoint, Renew, Release, ReadCheckpoint, and Forget when the
+    // token no longer matches the stored lease or when no record exists for the work ID. This
+    // worker has been superseded. Stop immediately. It is the same value as backend.ErrFenced.
+    ErrFenced = backend.ErrFenced
 
-    // ErrLeaseHeld is returned by Acquire when the lease is currently held and
-    // WithWaitForLease was not passed, or the context expired while waiting.
-    ErrLeaseHeld = errors.New("worklease: lease is currently held")
+    // ErrLeaseHeld is returned by Acquire when the lease for the work ID is held and has not
+    // expired. It is the same value as backend.ErrLeaseHeld.
+    ErrLeaseHeld = backend.ErrLeaseHeld
 
-    // ErrLeaseExpired is returned when the lease expired before the operation completed,
-    // or when the holder writes after declaring an exit with Release.
-    ErrLeaseExpired = errors.New("worklease: lease has expired")
+    // ErrLeaseExpired is returned by Renew when the lease has already expired, by Release when the
+    // lease has expired or this holder already declared an exit, and by Checkpoint only once this
+    // holder has declared an exit with Release. It is the same value as backend.ErrLeaseExpired.
+    ErrLeaseExpired = backend.ErrLeaseExpired
 
     // ErrLeaseWindowExhausted is the cancel cause of the renewal context when renewal fails
     // for the whole lease window. Inspect it with context.Cause(renewCtx).
     ErrLeaseWindowExhausted = errors.New("worklease: lease window exhausted before renewal succeeded")
 
     // ErrInvalidExitMode is returned by Release for any mode other than ExitFinished,
-    // ExitAbandoned, or ExitRetired.
-    ErrInvalidExitMode = errors.New("worklease: invalid exit mode")
+    // ExitAbandoned, or ExitRetired. It is the same value as backend.ErrInvalidExitMode.
+    ErrInvalidExitMode = backend.ErrInvalidExitMode
 
     // ErrRetire is returned, or wrapped, by a work function to release with ExitRetired.
     ErrRetire = errors.New("worklease: retire work ID")
@@ -437,15 +446,17 @@ var (
     // ErrConfigInvalid is the parent sentinel for configuration errors (v0.7, #114).
     ErrConfigInvalid = errors.New("worklease: invalid configuration")
 
-    // ErrNilBackend is returned by New and NewVacuum for a nil backend; it matches ErrConfigInvalid (v0.7).
-    ErrNilBackend = errors.New("worklease: backend is required")
+    // ErrNilBackend is returned by New and NewVacuum for a nil backend, and by Vacuum.Sweep on a
+    // Vacuum that NewVacuum did not build; it matches ErrConfigInvalid (v0.7).
+    ErrNilBackend error = &configError{msg: "worklease: backend is required"}
 )
 ```
 
 The block is abridged; `vacuum.go` also declares `ErrRetentionRequired`.
 
 `ErrFenced` is the critical sentinel. When `Checkpoint` or `Renew` returns `ErrFenced`, it
-means a successor has already acquired the lease and this worker is a zombie. The correct
+means a successor has already acquired the lease or its record was removed, and this worker
+is a zombie. The correct
 response is to stop immediately — any further writes to the lease store will be rejected.
 Note that `ErrFenced` does not and cannot stop in-flight external calls (Stripe, S3, domain
 tables) that the worker may have already initiated. See
@@ -488,8 +499,9 @@ func WithRenewalInterval(d time.Duration) RenewalOption
 
 ### The Backend Interface
 
-`Backend` is the storage contract. It is an internal interface — callers never implement it
-directly unless they are writing a new backend. The interface is defined in
+`Backend` is the storage contract. It is the interface that backend authors implement; callers use
+`worklease.New`, not `Backend`. Its method set is fixed from v1.0, and new capabilities arrive as
+optional interfaces found by type assertion. The interface is defined in
 `github.com/aetomala/worklease/backend`.
 
 ```go
@@ -910,14 +922,19 @@ type LeaseObserver interface {
     OnFenced(ctx context.Context, e FencedEvent)
 }
 
-// Operation identifies the Lease operation that triggered a fencing event.
+// Operation identifies the Lease operation that triggered a fencing event. The
+// zero value is not a valid Operation.
 type Operation uint8
 const (
-    OperationCheckpoint Operation = iota
+    OperationCheckpoint Operation = iota + 1
     OperationRenew
     OperationRelease
     OperationForget
 )
+
+// String returns "Checkpoint", "Renew", "Release", or "Forget". Any other value
+// formats as "Operation(<n>)".
+func (o Operation) String() string
 ```
 
 Every event carries the `Token` (zero value when the operation errored before acquiring one)
@@ -1311,7 +1328,7 @@ difference without parsing a nil return.
 own acquisition loop — if a slot goroutine blocks inside `Runner.Run` waiting for a lease, it
 cannot respond to context cancellation during shutdown. `pool.New` returns
 `ErrWithWaitForLeaseProhibited` if `WithWaitForLease` is detected. Construction errors use
-distinct sentinels — `ErrNilLease`, `ErrEmptyWorkIDs`, `ErrEmptyWorkID`, `ErrDuplicateWorkID`, `ErrWithWaitForLeaseProhibited` — each
+distinct sentinels — `ErrLeaseRequired`, `ErrEmptyWorkIDs`, `ErrEmptyWorkID`, `ErrDuplicateWorkID`, `ErrWithWaitForLeaseProhibited` — each
 wrapping `ErrConfigInvalid`, so `errors.Is(err, pool.ErrConfigInvalid)` still matches the broad
 case.
 
@@ -1522,6 +1539,17 @@ make ci   # lint, build, test (all three targets)
 - Document that `Checkpoint` revives a lapsed lease instead of returning `ErrLeaseExpired` (#127)
 - Bump the Go toolchain to 1.26.10 for GO-2026-6809 (#128)
 
+### v0.8 — Released (v0.8.0, 2026-10-23)
+
+- Define the backend sentinels in package `backend` and re-export them from `worklease` (#95)
+- Move `testutil` to `internal/testutil` (#94)
+- Export embeddable no-op observers and document how `Lease`, `Backend`, and the observer interfaces grow (#96)
+- Start `Operation` values at 1 and add `Operation.String`
+- Make the `pool`, `worker`, and `leader` configuration sentinels match `worklease.ErrConfigInvalid`; rename `pool.ErrNilLease` to `pool.ErrLeaseRequired`
+- Add `worklease.NewToken` for tests and fakes (#96)
+- Change the `ErrFenced` message, which is also returned for a removed record, and state that message text is not part of the compatibility promise
+- Stop importing `github.com/lib/pq` from `backend/postgres`; callers import a database driver
+
 ### Unscheduled (post-1.0)
 
 - Redis backend
@@ -1554,14 +1582,15 @@ the decision made, and the consequences — including the alternatives that were
 | [0016](adr/0016-row-lifecycle-global-fencing-sequence.md) | Row lifecycle: global fencing sequence (v0.5); retention — `Forget` / `Vacuum.Sweep` (v0.6; amended v0.6: retention keys on declared exits; amended v0.7: `NewVacuum(b, cfg)`, observable retention) | Accepted |
 | [0017](adr/0017-schema-migration-caller-owned.md) | Schema migration remains caller-owned | Accepted |
 | [0018](adr/0018-explicit-lease-exit-modes.md) | Explicit lease exit modes — holders declare how they exit; successors read `PrevExit` (amended v0.7: `clean_handoff` dropped) | Accepted |
+| [0019](adr/0019-v0.8-api-audit.md) | 1.0 API audit — sentinels in `backend`, `internal/testutil`, exported no-op observers, interface growth policy | Accepted |
 
 ADR-0007 and ADR-0010 carry v0.4 amendments (observer event-struct redesign; leader lifecycle
 callbacks). ADR-0004 and ADR-0005 carry v0.5 amendments (renewal bounded retry; acquire ctx.Err()
 propagation). ADR-0013 shipped in v0.5; ADR-0016's global-fencing-sequence component shipped in
 v0.5, and its retention component (`Forget` / `Vacuum.Sweep`) is Accepted for v0.6. ADR-0018
 (explicit exit modes) is Accepted for v0.6 and carries dated amendments to ADR-0010, ADR-0011,
-ADR-0012, ADR-0013, and ADR-0016. v0.7 adds dated amendments to ADR-0002, ADR-0004, ADR-0007, ADR-0010, ADR-0011, ADR-0012, ADR-0013, ADR-0015, ADR-0016, and ADR-0018.
+ADR-0012, ADR-0013, and ADR-0016. v0.7 adds dated amendments to ADR-0002, ADR-0004, ADR-0007, ADR-0010, ADR-0011, ADR-0012, ADR-0013, ADR-0015, ADR-0016, and ADR-0018. v0.8 adds ADR-0019 and dated amendments to ADR-0007, ADR-0011, and ADR-0015.
 
 ---
 
-*Last updated: October 2026 — v0.7 (v0.7.1)*
+*Last updated: October 2026 — v0.8 (v0.8.0)*

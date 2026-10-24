@@ -15,7 +15,7 @@ import (
 	"github.com/aetomala/worklease"
 	"github.com/aetomala/worklease/backend"
 	"github.com/aetomala/worklease/backend/memory"
-	"github.com/aetomala/worklease/testutil"
+	"github.com/aetomala/worklease/internal/testutil"
 )
 
 type spyObserver struct {
@@ -2263,4 +2263,133 @@ var _ = Describe("worklease", func() {
 			})
 		})
 	})
+
+	// ===== PHASE 8: v0.8 API audit =====
+	Describe("Sentinel re-exports (v0.8)", func() {
+		Context("the sentinels are the identical values of the backend sentinels", func() {
+			It("worklease.ErrFenced is backend.ErrFenced", func() {
+				Expect(worklease.ErrFenced).To(BeIdenticalTo(backend.ErrFenced))
+				Expect(errors.Is(backend.ErrFenced, worklease.ErrFenced)).To(BeTrue())
+			})
+
+			It("worklease.ErrLeaseHeld is backend.ErrLeaseHeld", func() {
+				Expect(worklease.ErrLeaseHeld).To(BeIdenticalTo(backend.ErrLeaseHeld))
+				Expect(errors.Is(backend.ErrLeaseHeld, worklease.ErrLeaseHeld)).To(BeTrue())
+			})
+
+			It("worklease.ErrLeaseExpired is backend.ErrLeaseExpired", func() {
+				Expect(worklease.ErrLeaseExpired).To(BeIdenticalTo(backend.ErrLeaseExpired))
+				Expect(errors.Is(backend.ErrLeaseExpired, worklease.ErrLeaseExpired)).To(BeTrue())
+			})
+
+			It("worklease.ErrInvalidExitMode is backend.ErrInvalidExitMode", func() {
+				Expect(worklease.ErrInvalidExitMode).To(BeIdenticalTo(backend.ErrInvalidExitMode))
+				Expect(errors.Is(backend.ErrInvalidExitMode, worklease.ErrInvalidExitMode)).To(BeTrue())
+			})
+
+			It("each of the four sentinels has its documented message", func() {
+				Expect(worklease.ErrFenced.Error()).To(Equal("worklease: fenced — the lease is no longer held by this token"))
+				Expect(worklease.ErrLeaseHeld.Error()).To(Equal("worklease: lease is currently held"))
+				Expect(worklease.ErrLeaseExpired.Error()).To(Equal("worklease: lease has expired"))
+				Expect(worklease.ErrInvalidExitMode.Error()).To(Equal("worklease: invalid exit mode"))
+			})
+		})
+	})
+
+	Describe("Operation (v0.8)", func() {
+		named := []worklease.Operation{worklease.OperationCheckpoint, worklease.OperationRenew, worklease.OperationRelease, worklease.OperationForget}
+
+		It("the zero value is not any named Operation", func() {
+			var zero worklease.Operation
+			for _, op := range named {
+				Expect(zero).NotTo(Equal(op))
+			}
+		})
+
+		It("the named values are Checkpoint=1, Renew=2, Release=3, Forget=4", func() {
+			Expect(uint8(worklease.OperationCheckpoint)).To(Equal(uint8(1)))
+			Expect(uint8(worklease.OperationRenew)).To(Equal(uint8(2)))
+			Expect(uint8(worklease.OperationRelease)).To(Equal(uint8(3)))
+			Expect(uint8(worklease.OperationForget)).To(Equal(uint8(4)))
+		})
+
+		It("String returns the text form of each named value", func() {
+			Expect(worklease.OperationCheckpoint.String()).To(Equal("Checkpoint"))
+			Expect(worklease.OperationRenew.String()).To(Equal("Renew"))
+			Expect(worklease.OperationRelease.String()).To(Equal("Release"))
+			Expect(worklease.OperationForget.String()).To(Equal("Forget"))
+		})
+
+		It("String formats an unknown value as Operation(<n>)", func() {
+			Expect(worklease.Operation(0).String()).To(Equal("Operation(0)"))
+			Expect(worklease.Operation(9).String()).To(Equal("Operation(9)"))
+		})
+	})
+
+	Describe("NewToken (v0.8)", func() {
+		It("the accessors report the work ID, holder ID, fencing token, and expiry that were passed", func() {
+			expires := time.Date(2026, 1, 1, 12, 0, 0, 0, time.UTC)
+			token := worklease.NewToken("work-1", "holder-1", 7, expires)
+			Expect(token.WorkID()).To(Equal("work-1"))
+			Expect(token.HolderID()).To(Equal("holder-1"))
+			Expect(token.FencingToken()).To(Equal(uint64(7)))
+			Expect(token.ExpiresAt()).To(Equal(expires))
+		})
+
+		It("NewToken with zero arguments equals the zero Token", func() {
+			Expect(worklease.NewToken("", "", 0, time.Time{})).To(Equal(worklease.Token{}))
+		})
+
+		It("a Token from NewToken has a closed lease window: StartRenewal cancels the renewal context", func() {
+			mb := testutil.NewMockBackend(gomock.NewController(GinkgoT()))
+			mb.EXPECT().Renew(gomock.Any(), gomock.Any(), gomock.Any()).Return(nil).AnyTimes()
+			l, err := worklease.New(mb, worklease.Config{TTL: 30 * time.Second, HolderID: "holder-1"})
+			Expect(err).NotTo(HaveOccurred())
+			token := worklease.NewToken("work-1", "holder-1", 1, time.Now().Add(time.Hour))
+			renewCtx, stopRenewal := l.StartRenewal(context.Background(), token)
+			DeferCleanup(stopRenewal)
+			Eventually(renewCtx.Done(), time.Second).Should(BeClosed())
+			Expect(context.Cause(renewCtx)).To(MatchError(worklease.ErrLeaseWindowExhausted))
+		})
+	})
+
+	Describe("NoopObserver (v0.8)", func() {
+		It("a struct embedding NoopObserver and overriding OnAcquire counts OnAcquire and tolerates every other event", func() {
+			spy := &acquireSpy{}
+			var obs worklease.LeaseObserver = spy
+			Expect(func() {
+				obs.OnAcquire(ctx, worklease.AcquireEvent{})
+				obs.OnCheckpoint(ctx, worklease.CheckpointEvent{})
+				obs.OnRenew(ctx, worklease.RenewEvent{})
+				obs.OnRelease(ctx, worklease.ReleaseEvent{})
+				obs.OnReadCheckpoint(ctx, worklease.ReadCheckpointEvent{})
+				obs.OnForget(ctx, worklease.ForgetEvent{})
+				obs.OnFenced(ctx, worklease.FencedEvent{})
+			}).NotTo(Panic())
+			Expect(spy.n).To(Equal(1))
+		})
+
+		It("a struct embedding NoopVacuumObserver and overriding OnSweep counts the sweep event", func() {
+			spy := &noopSweepSpy{}
+			var obs worklease.VacuumObserver = spy
+			obs.OnSweep(ctx, worklease.SweepEvent{})
+			Expect(spy.n).To(Equal(1))
+		})
+	})
 })
+
+// The acquireSpy type embeds NoopObserver and counts OnAcquire calls.
+type acquireSpy struct {
+	worklease.NoopObserver
+	n int
+}
+
+func (s *acquireSpy) OnAcquire(_ context.Context, _ worklease.AcquireEvent) { s.n++ }
+
+// The noopSweepSpy type embeds NoopVacuumObserver and counts OnSweep calls.
+type noopSweepSpy struct {
+	worklease.NoopVacuumObserver
+	n int
+}
+
+func (s *noopSweepSpy) OnSweep(_ context.Context, _ worklease.SweepEvent) { s.n++ }

@@ -1,6 +1,10 @@
 // Package conformance provides a backend-agnostic Ginkgo specification that any
 // worklease backend must satisfy. It enforces memory-vs-Postgres parity
 // structurally rather than discovering drift one bug at a time (ADR-0015).
+//
+// The suite is written for Ginkgo v2 and Gomega, and importing this package adds
+// both to the dependency graph of the importing module. A backend author runs it
+// from a Ginkgo suite in the backend's own test package.
 package conformance
 
 import (
@@ -11,7 +15,6 @@ import (
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
 
-	"github.com/aetomala/worklease"
 	"github.com/aetomala/worklease/backend"
 )
 
@@ -65,7 +68,7 @@ func RunSuite(newBackend func() backend.Backend) func() {
 					_, err := b.Acquire(ctx, "w1", "h", normalTTL)
 					Expect(err).NotTo(HaveOccurred())
 					_, err = b.Acquire(ctx, "w1", "h2", normalTTL)
-					Expect(errors.Is(err, worklease.ErrLeaseHeld)).To(BeTrue())
+					Expect(errors.Is(err, backend.ErrLeaseHeld)).To(BeTrue())
 				})
 
 				It("succeeds after expiry via non-positive TTL and returns a strictly greater FencingToken", func() {
@@ -124,12 +127,12 @@ func RunSuite(newBackend func() backend.Backend) func() {
 					rec, err := b.Acquire(ctx, "w1", "h", normalTTL)
 					Expect(err).NotTo(HaveOccurred())
 					err = b.Checkpoint(ctx, stale(rec), []byte("x"), normalTTL)
-					Expect(errors.Is(err, worklease.ErrFenced)).To(BeTrue())
+					Expect(errors.Is(err, backend.ErrFenced)).To(BeTrue())
 				})
 
 				It("returns ErrFenced on a work ID that was never acquired", func() {
 					err := b.Checkpoint(ctx, neverAcquired, []byte("x"), normalTTL)
-					Expect(errors.Is(err, worklease.ErrFenced)).To(BeTrue())
+					Expect(errors.Is(err, backend.ErrFenced)).To(BeTrue())
 				})
 
 				It("does not change PrevExit or PrevHolderID", func() {
@@ -154,7 +157,7 @@ func RunSuite(newBackend func() backend.Backend) func() {
 					Expect(b.Checkpoint(ctx, rec, []byte("final"), normalTTL)).To(Succeed())
 					Expect(b.Release(ctx, rec, backend.ExitFinished)).To(Succeed())
 
-					Expect(b.Checkpoint(ctx, rec, []byte("late"), normalTTL)).To(MatchError(worklease.ErrLeaseExpired))
+					Expect(b.Checkpoint(ctx, rec, []byte("late"), normalTTL)).To(MatchError(backend.ErrLeaseExpired))
 
 					rec2, err := b.Acquire(ctx, "cp-after-release", "holder-b", normalTTL)
 					Expect(err).NotTo(HaveOccurred())
@@ -172,7 +175,7 @@ func RunSuite(newBackend func() backend.Backend) func() {
 					Expect(b.Checkpoint(ctx, rec, []byte("revived"), normalTTL)).To(Succeed())
 
 					_, err = b.Acquire(ctx, "cp-revive", "holder-b", normalTTL)
-					Expect(err).To(MatchError(worklease.ErrLeaseHeld))
+					Expect(err).To(MatchError(backend.ErrLeaseHeld))
 				})
 			})
 
@@ -187,19 +190,19 @@ func RunSuite(newBackend func() backend.Backend) func() {
 					rec, err := b.Acquire(ctx, "w1", "h", normalTTL)
 					Expect(err).NotTo(HaveOccurred())
 					err = b.Renew(ctx, stale(rec), normalTTL)
-					Expect(errors.Is(err, worklease.ErrFenced)).To(BeTrue())
+					Expect(errors.Is(err, backend.ErrFenced)).To(BeTrue())
 				})
 
 				It("returns ErrFenced on a work ID that was never acquired", func() {
 					err := b.Renew(ctx, neverAcquired, normalTTL)
-					Expect(errors.Is(err, worklease.ErrFenced)).To(BeTrue())
+					Expect(errors.Is(err, backend.ErrFenced)).To(BeTrue())
 				})
 
 				It("returns ErrLeaseExpired when the lease has expired — non-positive TTL at acquire time", func() {
 					rec, err := b.Acquire(ctx, "w1", "h", expiredTTL)
 					Expect(err).NotTo(HaveOccurred())
 					err = b.Renew(ctx, rec, normalTTL)
-					Expect(errors.Is(err, worklease.ErrLeaseExpired)).To(BeTrue())
+					Expect(errors.Is(err, backend.ErrLeaseExpired)).To(BeTrue())
 				})
 
 				It("returns ErrLeaseExpired after the holder released, and the work ID stays immediately acquirable", func() {
@@ -207,7 +210,7 @@ func RunSuite(newBackend func() backend.Backend) func() {
 					Expect(err).NotTo(HaveOccurred())
 					Expect(b.Release(ctx, rec, backend.ExitFinished)).To(Succeed())
 					err = b.Renew(ctx, rec, normalTTL)
-					Expect(errors.Is(err, worklease.ErrLeaseExpired)).To(BeTrue())
+					Expect(errors.Is(err, backend.ErrLeaseExpired)).To(BeTrue())
 					_, err = b.Acquire(ctx, "w1", "h2", normalTTL)
 					Expect(err).NotTo(HaveOccurred())
 				})
@@ -240,7 +243,7 @@ func RunSuite(newBackend func() backend.Backend) func() {
 					rec, err := b.Acquire(ctx, "w1", "h", normalTTL)
 					Expect(err).NotTo(HaveOccurred())
 					err = b.Release(ctx, stale(rec), backend.ExitFinished)
-					Expect(errors.Is(err, worklease.ErrFenced)).To(BeTrue())
+					Expect(errors.Is(err, backend.ErrFenced)).To(BeTrue())
 				})
 
 				It("returns ErrLeaseExpired in every declared mode once the lease has expired, even with no successor, and records nothing", func() {
@@ -249,7 +252,7 @@ func RunSuite(newBackend func() backend.Backend) func() {
 						rec, err := b.Acquire(ctx, workID, "holder-a", expiredTTL)
 						Expect(err).NotTo(HaveOccurred())
 
-						Expect(b.Release(ctx, rec, mode)).To(MatchError(worklease.ErrLeaseExpired))
+						Expect(b.Release(ctx, rec, mode)).To(MatchError(backend.ErrLeaseExpired))
 
 						rec2, err := b.Acquire(ctx, workID, "holder-b", normalTTL)
 						Expect(err).NotTo(HaveOccurred())
@@ -266,7 +269,7 @@ func RunSuite(newBackend func() backend.Backend) func() {
 					_, err = b.Acquire(ctx, "rel-order", "holder-b", normalTTL)
 					Expect(err).NotTo(HaveOccurred())
 
-					Expect(b.Release(ctx, rec, backend.ExitFinished)).To(MatchError(worklease.ErrFenced))
+					Expect(b.Release(ctx, rec, backend.ExitFinished)).To(MatchError(backend.ErrFenced))
 				})
 
 				It("returns ErrInvalidExitMode for a mode Release does not accept and leaves the lease held", func() {
@@ -274,11 +277,11 @@ func RunSuite(newBackend func() backend.Backend) func() {
 					Expect(err).NotTo(HaveOccurred())
 
 					for _, mode := range []backend.ExitMode{backend.ExitNone, backend.ExitExpired, backend.ExitMode(99)} {
-						Expect(b.Release(ctx, rec, mode)).To(MatchError(worklease.ErrInvalidExitMode))
+						Expect(b.Release(ctx, rec, mode)).To(MatchError(backend.ErrInvalidExitMode))
 					}
 
 					_, err = b.Acquire(ctx, "rel-invalid", "holder-b", normalTTL)
-					Expect(err).To(MatchError(worklease.ErrLeaseHeld))
+					Expect(err).To(MatchError(backend.ErrLeaseHeld))
 				})
 
 				It("returns ErrLeaseExpired on a second Release, and the successor reads the first declared mode", func() {
@@ -286,7 +289,7 @@ func RunSuite(newBackend func() backend.Backend) func() {
 					Expect(err).NotTo(HaveOccurred())
 					Expect(b.Release(ctx, rec, backend.ExitRetired)).To(Succeed())
 
-					Expect(b.Release(ctx, rec, backend.ExitAbandoned)).To(MatchError(worklease.ErrLeaseExpired))
+					Expect(b.Release(ctx, rec, backend.ExitAbandoned)).To(MatchError(backend.ErrLeaseExpired))
 
 					rec2, err := b.Acquire(ctx, "rel-twice", "holder-b", normalTTL)
 					Expect(err).NotTo(HaveOccurred())
@@ -342,7 +345,7 @@ func RunSuite(newBackend func() backend.Backend) func() {
 
 				It("returns ErrFenced for a work ID that was never acquired", func() {
 					_, err := b.ReadCheckpoint(ctx, neverAcquired)
-					Expect(err).To(MatchError(worklease.ErrFenced))
+					Expect(err).To(MatchError(backend.ErrFenced))
 				})
 
 				It("returns ErrFenced after Forget removed the row", func() {
@@ -351,7 +354,7 @@ func RunSuite(newBackend func() backend.Backend) func() {
 					Expect(b.Forget(ctx, rec)).To(Succeed())
 
 					_, err = b.ReadCheckpoint(ctx, rec)
-					Expect(err).To(MatchError(worklease.ErrFenced))
+					Expect(err).To(MatchError(backend.ErrFenced))
 				})
 
 				It("returns ErrFenced after Sweep removed the row", func() {
@@ -363,7 +366,7 @@ func RunSuite(newBackend func() backend.Backend) func() {
 					Expect(n).To(BeNumerically(">=", 1))
 
 					_, err = b.ReadCheckpoint(ctx, rec)
-					Expect(err).To(MatchError(worklease.ErrFenced))
+					Expect(err).To(MatchError(backend.ErrFenced))
 				})
 
 				It("returns ExitNone after Forget and a fresh Acquire", func() {
@@ -391,7 +394,7 @@ func RunSuite(newBackend func() backend.Backend) func() {
 					rec, err := b.Acquire(ctx, "w1", "h", normalTTL)
 					Expect(err).NotTo(HaveOccurred())
 					_, err = b.ReadCheckpoint(ctx, stale(rec))
-					Expect(errors.Is(err, worklease.ErrFenced)).To(BeTrue())
+					Expect(errors.Is(err, backend.ErrFenced)).To(BeTrue())
 				})
 			})
 
@@ -424,7 +427,7 @@ func RunSuite(newBackend func() backend.Backend) func() {
 					Expect(cp.State).To(Equal([]byte("before")))
 					Expect(cp.PrevExit).To(Equal(backend.ExitNone))
 					_, err = b.Acquire(ctx, rec.WorkID, "other-holder", normalTTL)
-					Expect(err).To(MatchError(worklease.ErrLeaseHeld))
+					Expect(err).To(MatchError(backend.ErrLeaseHeld))
 				})
 			})
 
@@ -435,17 +438,17 @@ func RunSuite(newBackend func() backend.Backend) func() {
 					other := rec
 					other.HolderID = "h-other"
 
-					Expect(b.Checkpoint(ctx, other, []byte("x"), normalTTL)).To(MatchError(worklease.ErrFenced))
-					Expect(b.Renew(ctx, other, normalTTL)).To(MatchError(worklease.ErrFenced))
-					Expect(b.Release(ctx, other, backend.ExitFinished)).To(MatchError(worklease.ErrFenced))
-					Expect(b.Forget(ctx, other)).To(MatchError(worklease.ErrFenced))
+					Expect(b.Checkpoint(ctx, other, []byte("x"), normalTTL)).To(MatchError(backend.ErrFenced))
+					Expect(b.Renew(ctx, other, normalTTL)).To(MatchError(backend.ErrFenced))
+					Expect(b.Release(ctx, other, backend.ExitFinished)).To(MatchError(backend.ErrFenced))
+					Expect(b.Forget(ctx, other)).To(MatchError(backend.ErrFenced))
 
 					// The rightful holder's lease is untouched.
 					cp, err := b.ReadCheckpoint(ctx, rec)
 					Expect(err).NotTo(HaveOccurred())
 					Expect(cp.PrevExit).To(Equal(backend.ExitNone))
 					_, err = b.Acquire(ctx, rec.WorkID, "third-holder", normalTTL)
-					Expect(err).To(MatchError(worklease.ErrLeaseHeld))
+					Expect(err).To(MatchError(backend.ErrLeaseHeld))
 					Expect(b.Renew(ctx, rec, normalTTL)).To(Succeed())
 				})
 			})
@@ -491,13 +494,13 @@ func RunSuite(newBackend func() backend.Backend) func() {
 					rec, err := b.Acquire(ctx, "forget-2", "h", normalTTL)
 					Expect(err).NotTo(HaveOccurred())
 
-					Expect(b.Forget(ctx, stale(rec))).To(MatchError(worklease.ErrFenced))
+					Expect(b.Forget(ctx, stale(rec))).To(MatchError(backend.ErrFenced))
 
 					Expect(b.Checkpoint(ctx, rec, []byte("still here"), normalTTL)).To(Succeed())
 				})
 
 				It("returns ErrFenced when no record exists for the work ID", func() {
-					Expect(b.Forget(ctx, neverAcquired)).To(MatchError(worklease.ErrFenced))
+					Expect(b.Forget(ctx, neverAcquired)).To(MatchError(backend.ErrFenced))
 				})
 
 				It("succeeds after the holder released, and the next Acquire reports ExitNone", func() {

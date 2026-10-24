@@ -4,7 +4,7 @@
 // implicit transaction at the session's default isolation level. The backend
 // requires READ COMMITTED, the PostgreSQL default. Under REPEATABLE READ or
 // SERIALIZABLE, a contended Acquire fails with a serialization error (SQLSTATE
-// 40001) instead of returning worklease.ErrLeaseHeld, and concurrent Renew or
+// 40001) instead of returning backend.ErrLeaseHeld, and concurrent Renew or
 // Release calls on one lease can fail the same way. Fencing stays correct at
 // every level, because a serialization failure aborts the statement and never
 // reports success. If the database or role defaults to another level, pin READ
@@ -13,6 +13,11 @@
 //
 // The schema is in schema.sql in this package's directory. Applying and
 // migrating it is the caller's responsibility (ADR-0017).
+//
+// New takes a *sql.DB and does not register a database driver: the caller
+// imports one and opens the *sql.DB. The package's own test suites run against
+// github.com/lib/pq only, and the documented behavior of a statement cancelled
+// mid-flight was observed with that driver.
 package postgres
 
 import (
@@ -22,9 +27,6 @@ import (
 	"fmt"
 	"time"
 
-	_ "github.com/lib/pq"
-
-	"github.com/aetomala/worklease"
 	"github.com/aetomala/worklease/backend"
 )
 
@@ -158,7 +160,7 @@ func (p *postgresBackend) Acquire(ctx context.Context, workID, holderID string, 
 	err := p.db.QueryRowContext(ctx, queryAcquire, workID, holderID, ttlStr).Scan(&fencingToken, &expiresAt)
 	if errors.Is(err, sql.ErrNoRows) {
 		// No row returned — the lease is held by another, unexpired holder.
-		return backend.LeaseRecord{}, worklease.ErrLeaseHeld
+		return backend.LeaseRecord{}, backend.ErrLeaseHeld
 	}
 	if err != nil {
 		return backend.LeaseRecord{}, fmt.Errorf("postgres: Acquire: exec failed: %w", withCtxErr(ctx, err))
@@ -199,13 +201,13 @@ func (p *postgresBackend) Checkpoint(ctx context.Context, record backend.LeaseRe
 	var one int
 	err = p.db.QueryRowContext(ctx, queryHolderCheck, record.WorkID, record.HolderID, record.FencingToken).Scan(&one)
 	if errors.Is(err, sql.ErrNoRows) {
-		return worklease.ErrFenced
+		return backend.ErrFenced
 	}
 	if err != nil {
 		return fmt.Errorf("postgres: Checkpoint: %w", withCtxErr(ctx, err))
 	}
 
-	return worklease.ErrLeaseExpired
+	return backend.ErrLeaseExpired
 }
 
 // Renew extends the lease expiration time. Returns ErrFenced if the record's
@@ -230,11 +232,11 @@ func (p *postgresBackend) Renew(ctx context.Context, record backend.LeaseRecord,
 		err := p.db.QueryRowContext(ctx, queryRenewCheck, record.WorkID, record.HolderID, record.FencingToken).Scan(&expiresAt)
 		if err != nil {
 			if errors.Is(err, sql.ErrNoRows) {
-				return worklease.ErrFenced
+				return backend.ErrFenced
 			}
 			return fmt.Errorf("postgres: Renew: %w", withCtxErr(ctx, err))
 		}
-		return worklease.ErrLeaseExpired
+		return backend.ErrLeaseExpired
 	}
 
 	return nil
@@ -247,7 +249,7 @@ func (p *postgresBackend) Renew(ctx context.Context, record backend.LeaseRecord,
 func (p *postgresBackend) Release(ctx context.Context, record backend.LeaseRecord, mode backend.ExitMode) error {
 	// ===== STEP 1: Validate Mode =====
 	if mode != backend.ExitFinished && mode != backend.ExitAbandoned && mode != backend.ExitRetired {
-		return worklease.ErrInvalidExitMode
+		return backend.ErrInvalidExitMode
 	}
 
 	// ===== STEP 2: Record Exit and Expire Immediately =====
@@ -269,13 +271,13 @@ func (p *postgresBackend) Release(ctx context.Context, record backend.LeaseRecor
 	var one int
 	err = p.db.QueryRowContext(ctx, queryHolderCheck, record.WorkID, record.HolderID, record.FencingToken).Scan(&one)
 	if errors.Is(err, sql.ErrNoRows) {
-		return worklease.ErrFenced
+		return backend.ErrFenced
 	}
 	if err != nil {
 		return fmt.Errorf("postgres: Release: %w", withCtxErr(ctx, err))
 	}
 
-	return worklease.ErrLeaseExpired
+	return backend.ErrLeaseExpired
 }
 
 // ReadCheckpoint returns the checkpoint state and the immediately previous
@@ -291,7 +293,7 @@ func (p *postgresBackend) ReadCheckpoint(ctx context.Context, record backend.Lea
 	)
 	err := p.db.QueryRowContext(ctx, queryReadCheckpoint, record.WorkID).Scan(&storedToken, &state, &prevExitText, &prevHolderID)
 	if errors.Is(err, sql.ErrNoRows) {
-		return backend.Checkpoint{}, worklease.ErrFenced
+		return backend.Checkpoint{}, backend.ErrFenced
 	}
 	if err != nil {
 		return backend.Checkpoint{}, fmt.Errorf("postgres: ReadCheckpoint: %w", withCtxErr(ctx, err))
@@ -299,7 +301,7 @@ func (p *postgresBackend) ReadCheckpoint(ctx context.Context, record backend.Lea
 
 	// ===== STEP 2: Fence on Token =====
 	if storedToken != record.FencingToken {
-		return backend.Checkpoint{}, worklease.ErrFenced
+		return backend.Checkpoint{}, backend.ErrFenced
 	}
 
 	// ===== STEP 3: Return Checkpoint =====
@@ -341,7 +343,7 @@ func (p *postgresBackend) Forget(ctx context.Context, record backend.LeaseRecord
 		return fmt.Errorf("postgres: Forget: %w", withCtxErr(ctx, err))
 	}
 	if n == 0 {
-		return worklease.ErrFenced
+		return backend.ErrFenced
 	}
 
 	return nil
