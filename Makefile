@@ -1,4 +1,4 @@
-.PHONY: build test lint vuln ci clean
+.PHONY: build test lint fmt vuln examples ci clean
 
 PKG := ./...
 
@@ -12,10 +12,16 @@ lint:
 	go vet $(PKG)
 	golangci-lint run $(PKG)
 
+fmt:
+	@test -z "$$(gofmt -l .)" || { gofmt -l .; echo "gofmt: the files above need formatting"; exit 1; }
+
+examples:
+	@for dir in examples/*/; do (cd "$$dir" && go vet ./... && go build ./...) || exit 1; done
+
 vuln:
 	govulncheck $(PKG)
 
-ci: lint build test vuln
+ci: lint fmt build test examples vuln
 
 clean:
 	go clean $(PKG)

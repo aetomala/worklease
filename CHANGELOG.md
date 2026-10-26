@@ -9,6 +9,10 @@ This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 
 ## [Unreleased]
 
+### Changed
+
+- CI: `gofmt -l .` and the examples build run in `make ci`, and CI runs each example with a 60-second limit. A weekly workflow runs `govulncheck` on `dev`.
+
 ---
 
 ## [v0.8.0] — 2026-10-23
