@@ -1417,12 +1417,13 @@ slice-aliasing invariants. A new backend must pass it before it is considered co
 
 ### Race Detection and CI
 
-All tests run with `-race`. The CI pipeline runs two jobs: `lint + govulncheck` and
-`test + postgres service container`. The in-memory backend and the renewal goroutine are the
-areas that benefit most from race detection.
+All tests run with `-race`. The CI pipeline runs three jobs: `lint + gofmt + govulncheck`,
+`test + postgres service container`, and `build examples` (which also runs each example with a
+60-second limit). A separate weekly workflow runs `govulncheck` on `dev`. The in-memory backend
+and the renewal goroutine are the areas that benefit most from race detection.
 
 ```bash
-make ci   # lint, build, test (all three targets)
+make ci   # lint, fmt, build, test, examples (vet and build), vuln
 ```
 
 ---
