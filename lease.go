@@ -42,10 +42,10 @@ var (
 	ErrLeaseWindowExhausted = errors.New(msgLeaseWindowExhausted)
 
 	// ErrConfigInvalid is the parent sentinel for configuration errors: every
-	// error worklease.New returns, ErrNilBackend wherever it is returned, and the
-	// configuration sentinels of the pool, worker, and leader packages. Errors
-	// from other packages, such as the nil database check of postgres.New, are not
-	// members. Match it with errors.Is.
+	// error worklease.New returns, ErrNilBackend wherever it is returned,
+	// ErrRetentionRequired, and the configuration sentinels of the pool, worker,
+	// and leader packages. Errors from other packages, such as the nil database
+	// check of postgres.New, are not members. Match it with errors.Is.
 	ErrConfigInvalid = errors.New("worklease: invalid configuration")
 
 	// ErrNilBackend is returned by New and NewVacuum when the backend is nil,
@@ -148,6 +148,8 @@ type Lease interface {
 	// write. Stop any background checkpoint loop when it sees ErrLeaseExpired.
 	// A lease whose TTL lapsed with no declared exit and no successor is not an
 	// error: the write succeeds and revives the lease.
+	// A nil or empty state clears the stored state: ReadCheckpoint then returns a
+	// nil State on every backend.
 	Checkpoint(ctx context.Context, token Token, state []byte) error
 
 	// Renew extends the lease expiration time. Returns ErrFenced if the token's
@@ -169,10 +171,11 @@ type Lease interface {
 
 	// ReadCheckpoint returns the last checkpointed state and how the
 	// immediately previous holder exited. On a first acquisition State is nil
-	// and PrevExit is ExitNone. PrevExit and PrevHolderID are fixed for the life
-	// of the lease. Returns ErrFenced if the token no longer matches the stored
-	// lease or if no row exists for the work ID, for example after Forget or
-	// Sweep.
+	// and PrevExit is ExitNone. State is also nil after a Checkpoint with a nil
+	// or empty state, and is never a non-nil empty slice. PrevExit and
+	// PrevHolderID are fixed for the life of the lease. Returns ErrFenced if the
+	// token no longer matches the stored lease or if no row exists for the work
+	// ID, for example after Forget or Sweep.
 	ReadCheckpoint(ctx context.Context, token Token) (Checkpoint, error)
 
 	// StartRenewal begins automatic renewal of the lease at regular intervals.

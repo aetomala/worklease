@@ -4,6 +4,12 @@
 
 `pool.New` and `leader.Elect` now reject a nil work function with `pool.ErrWorkFnRequired` and `leader.ErrFnRequired`. Before this change a nil function was accepted, and the program panicked when the function was first called. Both errors match `errors.Is(err, worklease.ErrConfigInvalid)`.
 
+A nil or empty checkpoint state now reads back as a nil `State` on every backend and driver, and PostgreSQL stores NULL for it. No schema change or data migration is needed: rows that hold an empty value read back as nil. Code that tests `State == nil` to detect a first acquisition now behaves the same on every driver. Code that tests `len(State) == 0` is unaffected. Code that treated a non-nil empty `State` as proof that a checkpoint was written must change, because an empty state is no longer distinguishable from none.
+
+`worklease.ErrRetentionRequired` now matches `errors.Is(err, worklease.ErrConfigInvalid)`. Its message is unchanged.
+
+`pool.Permanent(nil).Error()` returns `"pool: permanent error"` instead of panicking.
+
 ## v0.7.1 → v0.8.0
 
 v0.8 audits the API before the 1.0 freeze. No schema change is required. Four changes break callers.

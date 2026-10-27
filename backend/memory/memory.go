@@ -191,7 +191,7 @@ func (mb *memoryBackend) Checkpoint(ctx context.Context, record backend.LeaseRec
 	// ===== STEP 5: Update Checkpoint =====
 	// Defensive copy (ADR-0014): do not alias the caller's slice — the caller
 	// may mutate state after Checkpoint returns.
-	if state == nil {
+	if len(state) == 0 { // a nil or empty state clears the checkpoint (D-26)
 		r.checkpoint = nil
 	} else {
 		stored := make([]byte, len(state))

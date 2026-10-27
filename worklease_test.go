@@ -2158,6 +2158,17 @@ var _ = Describe("worklease", func() {
 			})
 		})
 
+		Context("when opts.Retention is not positive", func() {
+			It("returns an error that matches ErrConfigInvalid and keeps its message", func() {
+				v, err := worklease.NewVacuum(mockB, worklease.VacuumConfig{})
+				Expect(err).NotTo(HaveOccurred())
+				_, err = v.Sweep(ctx, worklease.SweepOptions{Retention: 0})
+				Expect(errors.Is(err, worklease.ErrRetentionRequired)).To(BeTrue())
+				Expect(errors.Is(err, worklease.ErrConfigInvalid)).To(BeTrue())
+				Expect(err.Error()).To(Equal("worklease: retention must be greater than zero"))
+			})
+		})
+
 		Context("when opts.Retention is positive", func() {
 			It("delegates to Backend.Sweep and returns its result unchanged, success case", func() {
 				v, err := worklease.NewVacuum(mockB, worklease.VacuumConfig{})

@@ -260,6 +260,38 @@ var _ = Describe("Backend (postgres)", func() {
 			Expect(cp.PrevExit).To(Equal(backend.ExitFinished))
 			Expect(cp.PrevHolderID).To(Equal("holder"))
 		})
+
+		It("stores NULL for a nil or empty checkpoint state", func() {
+			record, err := b.Acquire(ctx, "w-cp-null", "holder", 30*time.Second)
+			Expect(err).NotTo(HaveOccurred())
+
+			for _, empty := range [][]byte{nil, {}} {
+				Expect(b.Checkpoint(ctx, record, []byte("payload"), 30*time.Second)).To(Succeed())
+				Expect(b.Checkpoint(ctx, record, empty, 30*time.Second)).To(Succeed())
+				var isNull bool
+				Expect(db.QueryRowContext(ctx,
+					"SELECT checkpoint IS NULL FROM worklease_leases WHERE work_id = $1", "w-cp-null").Scan(&isNull)).To(Succeed())
+				Expect(isNull).To(BeTrue())
+			}
+		})
+
+		It("reads an empty stored checkpoint back as nil", func() {
+			record, err := b.Acquire(ctx, "w-cp-empty", "holder", 30*time.Second)
+			Expect(err).NotTo(HaveOccurred())
+
+			// The row shape written before this change: an empty bytea, not NULL.
+			_, err = db.ExecContext(ctx,
+				`UPDATE worklease_leases SET checkpoint = '\x'::bytea WHERE work_id = $1`, "w-cp-empty")
+			Expect(err).NotTo(HaveOccurred())
+			var isNull bool
+			Expect(db.QueryRowContext(ctx,
+				"SELECT checkpoint IS NULL FROM worklease_leases WHERE work_id = $1", "w-cp-empty").Scan(&isNull)).To(Succeed())
+			Expect(isNull).To(BeFalse())
+
+			cp, err := b.ReadCheckpoint(ctx, record)
+			Expect(err).NotTo(HaveOccurred())
+			Expect(cp.State).To(BeNil())
+		})
 	})
 
 	Describe("exit columns", func() {
