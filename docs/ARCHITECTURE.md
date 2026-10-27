@@ -1328,7 +1328,7 @@ difference without parsing a nil return.
 own acquisition loop — if a slot goroutine blocks inside `Runner.Run` waiting for a lease, it
 cannot respond to context cancellation during shutdown. `pool.New` returns
 `ErrWithWaitForLeaseProhibited` if `WithWaitForLease` is detected. Construction errors use
-distinct sentinels — `ErrLeaseRequired`, `ErrEmptyWorkIDs`, `ErrEmptyWorkID`, `ErrDuplicateWorkID`, `ErrWithWaitForLeaseProhibited` — each
+distinct sentinels — `ErrLeaseRequired`, `ErrEmptyWorkIDs`, `ErrEmptyWorkID`, `ErrDuplicateWorkID`, `ErrWithWaitForLeaseProhibited`, `ErrWorkFnRequired` — each
 wrapping `ErrConfigInvalid`, so `errors.Is(err, pool.ErrConfigInvalid)` still matches the broad
 case.
 
