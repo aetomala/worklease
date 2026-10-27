@@ -115,9 +115,22 @@ var _ = Describe("pool", func() {
 				Expect(p).To(BeNil())
 			})
 		})
+		Context("nil work function (v1.0 prep)", func() {
+			It("returns ErrWorkFnRequired when fn is nil", func() {
+				p, err := pool.New(mockLease, pool.Config{WorkIDs: []string{"w1"}}, nil)
+				Expect(errors.Is(err, pool.ErrWorkFnRequired)).To(BeTrue())
+				Expect(p).To(BeNil())
+			})
+
+			It("ErrWorkFnRequired matches pool.ErrConfigInvalid and worklease.ErrConfigInvalid and keeps its message", func() {
+				Expect(errors.Is(pool.ErrWorkFnRequired, pool.ErrConfigInvalid)).To(BeTrue())
+				Expect(errors.Is(pool.ErrWorkFnRequired, worklease.ErrConfigInvalid)).To(BeTrue())
+				Expect(pool.ErrWorkFnRequired.Error()).To(Equal("pool: work function is required: pool: invalid configuration"))
+			})
+		})
 		Context("configuration errors match worklease.ErrConfigInvalid (v0.8)", func() {
 			It("every pool configuration sentinel matches pool.ErrConfigInvalid and worklease.ErrConfigInvalid", func() {
-				for _, err := range []error{pool.ErrConfigInvalid, pool.ErrLeaseRequired, pool.ErrEmptyWorkIDs, pool.ErrEmptyWorkID, pool.ErrDuplicateWorkID, pool.ErrWithWaitForLeaseProhibited} {
+				for _, err := range []error{pool.ErrConfigInvalid, pool.ErrLeaseRequired, pool.ErrEmptyWorkIDs, pool.ErrEmptyWorkID, pool.ErrDuplicateWorkID, pool.ErrWithWaitForLeaseProhibited, pool.ErrWorkFnRequired} {
 					Expect(errors.Is(err, pool.ErrConfigInvalid)).To(BeTrue(), err.Error())
 					Expect(errors.Is(err, worklease.ErrConfigInvalid)).To(BeTrue(), err.Error())
 				}
@@ -134,6 +147,7 @@ var _ = Describe("pool", func() {
 				Expect(pool.ErrEmptyWorkID.Error()).To(Equal("pool: work ID must not be empty: pool: invalid configuration"))
 				Expect(pool.ErrDuplicateWorkID.Error()).To(Equal("pool: duplicate work ID: pool: invalid configuration"))
 				Expect(pool.ErrWithWaitForLeaseProhibited.Error()).To(Equal("pool: WithWaitForLease is prohibited in AcquireOptions: pool: invalid configuration"))
+				Expect(pool.ErrWorkFnRequired.Error()).To(Equal("pool: work function is required: pool: invalid configuration"))
 				Expect(pool.ErrAllSlotsDead.Error()).To(Equal("pool: all slots permanently dead"))
 			})
 		})

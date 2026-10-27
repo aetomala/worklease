@@ -44,6 +44,9 @@ var (
 	// ErrWithWaitForLeaseProhibited is returned by New when cfg.AcquireOptions includes WithWaitForLease.
 	ErrWithWaitForLeaseProhibited = fmt.Errorf("pool: WithWaitForLease is prohibited in AcquireOptions: %w", ErrConfigInvalid)
 
+	// ErrWorkFnRequired is returned by New when fn is nil.
+	ErrWorkFnRequired = fmt.Errorf("pool: work function is required: %w", ErrConfigInvalid)
+
 	// ErrAllSlotsDead is returned by Run when every slot exited via PermanentError.
 	ErrAllSlotsDead = errors.New("pool: all slots permanently dead")
 )
@@ -242,11 +245,11 @@ type Pool struct {
 // New constructs a Pool. Does not start slot acquisition — call Run.
 // Returns ErrLeaseRequired if lease is nil, ErrEmptyWorkIDs if cfg.WorkIDs is
 // empty, ErrEmptyWorkID if an entry of cfg.WorkIDs is the empty string,
-// ErrDuplicateWorkID if a work ID appears more than once, and
-// ErrWithWaitForLeaseProhibited if cfg.AcquireOptions includes WithWaitForLease.
-// All five satisfy errors.Is(err, ErrConfigInvalid) and errors.Is(err,
-// worklease.ErrConfigInvalid). Entries are checked in index order, and the
-// first invalid entry is reported.
+// ErrDuplicateWorkID if a work ID appears more than once,
+// ErrWithWaitForLeaseProhibited if cfg.AcquireOptions includes WithWaitForLease,
+// and ErrWorkFnRequired if fn is nil. All six satisfy errors.Is(err,
+// ErrConfigInvalid) and errors.Is(err, worklease.ErrConfigInvalid). Entries are
+// checked in index order, and the first invalid entry is reported.
 func New(lease worklease.Lease, cfg Config, fn WorkFn) (*Pool, error) {
 	// ===== STEP 1: Nil lease check =====
 	if lease == nil {
@@ -275,7 +278,12 @@ func New(lease worklease.Lease, cfg Config, fn WorkFn) (*Pool, error) {
 		return nil, ErrWithWaitForLeaseProhibited
 	}
 
-	// ===== STEP 5: Apply pacing defaults for zero or negative values =====
+	// ===== STEP 5: Nil work function check =====
+	if fn == nil {
+		return nil, ErrWorkFnRequired
+	}
+
+	// ===== STEP 6: Apply pacing defaults for zero or negative values =====
 	if cfg.IdleInterval <= 0 {
 		cfg.IdleInterval = defaultIdleInterval
 	}
@@ -286,7 +294,7 @@ func New(lease worklease.Lease, cfg Config, fn WorkFn) (*Pool, error) {
 		cfg.BackoffInterval = defaultBackoffInterval
 	}
 
-	// ===== STEP 6: Inject NoOp observer when nil =====
+	// ===== STEP 7: Inject NoOp observer when nil =====
 	obs := cfg.Observer
 	if obs == nil {
 		obs = NoopObserver{}

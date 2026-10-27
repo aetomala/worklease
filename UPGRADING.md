@@ -1,5 +1,9 @@
 # Upgrading worklease
 
+## v0.8.0 → v1.0.0
+
+`pool.New` and `leader.Elect` now reject a nil work function with `pool.ErrWorkFnRequired` and `leader.ErrFnRequired`. Before this change a nil function was accepted, and the program panicked when the function was first called. Both errors match `errors.Is(err, worklease.ErrConfigInvalid)`.
+
 ## v0.7.1 → v0.8.0
 
 v0.8 audits the API before the 1.0 freeze. No schema change is required. Four changes break callers.
