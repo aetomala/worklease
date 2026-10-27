@@ -17,6 +17,9 @@ This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 
 - CI: `gofmt -l .` and the examples build run in `make ci`, and CI runs each example with a 60-second limit. A weekly workflow runs `govulncheck` on `dev`.
 - The half-open-connection specs retry once on failure (#115). A stall of the runner or the database as long as the lease TTL expires the lease under test; a regression of #115 still fails on both attempts.
+- A nil or empty checkpoint state now reads back as a nil `State` on every backend and driver. Before, `Checkpoint` with a nil state read back as nil on the memory backend and with pgx, and as an empty non-nil slice with lib/pq; `Checkpoint` with an empty non-nil slice read back as an empty non-nil slice on every backend. PostgreSQL now stores NULL for either, and reads an empty stored value as nil, so rows written before this change read back as nil too. No schema change.
+- `worklease.ErrRetentionRequired` now matches `worklease.ErrConfigInvalid`, as the other configuration sentinels do. Its message is unchanged.
+- `pool.Permanent(nil).Error()` no longer panics: it returns `"pool: permanent error"`.
 
 ---
 

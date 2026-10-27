@@ -571,7 +571,7 @@ As of v0.5, `fencing_token` is sourced from a single global `worklease_fencing_s
 rather than a per-row `+ 1` (ADR-0016). Tokens are therefore strictly increasing across **all**
 work IDs, not just within a single row's history, and they survive row deletion — the property
 that makes v0.6 retention (`Forget`, `Vacuum.Sweep`) safe. `checkpoint` is nullable — `NULL` on first
-acquisition means no prior state. `exit_mode` holds the current holder's declared exit (`NULL`
+acquisition, or after a `Checkpoint` of a nil or empty state, means no prior state. `exit_mode` holds the current holder's declared exit (`NULL`
 until it calls `Release`); `prev_exit_mode` and `prev_holder_id` hold the immediately previous
 holder's exit and ID, captured by `Acquire` (ADR-0018). v0.7 dropped the deprecated `clean_handoff` column (#86).
 
