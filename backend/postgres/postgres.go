@@ -183,7 +183,13 @@ func (p *postgresBackend) Acquire(ctx context.Context, workID, holderID string, 
 func (p *postgresBackend) Checkpoint(ctx context.Context, record backend.LeaseRecord, state []byte, ttl time.Duration) error {
 	// ===== STEP 1: Write State and Extend the Lease =====
 	ttlStr := formatInterval(ttl)
-	result, err := p.db.ExecContext(ctx, queryCheckpoint, state, ttlStr, record.WorkID, record.HolderID, record.FencingToken)
+	// A nil or empty state is stored as NULL (D-26). Pass an untyped nil: lib/pq
+	// sends a nil []byte as an empty bytea, while pgx sends NULL.
+	var stateArg any
+	if len(state) > 0 {
+		stateArg = state
+	}
+	result, err := p.db.ExecContext(ctx, queryCheckpoint, stateArg, ttlStr, record.WorkID, record.HolderID, record.FencingToken)
 	if err != nil {
 		return fmt.Errorf("postgres: Checkpoint: %w", withCtxErr(ctx, err))
 	}
@@ -305,6 +311,11 @@ func (p *postgresBackend) ReadCheckpoint(ctx context.Context, record backend.Lea
 	}
 
 	// ===== STEP 3: Return Checkpoint =====
+	// An empty stored value reads back as nil (D-26), so rows written before
+	// this normalization, and rows written by any driver, agree.
+	if len(state) == 0 {
+		state = nil
+	}
 	return backend.Checkpoint{
 		State:        state,
 		PrevExit:     exitModeFromSQL(prevExitText),

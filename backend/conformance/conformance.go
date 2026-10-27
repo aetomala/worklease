@@ -382,6 +382,26 @@ func RunSuite(newBackend func() backend.Backend) func() {
 					Expect(cp.PrevHolderID).To(BeEmpty())
 				})
 
+				It("returns nil state after Checkpoint with a nil or empty state", func() {
+					rec, err := b.Acquire(ctx, "rc-empty", "h", normalTTL)
+					Expect(err).NotTo(HaveOccurred())
+
+					for _, empty := range [][]byte{nil, {}} {
+						Expect(b.Checkpoint(ctx, rec, []byte("payload"), normalTTL)).To(Succeed())
+						Expect(b.Checkpoint(ctx, rec, empty, normalTTL)).To(Succeed())
+						cp, err := b.ReadCheckpoint(ctx, rec)
+						Expect(err).NotTo(HaveOccurred())
+						Expect(cp.State).To(BeNil())
+					}
+
+					first, err := b.Acquire(ctx, "rc-empty-first", "h", normalTTL)
+					Expect(err).NotTo(HaveOccurred())
+					Expect(b.Checkpoint(ctx, first, []byte{}, normalTTL)).To(Succeed())
+					cp, err := b.ReadCheckpoint(ctx, first)
+					Expect(err).NotTo(HaveOccurred())
+					Expect(cp.State).To(BeNil())
+				})
+
 				It("returns nil state when no checkpoint has been written", func() {
 					rec, err := b.Acquire(ctx, "w1", "h", normalTTL)
 					Expect(err).NotTo(HaveOccurred())

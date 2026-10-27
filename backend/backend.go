@@ -73,7 +73,8 @@ func (m ExitMode) String() string {
 // checkpointed state and how the immediately previous holder exited. Fields
 // may be added in later releases.
 type Checkpoint struct {
-	// State is the last checkpointed state; nil if none was ever written.
+	// State is the last checkpointed state. It is nil if none was ever written
+	// or if the last write was nil or empty; it is never a non-nil empty slice.
 	State []byte
 
 	// PrevExit is how the immediately previous holder exited.
@@ -117,7 +118,8 @@ type Backend interface {
 	// Checkpoint never writes an exit field. Once the holder has declared an
 	// exit with Release, Checkpoint returns ErrLeaseExpired without writing. A
 	// lease that lapsed with no declared exit and no successor can still be
-	// revived by Checkpoint.
+	// revived by Checkpoint. A nil or empty state clears the stored state:
+	// ReadCheckpoint then returns a nil State.
 	Checkpoint(ctx context.Context, record LeaseRecord, state []byte, ttl time.Duration) error
 
 	// Renew extends the lease expiration time. Returns ErrFenced if the record's
@@ -138,8 +140,10 @@ type Backend interface {
 
 	// ReadCheckpoint returns the checkpoint state and the immediately previous
 	// holder's exit for the lease identified by record. The returned State is a
-	// fresh allocation owned by the caller. Returns ErrFenced if no row exists
-	// for record.WorkID or if record.FencingToken does not match the stored lease.
+	// fresh allocation owned by the caller, or nil when no state was ever written
+	// or the last Checkpoint wrote a nil or empty state; it is never a non-nil
+	// empty slice. Returns ErrFenced if no row exists for record.WorkID or if
+	// record.FencingToken does not match the stored lease.
 	ReadCheckpoint(ctx context.Context, record LeaseRecord) (Checkpoint, error)
 
 	// Forget permanently deletes the row identified by record. Returns ErrFenced
