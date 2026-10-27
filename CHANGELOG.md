@@ -9,6 +9,10 @@ This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 
 ## [Unreleased]
 
+### Added
+
+- `pool.ErrWorkFnRequired` and `leader.ErrFnRequired`: `pool.New` and `leader.Elect` return them when the work function is nil, as `worker.NewRunner` already returned `worker.ErrWorkFnRequired`. Both match `worklease.ErrConfigInvalid`. Before this change `pool.New` accepted a nil function and `Elect` did not check it.
+
 ### Changed
 
 - CI: `gofmt -l .` and the examples build run in `make ci`, and CI runs each example with a 60-second limit. A weekly workflow runs `govulncheck` on `dev`.
