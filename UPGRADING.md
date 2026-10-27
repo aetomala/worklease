@@ -10,6 +10,8 @@ A nil or empty checkpoint state now reads back as a nil `State` on every backend
 
 `pool.Permanent(nil).Error()` returns `"pool: permanent error"` instead of panicking.
 
+worklease v1.0.0 requires Go 1.26 or later (v0.8.0 required Go 1.25). The `go` line in the module's `go.mod` is `go 1.26.0`. With `GOTOOLCHAIN=auto` (the default), the `go` command downloads a matching toolchain when you run `go get github.com/aetomala/worklease@v1.0.0`; with `GOTOOLCHAIN=local` the command stops with an error naming the required version, and you upgrade your toolchain first. CI for the library tests Go 1.26 and 1.27.
+
 ## v0.7.1 → v0.8.0
 
 v0.8 audits the API before the 1.0 freeze. No schema change is required. Four changes break callers.
