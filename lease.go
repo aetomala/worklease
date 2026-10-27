@@ -42,10 +42,10 @@ var (
 	ErrLeaseWindowExhausted = errors.New(msgLeaseWindowExhausted)
 
 	// ErrConfigInvalid is the parent sentinel for configuration errors: every
-	// error worklease.New returns, ErrNilBackend wherever it is returned, and the
-	// configuration sentinels of the pool, worker, and leader packages. Errors
-	// from other packages, such as the nil database check of postgres.New, are not
-	// members. Match it with errors.Is.
+	// error worklease.New returns, ErrNilBackend wherever it is returned,
+	// ErrRetentionRequired, and the configuration sentinels of the pool, worker,
+	// and leader packages. Errors from other packages, such as the nil database
+	// check of postgres.New, are not members. Match it with errors.Is.
 	ErrConfigInvalid = errors.New("worklease: invalid configuration")
 
 	// ErrNilBackend is returned by New and NewVacuum when the backend is nil,
