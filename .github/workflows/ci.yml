@@ -22,6 +22,7 @@ jobs:
         uses: actions/setup-go@v5
         with:
           go-version: "1.26.x"
+          check-latest: true
           cache: true
 
       - name: Download dependencies
@@ -82,6 +83,7 @@ jobs:
         uses: actions/setup-go@v5
         with:
           go-version: ${{ matrix.go }}
+          check-latest: true
           cache: true
 
       - name: Download dependencies
@@ -104,6 +106,7 @@ jobs:
         uses: actions/setup-go@v5
         with:
           go-version: "1.26.x"
+          check-latest: true
           cache: true
           cache-dependency-path: "examples/*/go.sum"
 
