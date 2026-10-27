@@ -1,4 +1,4 @@
-.PHONY: build test lint fmt vuln examples ci clean
+.PHONY: build test lint fmt tidy vuln examples ci clean
 
 PKG := ./...
 
@@ -18,10 +18,13 @@ fmt:
 examples:
 	@for dir in examples/*/; do (cd "$$dir" && go vet ./... && go build ./...) || exit 1; done
 
+tidy:
+	@for dir in . examples/*/; do (cd "$$dir" && go mod tidy -diff) || exit 1; done
+
 vuln:
 	govulncheck $(PKG)
 
-ci: lint fmt build test examples vuln
+ci: lint fmt tidy build test examples vuln
 
 clean:
 	go clean $(PKG)
