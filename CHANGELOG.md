@@ -12,6 +12,7 @@ This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 ### Changed
 
 - CI: `gofmt -l .` and the examples build run in `make ci`, and CI runs each example with a 60-second limit. A weekly workflow runs `govulncheck` on `dev`.
+- The half-open-connection specs retry once on failure (#115). A stall of the runner or the database as long as the lease TTL expires the lease under test; a regression of #115 still fails on both attempts.
 
 ---
 

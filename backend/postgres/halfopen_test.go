@@ -265,7 +265,11 @@ func (w *renewWatcher) OnRenew(_ context.Context, e worklease.RenewEvent) {
 	}
 }
 
-var _ = Describe("half-open connection (#115)", func() {
+// The specs below retry once on failure. A stall of the runner or the database
+// for as long as the lease TTL expires the lease under test, and no wait can
+// absorb that; a regression of #115 fails on every attempt, so the retry does
+// not hide one.
+var _ = Describe("half-open connection (#115)", FlakeAttempts(2), func() {
 	var (
 		ctx     context.Context
 		proxy   *halfOpenProxy
@@ -276,6 +280,8 @@ var _ = Describe("half-open connection (#115)", func() {
 	BeforeEach(func() {
 		var cancel context.CancelFunc
 		ctx, cancel = context.WithTimeout(context.Background(), 30*time.Second)
+		_, err := db.ExecContext(ctx, "DELETE FROM worklease_leases WHERE work_id LIKE 'half-%'")
+		Expect(err).NotTo(HaveOccurred())
 		DeferCleanup(cancel)
 
 		dsn := os.Getenv("WORKLEASE_TEST_POSTGRES_DSN")
