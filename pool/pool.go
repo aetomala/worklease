@@ -77,12 +77,20 @@ type PermanentError interface {
 
 // Permanent wraps err in a value that satisfies PermanentError with Permanent() == true.
 // Use when a WorkFn wants to drop its slot without defining a custom error type.
+// A nil err is allowed: the result is still non-nil, its message is
+// "pool: permanent error", and Unwrap returns nil.
 func Permanent(err error) error { return &permanentErr{cause: err} }
 
 // permanentErr is the concrete type returned by Permanent.
 type permanentErr struct{ cause error }
 
-func (e *permanentErr) Error() string   { return e.cause.Error() }
+func (e *permanentErr) Error() string {
+	if e.cause == nil {
+		return "pool: permanent error"
+	}
+	return e.cause.Error()
+}
+
 func (e *permanentErr) Permanent() bool { return true }
 func (e *permanentErr) Unwrap() error   { return e.cause }
 

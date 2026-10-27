@@ -523,6 +523,15 @@ var _ = Describe("pool", func() {
 				cause := errors.New("cause")
 				Expect(errors.Unwrap(pool.Permanent(cause))).To(Equal(cause))
 			})
+			It("stays non-nil for a nil error, with a message that does not panic", func() {
+				err := pool.Permanent(nil)
+				Expect(err).To(HaveOccurred())
+				Expect(err.Error()).To(Equal("pool: permanent error"))
+				Expect(errors.Unwrap(err)).To(BeNil())
+				var pe pool.PermanentError
+				Expect(errors.As(err, &pe)).To(BeTrue())
+				Expect(pe.Permanent()).To(BeTrue())
+			})
 			It("preserves the original error message", func() {
 				Expect(pool.Permanent(errors.New("boom")).Error()).To(Equal("boom"))
 			})
