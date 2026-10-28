@@ -207,10 +207,12 @@ methods but never set them — they receive a `Token` value and pass it back to 
 The library validates the token on every write. See
 [ADR-0002](adr/0002-token-inspectable-via-methods.md).
 
-Tokens are monotonic but not contiguous. On PostgreSQL every `Acquire` attempt draws from the
-sequence regardless of outcome, including attempts that find the lease held and return
-`ErrLeaseHeld`. The in-memory backend advances one counter per instance, only on a successful
-acquire, so the tokens of one work ID still skip when another work ID acquires in between.
+Tokens are monotonic but not contiguous. On PostgreSQL every `Acquire` attempt that the database
+executes draws from the sequence, including attempts that find the lease held and return
+`ErrLeaseHeld`. An empty `workID`, or a context that is already done when an attempt starts,
+returns before anything is sent to the database and draws nothing. The in-memory backend
+advances one counter per instance, only on a successful acquire, so the tokens of one work ID
+still skip when another work ID acquires in between.
 Gaps in the token sequence are expected and carry no operational meaning; callers must not
 assume consecutive token values.
 
