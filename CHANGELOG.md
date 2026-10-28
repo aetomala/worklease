@@ -11,6 +11,28 @@ This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 
 ---
 
+## [v1.0.1] — 2026-10-28
+
+v1.0.1 changes no exported identifier and no library behavior. It adds CI, test and documentation work, a security policy, a code of conduct and contribution templates. `gorelease -base=v1.0.0` reports no change to the exported API. The module's `go.mod` now requires `github.com/jackc/pgx/v5` v5.11.0, which only the tests import; the `go 1.26.0` line is unchanged.
+
+### Added
+
+- `SECURITY.md`: vulnerabilities are reported privately through GitHub, and fixes are released for the latest v1 release (#161).
+- `CODE_OF_CONDUCT.md` (Contributor Covenant 2.1), issue forms for bug reports and feature requests, and a pull request template; `CONTRIBUTING.md` links the code of conduct and the security policy (#161).
+
+### Changed
+
+- Tests: the `backend/postgres` and `integration` suites run on pgx v5 (`github.com/jackc/pgx/v5/stdlib`) as well as lib/pq, selected by `WORKLEASE_TEST_POSTGRES_DRIVER` (#155). CI runs each supported Go version on both drivers, and `make ci` adds a `test-pgx` target. The two #113 cancellation specs no longer import lib/pq: on lib/pq they still require SQLSTATE 57014 in the error chain, and on pgx, which returns its own error, they require no SQLSTATE error. pgx v5.11.0 is a test-only dependency.
+- CI: pull requests run `gorelease` (pinned to `golang.org/x/exp` v0.0.0-20261014143641-f0251eb4aa3e) against the newest release tag and fail on an incompatible change to the exported API, except a method added to `Lease`, `LeaseObserver`, `VacuumObserver` or `pool.Observer`, which ADR-0020 row 3 allows in a minor release. On a `release/vX.Y.Z` branch the job also checks that `vX.Y.Z` is a valid version for the changes (ADR-0020 row 1, #153).
+- CI: Dependabot opens a weekly pull request against `dev` for new versions of the GitHub Actions the workflows use (#161). Go module versions are not updated automatically.
+
+### Documentation
+
+- Spec names, code comments, ADR-0019 and ADR-0020 no longer cite ids the repository does not define; decision ids outside ADR-0019 name their ADR (#157).
+- README and ARCHITECTURE: on PostgreSQL, only an `Acquire` attempt that the database executes draws from the fencing sequence; an empty `workID`, or a context that is already done when an attempt starts, returns before anything is sent to the database (#159).
+
+---
+
 ## [v1.0.0] — 2026-10-27
 
 v1.0.0 freezes the API that v0.8.0 audited (ADR-0019) under the compatibility promise in ADR-0020. Against v0.8.0 the exported API gains `pool.ErrWorkFnRequired` and `leader.ErrFnRequired` and loses nothing (`gorelease -base=v0.8.0` reports those two compatible additions). The three changes under Breaking are changes of behavior or of the supported Go version, which `gorelease` does not report.

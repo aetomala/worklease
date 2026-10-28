@@ -517,7 +517,7 @@ var _ = Describe("Backend (memory)", func() {
 		})
 
 		Describe("Backend.Release", func() {
-			Context("at the lease expiry boundary (Rule 26)", func() {
+			Context("at the lease expiry boundary", func() {
 				It("returns ErrLeaseExpired when the clock equals expiresAt", func() {
 					rec, _ := b.Acquire(ctx, "w1", "h1", 5*time.Second)
 					fc.Advance(5 * time.Second)

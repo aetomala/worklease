@@ -16,8 +16,10 @@
 //
 // New takes a *sql.DB and does not register a database driver: the caller
 // imports one and opens the *sql.DB. The package's own test suites run against
-// github.com/lib/pq only, and the documented behavior of a statement cancelled
-// mid-flight was observed with that driver.
+// github.com/lib/pq and github.com/jackc/pgx/v5/stdlib. When a statement is
+// cancelled mid-flight, the error matches the context error with errors.Is on
+// both drivers; lib/pq's error also carries SQLSTATE 57014, while pgx v5 returns
+// its own error without a SQLSTATE.
 package postgres
 
 import (
@@ -183,7 +185,7 @@ func (p *postgresBackend) Acquire(ctx context.Context, workID, holderID string, 
 func (p *postgresBackend) Checkpoint(ctx context.Context, record backend.LeaseRecord, state []byte, ttl time.Duration) error {
 	// ===== STEP 1: Write State and Extend the Lease =====
 	ttlStr := formatInterval(ttl)
-	// A nil or empty state is stored as NULL (D-26). Pass an untyped nil: lib/pq
+	// A nil or empty state is stored as NULL (ADR-0019 D-26). Pass an untyped nil: lib/pq
 	// sends a nil []byte as an empty bytea, while pgx sends NULL.
 	var stateArg any
 	if len(state) > 0 {
@@ -311,7 +313,7 @@ func (p *postgresBackend) ReadCheckpoint(ctx context.Context, record backend.Lea
 	}
 
 	// ===== STEP 3: Return Checkpoint =====
-	// An empty stored value reads back as nil (D-26), so rows written before
+	// An empty stored value reads back as nil (ADR-0019 D-26), so rows written before
 	// this normalization, and rows written by any driver, agree.
 	if len(state) == 0 {
 		state = nil

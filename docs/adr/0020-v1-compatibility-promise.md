@@ -7,24 +7,24 @@
 
 ## Context
 
-v1.0.0 freezes the exported API that ADR-0019 audited. A promise also covers behavior the identifier list does not show: default values, error text, the PostgreSQL schema, the supported Go versions, and how interfaces may grow. v0.8 left these unstated or stated piecemeal (D-4, D-10, D-20, ADR-0017). This ADR states them once.
+v1.0.0 freezes the exported API that ADR-0019 audited. A promise also covers behavior the identifier list does not show: default values, error text, the PostgreSQL schema, the supported Go versions, and how interfaces may grow. v0.8 left these unstated or stated piecemeal (ADR-0019 D-4, D-10 and D-20; ADR-0017). This ADR states them once.
 
 ## Decision
 
 | # | Subject | Decision |
 |---|---|---|
 | 1 | Semantic versioning | From v1.0.0 the module follows semantic versioning. A change to any exported identifier in a package that is not under `internal/` is breaking unless a row below says otherwise |
-| 2 | Error text | Sentinels are matched with `errors.Is`. Message text, including the wrapped format `worklease: <Op>: workID=… holderID=…: <sentinel>`, is not part of the promise. A change to message text is listed under `### Changed` (D-20) |
-| 3 | Interface growth | Three documented exceptions to strict semver for implementers: `Lease` and the observer interfaces (`LeaseObserver`, `VacuumObserver`, `pool.Observer`) may gain methods in a minor release, and implementers embed the matching type (`NoopObserver`, `NoopVacuumObserver`, `pool.NoopObserver`; a wrapper of `Lease` embeds the interface). The `backend.Backend` method set is fixed for all of v1; new capabilities arrive as optional interfaces found by type assertion (D-4) |
+| 2 | Error text | Sentinels are matched with `errors.Is`. Message text, including the wrapped format `worklease: <Op>: workID=… holderID=…: <sentinel>`, is not part of the promise. A change to message text is listed under `### Changed` (ADR-0019 D-20) |
+| 3 | Interface growth | Three documented exceptions to strict semver for implementers: `Lease` and the observer interfaces (`LeaseObserver`, `VacuumObserver`, `pool.Observer`) may gain methods in a minor release, and implementers embed the matching type (`NoopObserver`, `NoopVacuumObserver`, `pool.NoopObserver`; a wrapper of `Lease` embeds the interface). The `backend.Backend` method set is fixed for all of v1; new capabilities arrive as optional interfaces found by type assertion (ADR-0019 D-4) |
 | 4 | Defaults | A default in the table below marked **tunable** may change in a minor release when the CHANGELOG lists it; callers who depend on a value set it explicitly. A default marked **frozen** is part of the API |
 | 5 | Schema | A minor release may add tables, nullable columns, and indexes. It may not drop or rename a column, change a column type, or tighten a constraint; any such change is a major release. Applying and migrating the schema stays the caller's job (ADR-0017); each release that changes the schema gives the DDL in `UPGRADING.md` |
-| 6 | Supported Go | The two latest Go releases. The `go` directive in `go.mod` is raised only in a minor release, when the oldest supported release leaves support, and the CHANGELOG says so. The `toolchain` line is not part of the promise. At v1.0.0 the two releases are Go 1.26 and 1.27, and the `go` directive is `go 1.26.0` (D-30, 2026-10-27) |
+| 6 | Supported Go | The two latest Go releases. The `go` directive in `go.mod` is raised only in a minor release, when the oldest supported release leaves support, and the CHANGELOG says so. The `toolchain` line is not part of the promise. At v1.0.0 the two releases are Go 1.26 and 1.27, and the `go` directive is `go 1.26.0` (decided 2026-10-27) |
 | 7 | Deprecation | An exported identifier is marked `Deprecated:` in godoc for at least one minor release before a major release removes it |
-| 8 | Conformance suite | `backend/conformance` tightens the backend contract only in a major release; a minor release may add specs only for a new optional capability. The suite's Ginkgo and Gomega dependency is documented (D-9) |
-| 9 | Database driver | `backend/postgres` registers no driver; the caller chooses one (D-19). The suites run against `github.com/lib/pq` only |
-| 10 | `internal/` | Nothing under `internal/` is promised (D-1) |
+| 8 | Conformance suite | `backend/conformance` tightens the backend contract only in a major release; a minor release may add specs only for a new optional capability. The suite's Ginkgo and Gomega dependency is documented (ADR-0019 D-9) |
+| 9 | Database driver | `backend/postgres` registers no driver; the caller chooses one (ADR-0019 D-19). The suites run against `github.com/lib/pq` only |
+| 10 | `internal/` | Nothing under `internal/` is promised (ADR-0019 D-1) |
 
-### Defaults (values verified by script on the `v0.8.0` tree, `0af5b72`; re-verified on the v1.0 tip, Rule 58)
+### Defaults (values verified by script on the `v0.8.0` tree, `0af5b72`; re-verified on the v1.0 tip)
 
 | Setting | Default | Source | Class |
 |---|---|---|---|
@@ -34,11 +34,19 @@ v1.0.0 freezes the exported API that ADR-0019 audited. A promise also covers beh
 | `pool.Config` `IdleInterval`, `RerunInterval`, `BackoffInterval` | 1 s each | `pool/pool.go` | tunable |
 | `leader.Config` `IdleInterval` | 1 s | `leader/leader.go` | tunable |
 | `CleanupTimeout` (`worker`, `leader`) | 5 s | `worker/runner.go`, `leader/leader.go` | tunable |
-| `leader.Config.BackoffInterval` zero value | no sleep | `leader/leader.go` | frozen (D-10) |
-| `pool.Config.BackoffInterval` zero value | 1 s | `pool/pool.go` | frozen (D-10) |
+| `leader.Config.BackoffInterval` zero value | no sleep | `leader/leader.go` | frozen (ADR-0019 D-10) |
+| `pool.Config.BackoffInterval` zero value | 1 s | `pool/pool.go` | frozen (ADR-0019 D-10) |
 | Nil observer | the matching no-op observer | `worklease.go`, `vacuum.go`, `pool/pool.go` | frozen |
 | `Config.TTL` | required, at least 1 ms (`minTTL`); a smaller value is a configuration error | `worklease.go` | frozen |
 
 ## Consequences
 
-The promise is stricter than a bare "semver" claim in three places the owner should check: rows 3 (observers and `Lease` may grow), 4 (some defaults may be retuned), and 8 (the conformance suite is versioned with the library). Row 1 is checked at each release from v1.0.0 with `gorelease` or `apidiff` against the previous tag (E-1). Rows 4 to 6 are policy only and are enforced by review.
+The promise is stricter than a bare "semver" claim in three places the owner should check: rows 3 (observers and `Lease` may grow), 4 (some defaults may be retuned), and 8 (the conformance suite is versioned with the library). Row 1 is checked at each release from v1.0.0 with `gorelease` or `apidiff` against the previous tag. Rows 4 to 6 are policy only and are enforced by review.
+
+## Amendment (2026-10-28) — row 1 is checked on every pull request
+
+Row 1 is now checked by CI, not only at release (#153). The `API compatibility` job in `.github/workflows/ci.yml` runs `.github/scripts/api-compat.sh` on every pull request. The script runs `gorelease`, pinned to `golang.org/x/exp` v0.0.0-20261014143641-f0251eb4aa3e, with the newest `v*` tag as the base, and fails when `gorelease` reports an incompatible change to the exported API. `gorelease` counts a method added to an interface as incompatible, which row 3 allows in a minor release for `Lease`, `LeaseObserver`, `VacuumObserver` and `pool.Observer`, so the script accepts exactly those additions (`<Interface>.<Method>: added` in the root package or, for `Observer`, in `pool`) and nothing else. A `NoopObserver` that no longer implements its interface is still a failure. On a `release/vX.Y.Z` branch the script also checks the version: with no incompatible change, `gorelease -version=vX.Y.Z` decides, so a patch release over an addition fails; with a row-3 addition, `vX.Y.Z` must keep the major version and raise the minor version, the rule `gorelease` applies to a compatible addition. `gorelease` sees only the exported API; the other rows are checked as before.
+
+## Amendment (2026-10-28) — row 9: the suites run on lib/pq and pgx v5
+
+Row 9's last sentence, "The suites run against `github.com/lib/pq` only", no longer holds (#155). The `backend/postgres` and `integration` suites open the driver named by `WORKLEASE_TEST_POSTGRES_DRIVER`, `postgres` for `github.com/lib/pq` (the default) or `pgx` for `github.com/jackc/pgx/v5/stdlib`, and CI runs every supported Go version on both. The two #113 specs check `errors.Is` against the context error on both drivers; on lib/pq the chain must also hold the server's SQLSTATE 57014 error, and on pgx it must hold no SQLSTATE error, because pgx v5 times out the connection instead of sending a cancel request. pgx's own error already wraps the context error, so a regression of the backend's context wrapping (#113) is caught by the lib/pq run only. The backend still registers no driver.

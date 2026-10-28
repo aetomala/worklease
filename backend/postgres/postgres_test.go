@@ -7,7 +7,6 @@ import (
 	"fmt"
 	"time"
 
-	"github.com/lib/pq"
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
 
@@ -392,7 +391,7 @@ var _ = Describe("Backend (postgres)", func() {
 		})
 	})
 
-	Describe("worker.Runner on PostgreSQL (#80; Group B)", func() {
+	Describe("worker.Runner on PostgreSQL (#80)", func() {
 		// runCancelledMidWork runs holder-a's Runner on "w-run", cancels the parent
 		// context while WorkFn is running, and returns Run's error. WorkFn
 		// returns its final state together with the context error.
@@ -480,7 +479,7 @@ var _ = Describe("Backend (postgres)", func() {
 		})
 	})
 
-	Describe("leader.Elect on PostgreSQL (#80; Group B)", func() {
+	Describe("leader.Elect on PostgreSQL (#80)", func() {
 		It("when the parent context is cancelled mid-fn, the lease is released and a successor acquires without waiting for the TTL and reads ExitAbandoned", func() {
 			leaseA, err := worklease.New(b, worklease.Config{TTL: 30 * time.Second, HolderID: "leader-a"})
 			Expect(err).NotTo(HaveOccurred())
@@ -588,10 +587,20 @@ var _ = Describe("Backend (postgres)", func() {
 			Expect(err).NotTo(HaveOccurred())
 			return rec
 		}
+		// expectDriverCancel checks the driver error the backend wrapped beside the
+		// context error. lib/pq sends a cancel request, so the chain holds the
+		// server's error with SQLSTATE 57014 (*pq.Error). pgx v5 times out the
+		// connection instead and returns its own error, so no SQLSTATE error is in
+		// the chain. Both error types implement SQLState.
 		expectDriverCancel := func(err error) {
-			var pqErr *pq.Error
-			Expect(errors.As(err, &pqErr)).To(BeTrue(), "no *pq.Error in %v", err)
-			Expect(string(pqErr.Code)).To(Equal("57014"))
+			var stateErr interface{ SQLState() string }
+			found := errors.As(err, &stateErr)
+			if postgresDriver() == "pgx" {
+				Expect(found).To(BeFalse(), "pgx returned a SQLSTATE error: %v", err)
+				return
+			}
+			Expect(found).To(BeTrue(), "no driver error with a SQLSTATE in %v", err)
+			Expect(stateErr.SQLState()).To(Equal("57014"))
 		}
 		newLease := func() worklease.Lease {
 			l, err := worklease.New(b, worklease.Config{TTL: 30 * time.Second, HolderID: "holder-2"})
@@ -614,7 +623,7 @@ var _ = Describe("Backend (postgres)", func() {
 			return r
 		}
 
-		It("Acquire: cancellation → errors.Is context.Canceled, and the *pq.Error with code 57014 is still found", func() {
+		It("Acquire: cancellation → errors.Is context.Canceled, and the driver error is still wrapped", func() {
 			releasedRow("mid-1")
 			lockRow("mid-1")
 			_, err := b.Acquire(cancelled(), "mid-1", "holder-2", 30*time.Second)
@@ -622,7 +631,7 @@ var _ = Describe("Backend (postgres)", func() {
 			expectDriverCancel(err)
 		})
 
-		It("Acquire: deadline → errors.Is context.DeadlineExceeded, and the *pq.Error with code 57014 is still found", func() {
+		It("Acquire: deadline → errors.Is context.DeadlineExceeded, and the driver error is still wrapped", func() {
 			releasedRow("mid-2")
 			lockRow("mid-2")
 			_, err := b.Acquire(expired(), "mid-2", "holder-2", 30*time.Second)

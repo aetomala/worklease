@@ -207,10 +207,12 @@ methods but never set them — they receive a `Token` value and pass it back to 
 The library validates the token on every write. See
 [ADR-0002](adr/0002-token-inspectable-via-methods.md).
 
-Tokens are monotonic but not contiguous. On PostgreSQL every `Acquire` attempt draws from the
-sequence regardless of outcome, including attempts that find the lease held and return
-`ErrLeaseHeld`. The in-memory backend advances one counter per instance, only on a successful
-acquire, so the tokens of one work ID still skip when another work ID acquires in between.
+Tokens are monotonic but not contiguous. On PostgreSQL every `Acquire` attempt that the database
+executes draws from the sequence, including attempts that find the lease held and return
+`ErrLeaseHeld`. An empty `workID`, or a context that is already done when an attempt starts,
+returns before anything is sent to the database and draws nothing. The in-memory backend
+advances one counter per instance, only on a successful acquire, so the tokens of one work ID
+still skip when another work ID acquires in between.
 Gaps in the token sequence are expected and carry no operational meaning; callers must not
 assume consecutive token values.
 
@@ -1423,15 +1425,20 @@ slice-aliasing invariants. A new backend must pass it before it is considered co
 
 ### Race Detection and CI
 
-All tests run with `-race`. The CI pipeline runs three jobs: `lint + gofmt + go mod tidy +
-govulncheck`, `test + postgres service container` (a matrix over Go 1.26.x and 1.27.x), and
-`build examples` (which also runs each example with a 60-second limit). Every job sets
+All tests run with `-race`. The CI pipeline runs four jobs: `lint + gofmt + go mod tidy +
+govulncheck`, `test + postgres service container` (a matrix over Go 1.26.x and 1.27.x and the
+lib/pq and pgx v5 drivers, selected by `WORKLEASE_TEST_POSTGRES_DRIVER`),
+`build examples` (which also runs each example with a 60-second limit), and, on pull requests only,
+`API compatibility`, which runs a pinned `gorelease` against the newest `v*` tag and fails on an
+incompatible change to the exported API other than a method added to an interface that ADR-0020
+row 3 lets grow; on a `release/vX.Y.Z` branch it also checks that `vX.Y.Z`
+is a valid version for the changes ([ADR-0020](adr/0020-v1-compatibility-promise.md) row 1). Every job sets
 `GOTOOLCHAIN=local`, and every `setup-go` step sets `check-latest: true`, so a job runs the newest
 patch release of the version it names. A separate weekly workflow runs `govulncheck` on `dev`. The
 in-memory backend and the renewal goroutine are the areas that benefit most from race detection.
 
 ```bash
-make ci   # lint, fmt, tidy, build, test, examples (vet and build), vuln
+make ci   # lint, fmt, tidy, build, test, test-pgx, examples (vet and build), vuln
 ```
 
 ---
@@ -1568,6 +1575,14 @@ make ci   # lint, fmt, tidy, build, test, examples (vet and build), vuln
 - Add ADR-0020 (the v1 compatibility promise), a `NOTICE` file, a README with a quick start and a Stability section, and `go mod tidy` checks in CI
 - Raise the indirect `golang.org/x/net` and `golang.org/x/text` to versions that fix the advisories `govulncheck` listed for them
 
+### v1.0.1 — Released (v1.0.1, 2026-10-28)
+
+- Check exported API compatibility with `gorelease` on every pull request (#153)
+- Run the PostgreSQL suites on pgx v5 as well as lib/pq (#155)
+- Make spec names, code comments and ADR references resolvable from the repository (#157)
+- State which `Acquire` attempts draw from the fencing sequence (#159)
+- Add a security policy, a code of conduct, issue and pull request templates, and Dependabot for GitHub Actions (#161)
+
 ### Unscheduled (post-1.0)
 
 - Redis backend
@@ -1601,15 +1616,15 @@ the decision made, and the consequences — including the alternatives that were
 | [0017](adr/0017-schema-migration-caller-owned.md) | Schema migration remains caller-owned | Accepted |
 | [0018](adr/0018-explicit-lease-exit-modes.md) | Explicit lease exit modes — holders declare how they exit; successors read `PrevExit` (amended v0.7: `clean_handoff` dropped) | Accepted |
 | [0019](adr/0019-v0.8-api-audit.md) | 1.0 API audit — sentinels in `backend`, `internal/testutil`, exported no-op observers, interface growth policy | Accepted |
-| [0020](adr/0020-v1-compatibility-promise.md) | v1 compatibility promise — error text, interface growth, defaults, schema, supported Go, deprecation, conformance suite | Accepted |
+| [0020](adr/0020-v1-compatibility-promise.md) | v1 compatibility promise — error text, interface growth, defaults, schema, supported Go, deprecation, conformance suite (amended v1.0.1: the compatibility check runs on every pull request; the PostgreSQL suites run on lib/pq and pgx) | Accepted |
 
 ADR-0007 and ADR-0010 carry v0.4 amendments (observer event-struct redesign; leader lifecycle
 callbacks). ADR-0004 and ADR-0005 carry v0.5 amendments (renewal bounded retry; acquire ctx.Err()
 propagation). ADR-0013 shipped in v0.5; ADR-0016's global-fencing-sequence component shipped in
 v0.5, and its retention component (`Forget` / `Vacuum.Sweep`) is Accepted for v0.6. ADR-0018
 (explicit exit modes) is Accepted for v0.6 and carries dated amendments to ADR-0010, ADR-0011,
-ADR-0012, ADR-0013, and ADR-0016. v0.7 adds dated amendments to ADR-0002, ADR-0004, ADR-0007, ADR-0010, ADR-0011, ADR-0012, ADR-0013, ADR-0015, ADR-0016, and ADR-0018. v0.8 adds ADR-0019 and dated amendments to ADR-0007, ADR-0011, and ADR-0015. v1.0 adds ADR-0020 and dated amendments to ADR-0019.
+ADR-0012, ADR-0013, and ADR-0016. v0.7 adds dated amendments to ADR-0002, ADR-0004, ADR-0007, ADR-0010, ADR-0011, ADR-0012, ADR-0013, ADR-0015, ADR-0016, and ADR-0018. v0.8 adds ADR-0019 and dated amendments to ADR-0007, ADR-0011, and ADR-0015. v1.0 adds ADR-0020 and dated amendments to ADR-0019. v1.0.1 adds dated amendments to ADR-0020.
 
 ---
 
-*Last updated: October 2026 — v1.0 (v1.0.0)*
+*Last updated: October 2026 — v1.0 (v1.0.1)*

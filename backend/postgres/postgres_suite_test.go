@@ -6,6 +6,7 @@ import (
 	"os"
 	"testing"
 
+	_ "github.com/jackc/pgx/v5/stdlib"
 	_ "github.com/lib/pq"
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
@@ -24,6 +25,26 @@ func TestPostgres(t *testing.T) {
 	RunSpecs(t, "Postgres Backend Suite")
 }
 
+// envPostgresDriver names the environment variable that selects the
+// database/sql driver the PostgreSQL specs open: "postgres" for
+// github.com/lib/pq (the default when unset) or "pgx" for
+// github.com/jackc/pgx/v5/stdlib.
+const envPostgresDriver = "WORKLEASE_TEST_POSTGRES_DRIVER"
+
+// The postgresDriver function returns the driver name from envPostgresDriver,
+// "postgres" when it is unset, and fails the suite on any other value.
+func postgresDriver() string {
+	switch d := os.Getenv(envPostgresDriver); d {
+	case "", "postgres":
+		return "postgres"
+	case "pgx":
+		return "pgx"
+	default:
+		Fail(envPostgresDriver + " must be postgres or pgx, got " + d)
+		return ""
+	}
+}
+
 var _ = BeforeSuite(func() {
 	dsn := os.Getenv("WORKLEASE_TEST_POSTGRES_DSN")
 	if dsn == "" {
@@ -35,7 +56,7 @@ var _ = BeforeSuite(func() {
 		Skip("WORKLEASE_TEST_POSTGRES_DSN not set — skipping postgres integration tests")
 	}
 	var err error
-	db, err = sql.Open("postgres", dsn)
+	db, err = sql.Open(postgresDriver(), dsn)
 	Expect(err).NotTo(HaveOccurred())
 	Expect(db.Ping()).To(Succeed())
 

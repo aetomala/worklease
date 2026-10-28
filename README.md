@@ -20,7 +20,7 @@ Distributed locks answer: *who owns this resource right now?* `worklease` answer
 go get github.com/aetomala/worklease
 ```
 
-Requires Go 1.26 or later; CI tests Go 1.26 and 1.27. The PostgreSQL backend is tested on PostgreSQL 16 with `github.com/lib/pq` (see [Backends](#backends)).
+Requires Go 1.26 or later; CI tests Go 1.26 and 1.27. The PostgreSQL backend is tested on PostgreSQL 16 with `github.com/lib/pq` and pgx v5 (see [Backends](#backends)).
 
 ## Quick start
 
@@ -135,7 +135,7 @@ These are intentional scope boundaries, not gaps.
 
 **Holder ID** — `Config.HolderID` names this process. It must not be empty: `worklease.New` returns an error that matches `ErrConfigInvalid`. Use a value that is unique per process, such as a pod name. A lease is not re-entrant: acquiring a lease that your own `HolderID` still holds returns `ErrLeaseHeld`, so a restarted process with a stable ID waits for the old lease to expire (up to the TTL) unless the previous run released it.
 
-**Fencing token** — A monotonically incrementing integer issued on every acquisition. A worker's writes to the lease store are rejected if a higher token has been issued — preventing zombie workers from corrupting the checkpoint after their lease expires. Tokens are monotonic but not contiguous, so never assume consecutive values: gaps are expected and have no operational significance. On PostgreSQL every `Acquire` attempt draws from the sequence, including attempts that return `ErrLeaseHeld`. The in-memory backend advances one counter per instance, only on a successful `Acquire`, so the tokens of one work ID still skip whenever another work ID acquires in between.
+**Fencing token** — A monotonically incrementing integer issued on every acquisition. A worker's writes to the lease store are rejected if a higher token has been issued — preventing zombie workers from corrupting the checkpoint after their lease expires. Tokens are monotonic but not contiguous, so never assume consecutive values: gaps are expected and have no operational significance. On PostgreSQL every `Acquire` attempt that the database executes draws from the sequence, including attempts that return `ErrLeaseHeld`; an empty `workID`, or a context that is already done when an attempt starts, returns before anything is sent to the database. The in-memory backend advances one counter per instance, only on a successful `Acquire`, so the tokens of one work ID still skip whenever another work ID acquires in between.
 
 **Checkpoint** — Progress state written atomically with lease renewal. If the worker is making progress, it proves liveness and saves state in one operation. The last checkpoint survives to the next owner. `Checkpoint` and `Renew` are distinct: `Checkpoint` writes state and extends the TTL atomically; `Renew` extends the TTL without updating state.
 
@@ -539,7 +539,7 @@ The atomic checkpoint operation is a single `UPDATE ... WHERE fencing_token = $n
 
 The backend requires the READ COMMITTED isolation level, the PostgreSQL default. Under REPEATABLE READ or SERIALIZABLE, a contended `Acquire` fails with a serialization error (SQLSTATE 40001) instead of returning `ErrLeaseHeld`. If your database or role defaults to another level, pin it for the role worklease connects as: `ALTER ROLE worklease_role SET default_transaction_isolation = 'read committed';`. The schema drops the deprecated `clean_handoff` column as of v0.7; existing databases drop it with the step in `UPGRADING.md`. A statement cancelled or timed out by its context returns an error that wraps both the driver error and `ctx.Err()` (#113); the `Backend` contract requires custom backends to match `ctx.Err()` the same way.
 
-The backend is tested on PostgreSQL 16 with `github.com/lib/pq`. The backend suite also passes on pgx v5 (`github.com/jackc/pgx/v5/stdlib`), apart from two specs that look for lib/pq's `*pq.Error` type.
+The backend is tested on PostgreSQL 16 with `github.com/lib/pq` and with pgx v5 (`github.com/jackc/pgx/v5/stdlib`): CI runs the backend and integration suites on both drivers. When a statement is cancelled mid-flight, the returned error matches the context error with `errors.Is` on both; lib/pq's error also carries SQLSTATE 57014, while pgx returns its own error without one.
 
 ### In-memory (testing)
 

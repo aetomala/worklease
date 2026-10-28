@@ -5,9 +5,17 @@ changes, and submit pull requests.
 
 ---
 
+## Code of conduct
+
+This project follows the [Contributor Covenant](CODE_OF_CONDUCT.md). By participating you agree to
+uphold it.
+
+---
+
 ## Reporting bugs
 
-Open a GitHub issue. Include:
+Open a GitHub issue with the bug report form. Do not report a security vulnerability in an issue;
+follow [SECURITY.md](SECURITY.md) instead. Include:
 
 - Go version (`go version`)
 - worklease version or commit SHA
@@ -56,6 +64,8 @@ WORKLEASE_TEST_POSTGRES_DSN="postgres://user:pass@localhost/worklease_test?sslmo
 ```
 
 The same variable, `WORKLEASE_TEST_POSTGRES_DSN`, also runs the `integration/` suite against PostgreSQL, in its own schema `worklease_integration`: `go test ./integration/...`. With `WORKLEASE_REQUIRE_POSTGRES` set, a missing DSN fails that suite too instead of skipping its PostgreSQL specs.
+
+Both suites open `github.com/lib/pq` by default. Set `WORKLEASE_TEST_POSTGRES_DRIVER=pgx` to run them on `github.com/jackc/pgx/v5/stdlib` instead (`make test-pgx` does this, and `make ci` includes it); any value other than `postgres` or `pgx` fails the suite. CI runs both drivers.
 
 ---
 

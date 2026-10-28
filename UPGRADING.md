@@ -1,5 +1,9 @@
 # Upgrading worklease
 
+## v1.0.0 → v1.0.1
+
+No code or schema change is required. v1.0.1 changes no exported identifier and no library behavior. The module's `go.mod` now requires `github.com/jackc/pgx/v5` v5.11.0, which only the tests import; the `go 1.26.0` line is unchanged.
+
 ## v0.8.0 → v1.0.0
 
 `pool.New` and `leader.Elect` now reject a nil work function with `pool.ErrWorkFnRequired` and `leader.ErrFnRequired`. Before this change a nil function was accepted, and the program panicked when the function was first called. Both errors match `errors.Is(err, worklease.ErrConfigInvalid)`.
