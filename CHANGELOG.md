@@ -9,6 +9,10 @@ This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 
 ## [Unreleased]
 
+### Changed
+
+- CI: pull requests run `gorelease` (pinned to `golang.org/x/exp` v0.0.0-20261014143641-f0251eb4aa3e) against the newest release tag and fail on an incompatible change to the exported API, except a method added to `Lease`, `LeaseObserver`, `VacuumObserver` or `pool.Observer`, which ADR-0020 row 3 allows in a minor release. On a `release/vX.Y.Z` branch the job also checks that `vX.Y.Z` is a valid version for the changes (ADR-0020 row 1, #153).
+
 ---
 
 ## [v1.0.0] — 2026-10-27
