@@ -228,7 +228,7 @@ func poolSpecs(h harness) {
 
 		// ===== PHASE 5: Cancellation =====
 		Describe("Phase 5: Cancellation", func() {
-			It("when Run's context is cancelled mid-WorkFn, each slot's final state is stored and a successor sees ExitAbandoned (Rule 34)", func() {
+			It("when Run's context is cancelled mid-WorkFn, each slot's final state is stored and a successor sees ExitAbandoned", func() {
 				env := h.newEnv()
 				b := env.backend
 				ids := []string{"q-0", "q-1", "q-2"}

@@ -40,7 +40,7 @@ vendor/
 *.swp
 *.swo
 
-# Local Claude context (symlinked from dotfiles)
+# Local Claude context
 CLAUDE.local.md
 .claude/settings.local.json
 

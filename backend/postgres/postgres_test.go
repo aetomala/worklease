@@ -391,7 +391,7 @@ var _ = Describe("Backend (postgres)", func() {
 		})
 	})
 
-	Describe("worker.Runner on PostgreSQL (#80; Group B)", func() {
+	Describe("worker.Runner on PostgreSQL (#80)", func() {
 		// runCancelledMidWork runs holder-a's Runner on "w-run", cancels the parent
 		// context while WorkFn is running, and returns Run's error. WorkFn
 		// returns its final state together with the context error.
@@ -479,7 +479,7 @@ var _ = Describe("Backend (postgres)", func() {
 		})
 	})
 
-	Describe("leader.Elect on PostgreSQL (#80; Group B)", func() {
+	Describe("leader.Elect on PostgreSQL (#80)", func() {
 		It("when the parent context is cancelled mid-fn, the lease is released and a successor acquires without waiting for the TTL and reads ExitAbandoned", func() {
 			leaseA, err := worklease.New(b, worklease.Config{TTL: 30 * time.Second, HolderID: "leader-a"})
 			Expect(err).NotTo(HaveOccurred())

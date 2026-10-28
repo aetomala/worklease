@@ -146,7 +146,7 @@ func leaderSpecs(h harness) {
 
 		// ===== PHASE 4: Cancellation =====
 		Describe("Phase 4: Cancellation", func() {
-			It("when the parent context is cancelled mid-fn, the lease is released and the next leader acquires immediately and sees ExitAbandoned (Rule 34)", func() {
+			It("when the parent context is cancelled mid-fn, the lease is released and the next leader acquires immediately and sees ExitAbandoned", func() {
 				env := h.newEnv()
 				b := env.backend
 
