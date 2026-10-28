@@ -8,6 +8,7 @@ import (
 	"testing"
 	"time"
 
+	_ "github.com/jackc/pgx/v5/stdlib"
 	"github.com/lib/pq"
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
@@ -20,6 +21,26 @@ import (
 func TestIntegration(t *testing.T) {
 	RegisterFailHandler(Fail)
 	RunSpecs(t, "Integration Suite")
+}
+
+// envPostgresDriver names the environment variable that selects the
+// database/sql driver the PostgreSQL specs open: "postgres" for
+// github.com/lib/pq (the default when unset) or "pgx" for
+// github.com/jackc/pgx/v5/stdlib.
+const envPostgresDriver = "WORKLEASE_TEST_POSTGRES_DRIVER"
+
+// The postgresDriver function returns the driver name from envPostgresDriver,
+// "postgres" when it is unset, and fails the suite on any other value.
+func postgresDriver() string {
+	switch d := os.Getenv(envPostgresDriver); d {
+	case "", "postgres":
+		return "postgres"
+	case "pgx":
+		return "pgx"
+	default:
+		Fail(envPostgresDriver + " must be postgres or pgx, got " + d)
+		return ""
+	}
 }
 
 // Integration suite constants: the PostgreSQL schema the suite runs in, the
@@ -140,7 +161,7 @@ var _ = BeforeSuite(func() {
 		return
 	}
 
-	admin, err := sql.Open("postgres", dsn)
+	admin, err := sql.Open(postgresDriver(), dsn)
 	Expect(err).NotTo(HaveOccurred())
 	Expect(admin.Ping()).To(Succeed())
 	_, err = admin.Exec(queryCreateSchema)
@@ -149,7 +170,7 @@ var _ = BeforeSuite(func() {
 
 	dsn2, err := dsnWithSearchPath(dsn)
 	Expect(err).NotTo(HaveOccurred())
-	pgDB, err = sql.Open("postgres", dsn2)
+	pgDB, err = sql.Open(postgresDriver(), dsn2)
 	Expect(err).NotTo(HaveOccurred())
 	Expect(pgDB.Ping()).To(Succeed())
 

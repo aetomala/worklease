@@ -20,7 +20,7 @@ Distributed locks answer: *who owns this resource right now?* `worklease` answer
 go get github.com/aetomala/worklease
 ```
 
-Requires Go 1.26 or later; CI tests Go 1.26 and 1.27. The PostgreSQL backend is tested on PostgreSQL 16 with `github.com/lib/pq` (see [Backends](#backends)).
+Requires Go 1.26 or later; CI tests Go 1.26 and 1.27. The PostgreSQL backend is tested on PostgreSQL 16 with `github.com/lib/pq` and pgx v5 (see [Backends](#backends)).
 
 ## Quick start
 
@@ -539,7 +539,7 @@ The atomic checkpoint operation is a single `UPDATE ... WHERE fencing_token = $n
 
 The backend requires the READ COMMITTED isolation level, the PostgreSQL default. Under REPEATABLE READ or SERIALIZABLE, a contended `Acquire` fails with a serialization error (SQLSTATE 40001) instead of returning `ErrLeaseHeld`. If your database or role defaults to another level, pin it for the role worklease connects as: `ALTER ROLE worklease_role SET default_transaction_isolation = 'read committed';`. The schema drops the deprecated `clean_handoff` column as of v0.7; existing databases drop it with the step in `UPGRADING.md`. A statement cancelled or timed out by its context returns an error that wraps both the driver error and `ctx.Err()` (#113); the `Backend` contract requires custom backends to match `ctx.Err()` the same way.
 
-The backend is tested on PostgreSQL 16 with `github.com/lib/pq`. The backend suite also passes on pgx v5 (`github.com/jackc/pgx/v5/stdlib`), apart from two specs that look for lib/pq's `*pq.Error` type.
+The backend is tested on PostgreSQL 16 with `github.com/lib/pq` and with pgx v5 (`github.com/jackc/pgx/v5/stdlib`): CI runs the backend and integration suites on both drivers. When a statement is cancelled mid-flight, the returned error matches the context error with `errors.Is` on both; lib/pq's error also carries SQLSTATE 57014, while pgx returns its own error without one.
 
 ### In-memory (testing)
 
