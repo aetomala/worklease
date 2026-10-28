@@ -1,4 +1,4 @@
-.PHONY: build test lint fmt tidy vuln examples ci clean
+.PHONY: build test test-pgx lint fmt tidy vuln examples ci clean
 
 PKG := ./...
 
@@ -7,6 +7,10 @@ build:
 
 test:
 	go test -race $(PKG)
+
+# The PostgreSQL packages again on pgx v5; without WORKLEASE_TEST_POSTGRES_DSN their specs skip.
+test-pgx:
+	WORKLEASE_TEST_POSTGRES_DRIVER=pgx go test -race ./backend/postgres/... ./integration/...
 
 lint:
 	go vet $(PKG)
@@ -24,7 +28,7 @@ tidy:
 vuln:
 	govulncheck $(PKG)
 
-ci: lint fmt tidy build test examples vuln
+ci: lint fmt tidy build test test-pgx examples vuln
 
 clean:
 	go clean $(PKG)

@@ -21,10 +21,10 @@ import (
 	wlpostgres "github.com/aetomala/worklease/backend/postgres"
 )
 
-// The halfOpenProxy type is an in-process TCP proxy between lib/pq and
+// The halfOpenProxy type is an in-process TCP proxy between the driver and
 // PostgreSQL. While black-holed, it forwards no bytes in either direction,
 // keeps every connection open, and accepts but never serves new connections,
-// so lib/pq's cancel request stalls too.
+// so the driver's cancel request stalls too.
 type halfOpenProxy struct {
 	ln       net.Listener
 	target   string
@@ -293,7 +293,7 @@ var _ = Describe("half-open connection (#115)", FlakeAttempts(2), func() {
 
 		pdsn, err := proxiedDSN(dsn, proxy.addr())
 		Expect(err).NotTo(HaveOccurred())
-		pdb, err := sql.Open("postgres", pdsn)
+		pdb, err := sql.Open(postgresDriver(), pdsn)
 		Expect(err).NotTo(HaveOccurred())
 		DeferCleanup(pdb.Close)
 

@@ -16,8 +16,10 @@
 //
 // New takes a *sql.DB and does not register a database driver: the caller
 // imports one and opens the *sql.DB. The package's own test suites run against
-// github.com/lib/pq only, and the documented behavior of a statement cancelled
-// mid-flight was observed with that driver.
+// github.com/lib/pq and github.com/jackc/pgx/v5/stdlib. When a statement is
+// cancelled mid-flight, the error matches the context error with errors.Is on
+// both drivers; lib/pq's error also carries SQLSTATE 57014, while pgx v5 returns
+// its own error without a SQLSTATE.
 package postgres
 
 import (
