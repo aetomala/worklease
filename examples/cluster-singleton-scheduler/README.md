@@ -20,7 +20,7 @@ cluster-singleton-scheduler/
 
 ## Setup
 
-Prerequisites: Go 1.25+.
+Prerequisites: Go 1.26+.
 
 ```bash
 go mod tidy
@@ -102,8 +102,12 @@ lease window closes; and about 2 seconds in Scenario 4.
 requires five coordinated steps: `Acquire`, `StartRenewal`, work loop, `stopRenewal`,
 `Release`. `leader.Elect` reduces this to one call. The caller implements only a
 `func(ctx context.Context) error` that does the actual work; lifecycle management is
-handled internally. The returned error is `ErrFenced` if the lease was superseded, or the
-`fn` error otherwise.
+handled internally. The returned error is `ErrFenced` if the lease was superseded; the
+`Acquire` error if the lease was not acquired (after `IdleInterval` for `ErrLeaseHeld`, at
+once for a context error, and after `BackoffInterval` for any other error); and otherwise the `fn` error,
+or a `leader: release:` error when `fn` succeeded and `Release` failed. If the lease window
+runs out, `Elect` does not release, and returns the `fn` error, or the cause wrapped as
+`leader: …` when `fn` returned nil.
 
 **Fail-fast vs standby election** — Scenario 1 shows the default behavior: if the lease is
 already held, `leader.Elect` returns `ErrLeaseHeld` after waiting `IdleInterval` (default 1s). The caller decides what to
@@ -125,9 +129,10 @@ lease is gone.
 
 **`fn` receives `renewCtx`, not the outer `ctx`** — `leader.Elect` passes the renewal
 context (not the context given to `Elect`) into `fn`. This means `fn` sees cancellation
-from both fencing events and parent context cancellation. `Release` inside `Elect` uses
-the original outer context so that releasing the lease succeeds even when `renewCtx` is
-already cancelled.
+from both fencing events and parent context cancellation. `Release` inside `Elect` runs on
+a context that survives cancellation of the outer `ctx`, bounded by
+`leader.Config.CleanupTimeout` (default 5s), so releasing the lease succeeds even when
+`renewCtx` or `ctx` is already cancelled.
 
 **`OnRelinquished` means a clean handover** — Scenario 1 sets `leader.Config.OnRelinquished`.
 It fires only after `Release` succeeds with `ExitFinished` (or `ExitRetired`, when `fn`
