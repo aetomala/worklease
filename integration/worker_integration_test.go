@@ -329,7 +329,7 @@ func workerSpecs(h harness) {
 
 		// ===== PHASE 5: Cancellation =====
 		Describe("Phase 5: Cancellation", func() {
-			It("when A's parent context is cancelled mid-WorkFn, A's final state is stored and B sees ExitAbandoned (Rule 34)", func() {
+			It("when A's parent context is cancelled mid-WorkFn, A's final state is stored and B sees ExitAbandoned", func() {
 				env := h.newEnv()
 				b := env.backend
 
