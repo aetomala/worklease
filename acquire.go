@@ -14,6 +14,8 @@ import (
 // returned immediately. On context cancellation or deadline while waiting,
 // returns an error wrapping ctx.Err() — satisfying errors.Is(err,
 // context.Canceled) or context.DeadlineExceeded — not ErrLeaseHeld.
+// An empty workID returns an error that matches no sentinel, including
+// ErrConfigInvalid.
 func (c *leaseClient) Acquire(ctx context.Context, workID string, opts ...AcquireOption) (Token, error) {
 	// ===== STEP 1: Validate Inputs =====
 	if workID == "" {

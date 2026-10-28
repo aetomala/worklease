@@ -76,6 +76,8 @@ type Config struct {
 	// no sleep. Fencing paths bypass the sleep, and cancellation of the context
 	// passed to Elect cuts it short.
 	// The zero value differs from pool.Config.BackoffInterval, where zero or negative means 1s.
+	// With the backend unreachable, a loop that calls Elect on every error spins
+	// unless BackoffInterval is set.
 	BackoffInterval time.Duration
 
 	// CleanupTimeout bounds Release, which runs on a context that survives

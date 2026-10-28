@@ -77,7 +77,8 @@ type RunnerConfig struct {
 
 // Runner manages the acquire/checkpoint/release lifecycle for a WorkFn.
 // Callers construct a Runner once and call Run for each unit of work. All
-// methods are safe for concurrent use.
+// methods are safe for concurrent use. Construct a Runner with NewRunner: Run on
+// a nil *Runner, or on a Runner that NewRunner did not build, panics.
 type Runner struct {
 	lease          worklease.Lease
 	fn             WorkFn
@@ -120,7 +121,8 @@ func NewRunner(cfg RunnerConfig) (*Runner, error) {
 // that survives cancellation of ctx, bounded by CleanupTimeout. Run returns
 // nil when WorkFn returns nil or an error wrapping worklease.ErrRetire and the
 // exit is recorded. Run returns worklease.ErrFenced, without releasing, if a
-// successor holds the lease. Run does not release when the lease window was
+// successor holds the lease or its record was removed. Run does not release
+// when the lease window was
 // exhausted; the successor sees ExitExpired. If WorkFn panics, renewal is
 // stopped, the lease is not released, and the panic propagates.
 // If ReadCheckpoint fails, Run returns the error without calling WorkFn and
