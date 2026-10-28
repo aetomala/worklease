@@ -135,7 +135,7 @@ These are intentional scope boundaries, not gaps.
 
 **Holder ID** — `Config.HolderID` names this process. It must not be empty: `worklease.New` returns an error that matches `ErrConfigInvalid`. Use a value that is unique per process, such as a pod name. A lease is not re-entrant: acquiring a lease that your own `HolderID` still holds returns `ErrLeaseHeld`, so a restarted process with a stable ID waits for the old lease to expire (up to the TTL) unless the previous run released it.
 
-**Fencing token** — A monotonically incrementing integer issued on every acquisition. A worker's writes to the lease store are rejected if a higher token has been issued — preventing zombie workers from corrupting the checkpoint after their lease expires. Tokens are monotonic but not contiguous, on either backend: gaps are expected and have no operational significance, so never assume consecutive values. On PostgreSQL every `Acquire` attempt draws from the sequence, including attempts that return `ErrLeaseHeld`; the in-memory backend advances its counter only on a successful `Acquire`.
+**Fencing token** — A monotonically incrementing integer issued on every acquisition. A worker's writes to the lease store are rejected if a higher token has been issued — preventing zombie workers from corrupting the checkpoint after their lease expires. Tokens are monotonic but not contiguous, so never assume consecutive values: gaps are expected and have no operational significance. On PostgreSQL every `Acquire` attempt draws from the sequence, including attempts that return `ErrLeaseHeld`. The in-memory backend advances one counter per instance, only on a successful `Acquire`, so the tokens of one work ID still skip whenever another work ID acquires in between.
 
 **Checkpoint** — Progress state written atomically with lease renewal. If the worker is making progress, it proves liveness and saves state in one operation. The last checkpoint survives to the next owner. `Checkpoint` and `Renew` are distinct: `Checkpoint` writes state and extends the TTL atomically; `Renew` extends the TTL without updating state.
 
@@ -309,7 +309,7 @@ Match sentinels with `errors.Is`. The text of an error message is not part of th
 
 ## Upgrading
 
-`UPGRADING.md` has the steps for each version, including the schema migrations that v0.5.0 and v0.6.0 required. From v0.8.0 to v1.0.0 there is no schema change, and the module requires Go 1.26.
+[`UPGRADING.md`](UPGRADING.md) has the steps for each version, including the schema migrations that v0.5.0 and v0.6.0 required. From v0.8.0 to v1.0.0 there is no schema change, and the module requires Go 1.26.
 
 ---
 
@@ -474,6 +474,10 @@ if err != nil {
 n, err := vacuum.Sweep(ctx, worklease.SweepOptions{
     Retention: 7 * 24 * time.Hour,
 })
+if err != nil {
+    return err
+}
+log.Printf("deleted %d retired rows", n)
 ```
 
 `Sweep` deletes rows released with `ExitRetired` once they are older than `Retention`. With `IncludeExpired: true` it also deletes rows whose lease expired with no declared exit, which discards the partial state a successor would have recovered from. Rows released with `ExitFinished` or `ExitAbandoned`, and rows currently held, are never deleted. `Retention` is how long a retired or expired row is kept after its last update; it is not tied to the TTL. After `Forget` or `Sweep`, the next holder sees `ExitNone`, and a holder whose row was removed gets `ErrFenced`. Do not run `Sweep` while v0.5 processes still share the table (see `UPGRADING.md`).
@@ -587,7 +591,7 @@ The gap between these two ends is where `worklease` lives. The only prior art in
 
 From v1.0.0 worklease follows semantic versioning, and [ADR-0020](docs/adr/0020-v1-compatibility-promise.md) records what that covers:
 
-- A change to an exported identifier outside `internal/` is breaking, with three exceptions for implementers: `Lease` and the observer interfaces may gain methods in a minor release (embed `worklease.NoopObserver`, `worklease.NoopVacuumObserver`, or `pool.NoopObserver`, or embed the `Lease` interface in a wrapper). The `backend.Backend` method set is fixed for all of v1.
+- A change to an exported identifier outside `internal/` is breaking, with exceptions for implementers: `Lease` and the observer interfaces may gain methods in a minor release (embed `worklease.NoopObserver`, `worklease.NoopVacuumObserver`, or `pool.NoopObserver`, or embed the `Lease` interface in a wrapper). The `backend.Backend` method set is fixed for all of v1.
 - Match sentinels with `errors.Is`. Error message text is not promised.
 - A default marked tunable in ADR-0020 may change in a minor release when the CHANGELOG lists it; set a value explicitly if you depend on it.
 - A minor release may add tables, nullable columns, and indexes to the PostgreSQL schema, never drop or rename a column. Applying and migrating the schema stays your job.
@@ -597,7 +601,7 @@ From v1.0.0 worklease follows semantic versioning, and [ADR-0020](docs/adr/0020-
 
 ## Status
 
-`CHANGELOG.md` lists every release, and `UPGRADING.md` has the steps between versions. The core lease model (`Lease`, `Token`, fencing, options, sentinels) and the `worker`, `leader`, `pool`, and `checkpoint` packages are covered by the promise above.
+[`CHANGELOG.md`](CHANGELOG.md) lists every release, and [`UPGRADING.md`](UPGRADING.md) has the steps between versions. The core lease model (`Lease`, `Token`, fencing, options, sentinels) and the `worker`, `leader`, `pool`, and `checkpoint` packages are covered by the promise above.
 
 ## Roadmap
 
