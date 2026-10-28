@@ -9,10 +9,16 @@ This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 
 ## [Unreleased]
 
+### Added
+
+- `SECURITY.md`: vulnerabilities are reported privately through GitHub, and fixes are released for the latest v1 release (#161).
+- `CODE_OF_CONDUCT.md` (Contributor Covenant 2.1), issue forms for bug reports and feature requests, and a pull request template; `CONTRIBUTING.md` links the code of conduct and the security policy (#161).
+
 ### Changed
 
 - Tests: the `backend/postgres` and `integration` suites run on pgx v5 (`github.com/jackc/pgx/v5/stdlib`) as well as lib/pq, selected by `WORKLEASE_TEST_POSTGRES_DRIVER` (#155). CI runs each supported Go version on both drivers, and `make ci` adds a `test-pgx` target. The two #113 cancellation specs no longer import lib/pq: on lib/pq they still require SQLSTATE 57014 in the error chain, and on pgx, which returns its own error, they require no SQLSTATE error. pgx v5.11.0 is a test-only dependency.
 - CI: pull requests run `gorelease` (pinned to `golang.org/x/exp` v0.0.0-20261014143641-f0251eb4aa3e) against the newest release tag and fail on an incompatible change to the exported API, except a method added to `Lease`, `LeaseObserver`, `VacuumObserver` or `pool.Observer`, which ADR-0020 row 3 allows in a minor release. On a `release/vX.Y.Z` branch the job also checks that `vX.Y.Z` is a valid version for the changes (ADR-0020 row 1, #153).
+- CI: Dependabot opens a weekly pull request against `dev` for new versions of the GitHub Actions the workflows use (#161). Go module versions are not updated automatically.
 
 ### Documentation
 
