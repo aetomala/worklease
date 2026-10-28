@@ -55,6 +55,8 @@ type memoryConfig struct {
 // expires leases in storage while their holders' local windows, measured on
 // the real monotonic clock, stay open; fencing then rejects the old holders'
 // writes, as with a backend clock that steps forward.
+// The clock must not be nil: memory.New accepts a nil clock, and the first call
+// that reads the clock panics.
 func WithClock(c Clock) Option {
 	return func(cfg *memoryConfig) {
 		cfg.clock = c

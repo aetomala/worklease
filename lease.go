@@ -137,6 +137,8 @@ type Lease interface {
 	// Acquire attempts to acquire a lease for the given workID. Returns ErrLeaseHeld
 	// if the lease for this workID is held and has not expired. If WithWaitForLease
 	// is set, blocks until the lease is available, polling at the configured interval.
+	// An empty workID returns an error that matches no sentinel, including
+	// ErrConfigInvalid.
 	Acquire(ctx context.Context, workID string, opts ...AcquireOption) (Token, error)
 
 	// Checkpoint persists state associated with the current lease. The caller must

@@ -64,8 +64,8 @@ func (e *configError) Unwrap() error { return worklease.ErrConfigInvalid }
 // PermanentError is implemented by errors returned from WorkFn that should
 // suppress slot reacquisition. Pool checks errors.As(err, &pe) after each
 // runner.Run call. A permanent error causes the slot goroutine to exit without
-// reacquiring. Implement this interface on a custom error type; pool provides
-// no concrete implementation.
+// reacquiring. Implement this interface on a custom error type, or wrap an error
+// with Permanent.
 //
 // Pool finds a PermanentError through error wrapping with errors.As and drops
 // the slot only when its Permanent method returns true. A PermanentError whose
@@ -241,6 +241,8 @@ type Config struct {
 // cover the work ID set. Rebalancing is emergent from lease acquisition races.
 // Pool uses one worker.Runner per active slot internally. Run is not safe to
 // call concurrently on the same Pool; ActiveSlots is safe for concurrent use.
+// Construct a Pool with New: Run on a nil *Pool panics, and Run on the zero
+// Pool starts no slots and returns ErrAllSlotsDead at once.
 type Pool struct {
 	lease  worklease.Lease
 	cfg    Config
