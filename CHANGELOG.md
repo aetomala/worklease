@@ -9,6 +9,12 @@ This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 
 ## [Unreleased]
 
+---
+
+## [v1.0.1] — 2026-10-28
+
+v1.0.1 changes no exported identifier and no library behavior. It adds CI, test and documentation work, a security policy, a code of conduct and contribution templates. `gorelease -base=v1.0.0` reports no change to the exported API. The module's `go.mod` now requires `github.com/jackc/pgx/v5` v5.11.0, which only the tests import; the `go 1.26.0` line is unchanged.
+
 ### Added
 
 - `SECURITY.md`: vulnerabilities are reported privately through GitHub, and fixes are released for the latest v1 release (#161).
