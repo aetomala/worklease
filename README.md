@@ -293,7 +293,7 @@ if deadline, ok := worklease.LeaseWindow(renewCtx); ok && time.Until(deadline) <
 | `ErrLeaseHeld` | `Acquire` | The lease is currently held, by another worker or by your own `HolderID`. |
 | `ErrLeaseExpired` | `Renew`, `Release`, `Checkpoint` | `Renew` and `Release`: the lease expired before the call. `Release` also returns it for a second `Release` with the same token, and `Checkpoint` returns it once this holder has declared an exit with `Release`. |
 | `ErrInvalidExitMode` | `Release` | The exit mode is not `ExitFinished`, `ExitAbandoned`, or `ExitRetired`. |
-| `ErrLeaseWindowExhausted` | — | Not returned by a method: it is the cause of `renewCtx` when the lease window closes without a successful renewal. Read it with `context.Cause(renewCtx)`. |
+| `ErrLeaseWindowExhausted` | — | No `Lease` method returns it: it is the cause of `renewCtx` when the lease window closes without a successful renewal. Read it with `context.Cause(renewCtx)`. `worker.Runner.Run` and `leader.Elect` return it wrapped when the work function returned nil. |
 | `ErrRetire` | a work function | Return it, or wrap it, to release with `ExitRetired` (see Retiring work). |
 | `ErrConfigInvalid` | — | The parent of the configuration errors. Match it with `errors.Is`; see Row lifecycle for the members. |
 | `ErrNilBackend` | `New`, `NewVacuum`, `Vacuum.Sweep` | The backend is nil, or the `Vacuum` was not built by `NewVacuum`. Matches `ErrConfigInvalid`. |

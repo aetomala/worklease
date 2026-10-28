@@ -103,7 +103,8 @@ requires five coordinated steps: `Acquire`, `StartRenewal`, work loop, `stopRene
 `Release`. `leader.Elect` reduces this to one call. The caller implements only a
 `func(ctx context.Context) error` that does the actual work; lifecycle management is
 handled internally. The returned error is `ErrFenced` if the lease was superseded; the
-`Acquire` error, after a wait, if the lease was not acquired; and otherwise the `fn` error,
+`Acquire` error if the lease was not acquired (after `IdleInterval` for `ErrLeaseHeld`, at
+once for a context error, and after `BackoffInterval` for any other error); and otherwise the `fn` error,
 or a `leader: release:` error when `fn` succeeded and `Release` failed. If the lease window
 runs out, `Elect` does not release, and returns the `fn` error, or the cause wrapped as
 `leader: …` when `fn` returned nil.
