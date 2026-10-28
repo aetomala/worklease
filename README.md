@@ -2,7 +2,7 @@
 
 [![CI](https://github.com/aetomala/worklease/actions/workflows/ci.yml/badge.svg)](https://github.com/aetomala/worklease/actions/workflows/ci.yml)
 [![Go Reference](https://pkg.go.dev/badge/github.com/aetomala/worklease.svg)](https://pkg.go.dev/github.com/aetomala/worklease)
-[![Go 1.25+](https://img.shields.io/badge/Go-1.25%2B-00ADD8?logo=go&logoColor=white)](go.mod)
+[![Go 1.26+](https://img.shields.io/badge/Go-1.26%2B-00ADD8?logo=go&logoColor=white)](go.mod)
 [![Go Report Card](https://goreportcard.com/badge/github.com/aetomala/worklease)](https://goreportcard.com/report/github.com/aetomala/worklease)
 [![License](https://img.shields.io/badge/license-Apache%202.0-blue.svg)](LICENSE)
 
@@ -11,6 +11,71 @@
 It is not a distributed lock library.
 
 Distributed locks answer: *who owns this resource right now?* `worklease` answers a different question: *when ownership changes, what does the new owner need to continue the work the previous owner started?*
+
+---
+
+## Installation
+
+```
+go get github.com/aetomala/worklease
+```
+
+Requires Go 1.26 or later; CI tests Go 1.26 and 1.27. The PostgreSQL backend is tested on PostgreSQL 16 with `github.com/lib/pq` (see [Backends](#backends)).
+
+## Quick start
+
+This program runs the same work ID twice on the in-memory backend. The second run reads what the first one left behind. It needs no database.
+
+```go
+package main
+
+import (
+	"context"
+	"fmt"
+	"log"
+	"time"
+
+	"github.com/aetomala/worklease"
+	"github.com/aetomala/worklease/backend/memory"
+	"github.com/aetomala/worklease/worker"
+)
+
+func main() {
+	lease, err := worklease.New(memory.New(), worklease.Config{
+		TTL:      30 * time.Second,
+		HolderID: "worker-1", // required: identifies this process and must not be empty
+	})
+	if err != nil {
+		log.Fatal(err)
+	}
+
+	runner, err := worker.NewRunner(worker.RunnerConfig{
+		Lease: lease,
+		WorkFn: func(ctx context.Context, token worklease.Token, prior worklease.Checkpoint) ([]byte, error) {
+			fmt.Printf("previous exit: %s, saved state: %q\n", prior.PrevExit, prior.State)
+			return []byte("step 1 done"), nil // the checkpoint the next holder reads
+		},
+	})
+	if err != nil {
+		log.Fatal(err)
+	}
+
+	for i := 0; i < 2; i++ {
+		if err := runner.Run(context.Background(), "billing-run-2026-10"); err != nil {
+			log.Fatal(err)
+		}
+	}
+}
+```
+
+It prints:
+
+```
+previous exit: none, saved state: ""
+previous exit: finished, saved state: "step 1 done"
+```
+
+For production, replace `memory.New()` with `postgres.New(db)` (see [Backends](#backends)). [Usage](#usage) shows the same lifecycle step by step, and [Higher-level packages](#higher-level-packages) covers `leader` and `pool`.
 
 ---
 
@@ -66,9 +131,11 @@ These are intentional scope boundaries, not gaps.
 
 ## Concepts
 
-**Lease** — A time-limited claim on a named unit of work. Expires if not renewed. When it expires, another worker can acquire it.
+**Lease** — A time-limited claim on a named unit of work. Expires if not renewed. When it expires, another worker can acquire it. In code, a lease is the `worklease.Lease` interface: `worklease.New(backend, cfg)` returns one, and you call `Acquire`, `ReadCheckpoint`, `Checkpoint`, `Renew`, `Release`, `Forget`, and `StartRenewal` on it.
 
-**Fencing token** — A monotonically incrementing integer issued on every acquisition. A worker's writes to the lease store are rejected if a higher token has been issued — preventing zombie workers from corrupting the checkpoint after their lease expires. Tokens are monotonic but not contiguous — every `Acquire` attempt advances the underlying sequence, including attempts that return `ErrLeaseHeld`; gaps in the token sequence are expected and have no operational significance.
+**Holder ID** — `Config.HolderID` names this process. It must not be empty: `worklease.New` returns an error that matches `ErrConfigInvalid`. Use a value that is unique per process, such as a pod name. A lease is not re-entrant: acquiring a lease that your own `HolderID` still holds returns `ErrLeaseHeld`, so a restarted process with a stable ID waits for the old lease to expire (up to the TTL) unless the previous run released it.
+
+**Fencing token** — A monotonically incrementing integer issued on every acquisition. A worker's writes to the lease store are rejected if a higher token has been issued — preventing zombie workers from corrupting the checkpoint after their lease expires. Tokens are monotonic but not contiguous, on either backend: gaps are expected and have no operational significance, so never assume consecutive values. On PostgreSQL every `Acquire` attempt draws from the sequence, including attempts that return `ErrLeaseHeld`; the in-memory backend advances its counter only on a successful `Acquire`.
 
 **Checkpoint** — Progress state written atomically with lease renewal. If the worker is making progress, it proves liveness and saves state in one operation. The last checkpoint survives to the next owner. `Checkpoint` and `Renew` are distinct: `Checkpoint` writes state and extends the TTL atomically; `Renew` extends the TTL without updating state.
 
@@ -81,14 +148,11 @@ These are intentional scope boundaries, not gaps.
 ### Acquiring a lease and checkpointing progress
 
 ```go
-backend, err := postgres.New(db)
-if err != nil {
-    return err
-}
+b := memory.New() // in production: postgres.New(db), see Backends
 
-lease, err := worklease.New(backend, worklease.Config{
+lease, err := worklease.New(b, worklease.Config{
     TTL:      30 * time.Second,
-    HolderID: os.Getenv("WORKER_ID"),
+    HolderID: os.Getenv("WORKER_ID"), // required and unique per process; New rejects an empty value
 })
 if err != nil {
     return err
@@ -127,6 +191,12 @@ if errors.Is(workErr, worklease.ErrFenced) || errors.Is(context.Cause(renewCtx),
     return worklease.ErrFenced // a successor holds the lease or its record was removed; record nothing
 }
 
+if errors.Is(context.Cause(renewCtx), worklease.ErrLeaseWindowExhausted) {
+    // The lease lapsed before a renewal succeeded. Do not Checkpoint or Release it:
+    // the successor sees ExitExpired and the last good checkpoint.
+    return errors.Join(workErr, worklease.ErrLeaseWindowExhausted)
+}
+
 // Final writes must survive cancellation of ctx without hanging shutdown.
 cleanupCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
 defer cancel()
@@ -163,7 +233,7 @@ if err := lease.Renew(ctx, token); err != nil {
 
 ### Fresh acquisition
 
-`ReadCheckpoint` returns `nil` state (not an error) when this is the first worker to acquire this lease:
+`ReadCheckpoint` returns a `nil` state (not an error) when this is the first worker to acquire this lease, and also after a `Checkpoint` with a nil or empty state, on every backend:
 
 ```go
 prior, err := lease.ReadCheckpoint(ctx, token)
@@ -217,31 +287,29 @@ if deadline, ok := worklease.LeaseWindow(renewCtx); ok && time.Until(deadline) <
 
 ## Error Reference
 
-| Error | Meaning |
-|---|---|
-| `ErrFenced` | The token no longer matches the stored lease, or no record exists for the work ID. This worker has been superseded. Stop writing to the lease store. |
-| `ErrLeaseHeld` | The lease is currently held by another worker. |
-| `ErrLeaseExpired` | The lease expired before this operation completed. |
+| Error | Returned by | Meaning |
+|---|---|---|
+| `ErrFenced` | `Checkpoint`, `Renew`, `Release`, `ReadCheckpoint`, `Forget` | The token no longer matches the stored lease, or no record exists for the work ID (also for a zero `Token`). This worker has been superseded. Stop writing to the lease store. |
+| `ErrLeaseHeld` | `Acquire` | The lease is currently held, by another worker or by your own `HolderID`. |
+| `ErrLeaseExpired` | `Renew`, `Release`, `Checkpoint` | `Renew` and `Release`: the lease expired before the call. `Release` also returns it for a second `Release` with the same token, and `Checkpoint` returns it once this holder has declared an exit with `Release`. |
+| `ErrInvalidExitMode` | `Release` | The exit mode is not `ExitFinished`, `ExitAbandoned`, or `ExitRetired`. |
+| `ErrLeaseWindowExhausted` | — | Not returned by a method: it is the cause of `renewCtx` when the lease window closes without a successful renewal. Read it with `context.Cause(renewCtx)`. |
+| `ErrRetire` | a work function | Return it, or wrap it, to release with `ExitRetired` (see Retiring work). |
+| `ErrConfigInvalid` | — | The parent of the configuration errors. Match it with `errors.Is`; see Row lifecycle for the members. |
+| `ErrNilBackend` | `New`, `NewVacuum`, `Vacuum.Sweep` | The backend is nil, or the `Vacuum` was not built by `NewVacuum`. Matches `ErrConfigInvalid`. |
+| `ErrRetentionRequired` | `Vacuum.Sweep` | `SweepOptions.Retention` is zero or negative. Matches `ErrConfigInvalid`. |
 
-The sentinels are defined in package `backend` and re-exported from `worklease` as the same values, so `errors.Is` matches either name.
+The four backend sentinels (`ErrFenced`, `ErrLeaseHeld`, `ErrLeaseExpired`, `ErrInvalidExitMode`) are defined in package `backend` and re-exported from `worklease` as the same values, so `errors.Is` matches either name. `Acquire` with an empty work ID returns a plain error that matches no sentinel.
 
 Match sentinels with `errors.Is`. The text of an error message is not part of the compatibility promise and may change in a minor release; such changes are listed under `### Changed` in `CHANGELOG.md`.
 
-`ErrFenced` is the critical one. When `Checkpoint` or `Renew` returns `ErrFenced`, a successor has already acquired the lease or its record was removed, and this worker is a zombie. Stop immediately — any further writes to the lease store will be rejected. Note that `ErrFenced` does not cancel in-flight external calls the worker may have already initiated; those must be made idempotent at the application layer.
+`ErrFenced` is the critical one. When `Checkpoint`, `Renew`, `Release`, `ReadCheckpoint`, or `Forget` returns `ErrFenced`, a successor has already acquired the lease or its record was removed, and this worker is a zombie. Stop immediately — any further writes to the lease store will be rejected. Note that `ErrFenced` does not cancel in-flight external calls the worker may have already initiated; those must be made idempotent at the application layer.
 
 ---
 
 ## Upgrading
 
-`v0.7.0` drops the deprecated `clean_handoff` column (run the `ALTER TABLE` in `UPGRADING.md` once no v0.5 process remains), rejects TTLs below 1ms, requires READ COMMITTED on PostgreSQL, changes `NewVacuum` to `NewVacuum(b, cfg) (*Vacuum, error)`, adds `LeaseObserver.OnForget`, rejects empty and duplicate `pool` work IDs, and makes `leader.Elect` wait `IdleInterval` (default 1s) before returning `ErrLeaseHeld`.
-
-`v0.5.0` changes `Acquire` with `WithWaitForLease`: on context cancellation or deadline while waiting it now returns an error wrapping `ctx.Err()` (satisfying `errors.Is(err, context.Canceled)` / `context.DeadlineExceeded`) instead of bare `ErrLeaseHeld`. This is a runtime break for callers that treated `ErrLeaseHeld` as their sole wait-loop termination signal; the synchronous no-wait path is unchanged. The renewal goroutine also now retries transient errors with backoff bounded by the lease window rather than stopping on the first error (configure with `WithRenewalBackoff`).
-
-`v0.4.0` redesigns `LeaseObserver` from flat parameters to event structs (adds `OnReadCheckpoint`, fires `OnFenced` on the Release path, adds `Duration`), and `pool.New` now returns distinct config sentinels (`ErrNilLease`, renamed `ErrLeaseRequired` in v0.8 / `ErrEmptyWorkIDs` / `ErrWithWaitForLeaseProhibited`, all wrapping `ErrConfigInvalid`) while `pool.Pool.Run` returns `ErrAllSlotsDead` when every slot dies permanently.
-
-`v0.3.0` includes a breaking change in the `checkpoint` package: `Codec.Encode` and `Codec.Decode` are renamed to `Marshal` and `Unmarshal`. Callers using `checkpoint.JSON()` are unaffected.
-
-See [`UPGRADING.md`](UPGRADING.md) for full migration instructions.
+`UPGRADING.md` has the steps for each version, including the schema migrations that v0.5.0 and v0.6.0 required. From v0.8.0 to v1.0.0 there is no schema change, and the module requires Go 1.26.
 
 ---
 
@@ -282,7 +350,24 @@ err := leader.Elect(ctx, lease, "scheduler:primary", leader.Config{}, func(ctx c
 })
 ```
 
-Without `worklease.WithWaitForLease()`, `Elect` returns `ErrLeaseHeld` when another process leads, after waiting `leader.Config.IdleInterval` (default 1s, up to 20% jitter), so a follower can call `Elect` in a loop without spinning against the backend. Any other `Acquire` error is returned after `BackoffInterval`, and a context error at once. Pass `worklease.WithWaitForLease()` in `leader.Config.AcquireOptions` to block until leadership is available instead. `leader.Config` also accepts optional lifecycle callbacks — `OnElected`, `OnLost`, and `OnRelinquished` — for observing leadership transitions; none of them fires when `Acquire` fails.
+Without `worklease.WithWaitForLease()`, `Elect` returns `ErrLeaseHeld` when another process leads, after waiting `leader.Config.IdleInterval` (default 1s, up to 20% jitter), so a follower can call `Elect` in a loop without spinning against the backend. Any other `Acquire` error, such as a database outage, is returned after `BackoffInterval`, and a context error at once. `BackoffInterval` also applies after every non-fencing return that follows a successful `Acquire`, including a clean finish. Its zero value means no sleep, so a loop that retries on every error must set it: with the database unreachable, a loop of `Elect` calls with `leader.Config{}` spins (tens of thousands of `Acquire` calls per second on a development machine), and with `BackoffInterval: time.Second` it makes one call per second. Pass `worklease.WithWaitForLease()` in `leader.Config.AcquireOptions` to block until leadership is available instead.
+
+`leader.Config` also accepts optional lifecycle callbacks — `OnElected`, `OnLost`, and `OnRelinquished` — for observing leadership transitions; none of them fires when `Acquire` fails:
+
+```go
+cfg := leader.Config{
+    BackoffInterval: time.Second, // pace retries after errors other than ErrLeaseHeld
+    OnElected: func(ctx context.Context, token worklease.Token) {
+        log.Printf("elected: %v", token)
+    },
+    OnLost: func(ctx context.Context, token worklease.Token) {
+        log.Printf("lost the lease: %v", token) // fenced, or the lease window ran out
+    },
+    OnRelinquished: func(ctx context.Context, token worklease.Token) {
+        log.Printf("released: %v", token) // after ExitFinished or ExitRetired
+    },
+}
+```
 
 ### pool — Distributed work distribution
 
@@ -306,7 +391,7 @@ Return `worklease.ErrRetire` (or wrap it) from the work function to retire the w
 
 ### checkpoint — Typed serialization helpers
 
-`checkpoint.Codec` and the generic `Encode[T]` / `Decode[T]` helpers add typed serialization on top of the raw `[]byte` checkpoint layer. `checkpoint.JSON()` returns a `JSONCodec` backed by `encoding/json`.
+`checkpoint.Codec` and the generic `Encode[T]` / `Decode[T]` helpers add typed serialization on top of the raw `[]byte` checkpoint layer. `checkpoint.JSON()` returns a `JSONCodec` backed by `encoding/json`. The codec must not be nil. `Decode` returns the zero value for nil data without calling the codec, and a backend returns a nil `State` when there is no checkpoint, so a first acquisition decodes to the zero value.
 
 ### Observability — LeaseObserver
 
@@ -375,7 +460,8 @@ WorkFn: func(ctx context.Context, token worklease.Token, prior worklease.Checkpo
 Lease rows outlive their holders so that successors can read them. Two calls remove them:
 
 ```go
-// Delete one row now. The caller must hold the current lease.
+// Delete one row now. Forget matches the holder and the token, so it also works
+// after your own Release.
 if err := lease.Forget(ctx, token); err != nil {
     return err // ErrFenced: the lease moved on, or the row is already gone
 }
@@ -394,11 +480,11 @@ n, err := vacuum.Sweep(ctx, worklease.SweepOptions{
 
 `Forget` is reported to `LeaseObserver.OnForget`, and each `Sweep` that reaches the backend to `VacuumConfig.Observer`.
 
-Configuration errors are matchable: every error `worklease.New` returns, and `ErrNilBackend` from `NewVacuum` and `Vacuum.Sweep`, satisfies `errors.Is(err, worklease.ErrConfigInvalid)`. So do the `pool` configuration sentinels (including `pool.ErrConfigInvalid`), `worker.ErrLeaseRequired`, `worker.ErrWorkFnRequired`, `leader.ErrLeaseRequired`, and `leader.ErrFnRequired`.
+Configuration errors are matchable: every error `worklease.New` returns, `ErrNilBackend` from `NewVacuum` and `Vacuum.Sweep`, and `ErrRetentionRequired` from `Vacuum.Sweep` satisfy `errors.Is(err, worklease.ErrConfigInvalid)`. So do the `pool` configuration sentinels (including `pool.ErrConfigInvalid`), `worker.ErrLeaseRequired`, `worker.ErrWorkFnRequired`, `leader.ErrLeaseRequired`, and `leader.ErrFnRequired`.
 
 ## Backends
 
-### PostgreSQL (v0.1)
+### PostgreSQL
 
 ```go
 import (
@@ -418,7 +504,7 @@ lease, _ := worklease.New(backend, worklease.Config{
 })
 ```
 
-Run the migration before first use (canonical source: [`backend/postgres/schema.sql`](backend/postgres/schema.sql)):
+Run the migration before first use (canonical source: [`backend/postgres/schema.sql`](backend/postgres/schema.sql)). Without it, the first `Acquire` fails with an error that wraps the driver's `relation "worklease_leases" does not exist` and matches no worklease sentinel; the statements are idempotent, so run them and retry:
 
 ```sql
 -- canonical: backend/postgres/schema.sql
@@ -445,9 +531,11 @@ CREATE INDEX IF NOT EXISTS idx_worklease_leases_updated_at
     ON worklease_leases (updated_at);
 ```
 
-The atomic checkpoint operation is a single `UPDATE ... WHERE fencing_token = $n`. Zero rows updated means the token is stale. There is no Lua script, no optimistic retry loop, no distributed clock dependency.
+The atomic checkpoint operation is a single `UPDATE ... WHERE fencing_token = $n`. Zero rows updated means the token is stale (`ErrFenced`) or that this holder already declared an exit with `Release` (`ErrLeaseExpired`); a follow-up query tells them apart. There is no Lua script, no optimistic retry loop, no distributed clock dependency. The `checkpoint` column is NULL until state is written, and again after a `Checkpoint` of a nil or empty state; `ReadCheckpoint` returns a nil `State` for it.
 
 The backend requires the READ COMMITTED isolation level, the PostgreSQL default. Under REPEATABLE READ or SERIALIZABLE, a contended `Acquire` fails with a serialization error (SQLSTATE 40001) instead of returning `ErrLeaseHeld`. If your database or role defaults to another level, pin it for the role worklease connects as: `ALTER ROLE worklease_role SET default_transaction_isolation = 'read committed';`. The schema drops the deprecated `clean_handoff` column as of v0.7; existing databases drop it with the step in `UPGRADING.md`. A statement cancelled or timed out by its context returns an error that wraps both the driver error and `ctx.Err()` (#113); the `Backend` contract requires custom backends to match `ctx.Err()` the same way.
+
+The backend is tested on PostgreSQL 16 with `github.com/lib/pq`. The backend suite also passes on pgx v5 (`github.com/jackc/pgx/v5/stdlib`), apart from two specs that look for lib/pq's `*pq.Error` type.
 
 ### In-memory (testing)
 
@@ -461,7 +549,7 @@ lease, _ := worklease.New(backend, worklease.Config{
 })
 ```
 
-Suitable for unit tests within a single process. Implements the same fencing token semantics as the PostgreSQL backend. Not safe for concurrent use across processes.
+Suitable for unit tests within a single process. It passes the same conformance suite as the PostgreSQL backend. Its fencing tokens come from a per-instance counter that advances only on a successful `Acquire`, while PostgreSQL uses one sequence per database that every attempt advances. Not safe for concurrent use across processes.
 
 ---
 
@@ -495,46 +583,25 @@ The gap between these two ends is where `worklease` lives. The only prior art in
 
 ---
 
-## Installation
+## Stability
 
-```
-go get github.com/aetomala/worklease
-```
+From v1.0.0 worklease follows semantic versioning, and [ADR-0020](docs/adr/0020-v1-compatibility-promise.md) records what that covers:
 
-Requires Go 1.25+. PostgreSQL backend requires PostgreSQL 12+.
-
----
+- A change to an exported identifier outside `internal/` is breaking, with three exceptions for implementers: `Lease` and the observer interfaces may gain methods in a minor release (embed `worklease.NoopObserver`, `worklease.NoopVacuumObserver`, or `pool.NoopObserver`, or embed the `Lease` interface in a wrapper). The `backend.Backend` method set is fixed for all of v1.
+- Match sentinels with `errors.Is`. Error message text is not promised.
+- A default marked tunable in ADR-0020 may change in a minor release when the CHANGELOG lists it; set a value explicitly if you depend on it.
+- A minor release may add tables, nullable columns, and indexes to the PostgreSQL schema, never drop or rename a column. Applying and migrating the schema stays your job.
+- The supported Go versions are the two latest releases, and the `go` directive is raised only in a minor release.
+- An identifier is deprecated for at least one minor release before a major release removes it.
+- Nothing under `internal/` is promised, and `backend/conformance` tightens the backend contract only in a major release.
 
 ## Status
 
-v0.8.0 is the latest release and the 1.0 candidate. It audits the exported API before the freeze: ADR-0019 records a keep, remove, or internalize decision for every exported identifier. The core lease model (`Lease`, `Token`, fencing, options, sentinels) is stable; v0.8 has four breaking changes, so read `UPGRADING.md` before upgrading from v0.7.
-
-v0.8 defines `ErrFenced`, `ErrLeaseHeld`, `ErrLeaseExpired`, and `ErrInvalidExitMode` in package `backend` and re-exports them from `worklease` as the same values, so the non-test code of the backend packages no longer imports the root package. It exports `NoopObserver`, `NoopVacuumObserver`, and `pool.NoopObserver` for embedding, adds `Operation.String` and `NewToken`, and documents how `Lease`, `Backend`, and the observer interfaces may grow. The `ErrFenced` message now reads `worklease: fenced — the lease is no longer held by this token`; match sentinels with `errors.Is`. Breaking changes: the `testutil` package moved to `internal/testutil`; `pool.ErrNilLease` is `pool.ErrLeaseRequired`; `Operation` values start at 1; and `backend/postgres` no longer registers a database driver, so callers import one. See `UPGRADING.md` and `CHANGELOG.md`.
-
-v0.7.1 is a patch on v0.7.0 with no API, behavior, or schema change. It adds specs and a CI-enforced check that guard v0.7 guarantees (the `New` check order, the closed-window check in the renewal goroutine, and context-matching PostgreSQL errors), states in the `Checkpoint` docs that a lapsed lease with no successor is revived by the write, and builds with Go 1.26.10.
-
-v0.7 bounds renewal by the lease window. Each `Renew` call runs with a deadline at the window, `stopRenewal` no longer waits for an in-flight call, and the renewal context is cancelled with `ErrLeaseWindowExhausted` when the window closes, even while a `Renew` call is stalled. Work code reads the window with `worklease.LeaseWindow(ctx)`. Errors become matchable: every `worklease.New` error matches `ErrConfigInvalid`, and a PostgreSQL statement cancelled mid-flight returns an error matching `ctx.Err()`. `Forget` and `Vacuum.Sweep` are observable through `LeaseObserver.OnForget` and `VacuumObserver`, and the `integration/` suite runs on both backends.
-
-Breaking changes: `worklease.New` rejects a TTL below 1ms; the PostgreSQL backend requires READ COMMITTED and its schema no longer creates the deprecated `clean_handoff` column; `NewVacuum` takes a `VacuumConfig` and returns an error; custom `LeaseObserver` implementations must add `OnForget`; `pool.New` rejects empty and duplicate work IDs; and `leader.Elect` waits `Config.IdleInterval` before returning `ErrLeaseHeld`. See `UPGRADING.md` and `CHANGELOG.md`.
-
----
+`CHANGELOG.md` lists every release, and `UPGRADING.md` has the steps between versions. The core lease model (`Lease`, `Token`, fencing, options, sentinels) and the `worker`, `leader`, `pool`, and `checkpoint` packages are covered by the promise above.
 
 ## Roadmap
 
-### Released
-
-- **v0.1.0** — Core lease primitives: `Lease`, `Backend`, PostgreSQL + in-memory backends, fencing, checkpoint
-- **v0.2.0** — `worker.Runner`, `checkpoint.Codec`, `LeaseObserver`, `memory.Clock`, examples
-- **v0.3.0** — `leader.Elect`, `pool.Pool`, `HasWaitForLease`, `checkpoint.Codec` method rename (breaking — see `UPGRADING.md`)
-- **v0.4.0** — `LeaseObserver` event-struct redesign (breaking), `backend/conformance` suite, `pool.Observer`/`Permanent`/`ErrAllSlotsDead`, `leader` lifecycle callbacks, memory slice-ownership fix
-- **v0.5.0** — bounded renewal retry (`WithRenewalBackoff`, `ErrLeaseWindowExhausted`, `RenewEvent.Attempt`); global fencing sequence on both backends; single-statement `Acquire` with `RETURNING`; ctx-aware `Acquire` cancellation under `WithWaitForLease` (breaking — see `UPGRADING.md`)
-- **v0.6.0** — caller-governed row lifecycle: `Lease.Forget`, `worklease.Vacuum.Sweep` (breaking — new `Backend`/`Lease` interface methods for custom implementations; see `UPGRADING.md`); explicit exit modes (ADR-0018) — schema migration required, see `UPGRADING.md`
-- **v0.7.0** — renewal bounded by the lease window (`LeaseWindow`, per-attempt `Renew` deadline, `stopRenewal` no longer waits on backend I/O); `ErrConfigInvalid` and context-matching PostgreSQL errors; observable `Forget` and `Sweep` (`OnForget`, `VacuumObserver`); 1ms TTL floor, READ COMMITTED, `NewVacuum(b, cfg)`, `pool.New` work ID validation, `Elect` pacing (breaking — see `UPGRADING.md`)
-- **v0.7.1** — patch: specs and a CI-enforced check for v0.7 guarantees, `Checkpoint` revival documented, Go 1.26.10 toolchain; no API, behavior, or schema change
-- **v0.8.0** — 1.0 API audit: sentinels in `backend`, `internal/testutil`, exported no-op observers, `NewToken`, `Operation.String`, interface growth policy, `backend/postgres` no longer registers a driver, ADR-0019 (breaking — see `UPGRADING.md`)
-
-### Future
-- Redis backend, etcd backend (unscheduled, post-1.0)
+A Redis backend and an etcd backend are possible additions (unscheduled).
 
 ---
 
@@ -550,4 +617,4 @@ See [`examples/`](examples/) for the full list with descriptions and run instruc
 
 ## License
 
-Apache 2.0 — see [LICENSE](LICENSE).
+Apache 2.0 — see [LICENSE](LICENSE) and [NOTICE](NOTICE).
