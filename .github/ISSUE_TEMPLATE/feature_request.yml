@@ -1,0 +1,25 @@
+name: Feature request
+description: Propose a change or an addition to worklease.
+labels: ["enhancement"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Changes to the exported API and to documented behavior follow the v1 compatibility promise in [ADR-0020](https://github.com/aetomala/worklease/blob/main/docs/adr/0020-v1-compatibility-promise.md).
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problem
+      description: What you are trying to do, and what stops you today.
+    validations:
+      required: true
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposed change
+    validations:
+      required: true
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives considered

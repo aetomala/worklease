@@ -5,9 +5,17 @@ changes, and submit pull requests.
 
 ---
 
+## Code of conduct
+
+This project follows the [Contributor Covenant](CODE_OF_CONDUCT.md). By participating you agree to
+uphold it.
+
+---
+
 ## Reporting bugs
 
-Open a GitHub issue. Include:
+Open a GitHub issue with the bug report form. Do not report a security vulnerability in an issue;
+follow [SECURITY.md](SECURITY.md) instead. Include:
 
 - Go version (`go version`)
 - worklease version or commit SHA

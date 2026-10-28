@@ -1,0 +1,54 @@
+name: Bug report
+description: Report a defect in worklease.
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Do not report a security vulnerability here; follow [SECURITY.md](https://github.com/aetomala/worklease/blob/main/SECURITY.md) instead.
+  - type: input
+    id: version
+    attributes:
+      label: worklease version
+      description: A release tag or commit SHA.
+    validations:
+      required: true
+  - type: input
+    id: go-version
+    attributes:
+      label: Go version
+      description: The output of `go version`.
+    validations:
+      required: true
+  - type: dropdown
+    id: backend
+    attributes:
+      label: Backend
+      options:
+        - In-memory (backend/memory)
+        - PostgreSQL with github.com/lib/pq
+        - PostgreSQL with github.com/jackc/pgx/v5/stdlib
+        - PostgreSQL with another driver
+        - Another backend
+    validations:
+      required: true
+  - type: textarea
+    id: actual
+    attributes:
+      label: What happened
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: What you expected
+    validations:
+      required: true
+  - type: textarea
+    id: reproduction
+    attributes:
+      label: Minimal reproduction
+      description: The smallest code that triggers the bug.
+      render: go
+    validations:
+      required: true
