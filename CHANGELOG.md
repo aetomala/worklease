@@ -17,6 +17,7 @@ This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 ### Documentation
 
 - Spec names, code comments, ADR-0019 and ADR-0020 no longer cite ids the repository does not define; decision ids outside ADR-0019 name their ADR (#157).
+- README and ARCHITECTURE: on PostgreSQL, only an `Acquire` attempt that the database executes draws from the fencing sequence; an empty `workID`, or a context that is already done when an attempt starts, returns before anything is sent to the database (#159).
 
 ---
 
