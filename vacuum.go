@@ -2,7 +2,6 @@ package worklease
 
 import (
 	"context"
-	"errors"
 	"time"
 
 	"github.com/aetomala/worklease/backend"
@@ -11,8 +10,9 @@ import (
 // Error message constant for Vacuum.Sweep validation.
 const msgRetentionRequired = "worklease: retention must be greater than zero"
 
-// ErrRetentionRequired is returned by Vacuum.Sweep when opts.Retention <= 0.
-var ErrRetentionRequired = errors.New(msgRetentionRequired)
+// ErrRetentionRequired is returned by Vacuum.Sweep when opts.Retention <= 0. It
+// matches ErrConfigInvalid.
+var ErrRetentionRequired error = &configError{msg: msgRetentionRequired}
 
 // SweepOptions configures a Vacuum.Sweep call. It is a type alias for
 // backend.SweepOptions — the canonical definition lives in package backend to

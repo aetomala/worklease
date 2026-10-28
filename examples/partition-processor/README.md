@@ -21,7 +21,7 @@ partition-processor/
 
 ## Setup
 
-Prerequisites: Go 1.25+.
+Prerequisites: Go 1.26+.
 
 ```bash
 go mod tidy

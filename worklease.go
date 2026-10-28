@@ -109,6 +109,8 @@ func toRecord(t Token) backend.LeaseRecord {
 // write. Stop any background checkpoint loop when it sees ErrLeaseExpired.
 // A lease whose TTL lapsed with no declared exit and no successor is not an
 // error: the write succeeds and revives the lease.
+// A nil or empty state clears the stored state: ReadCheckpoint then returns a
+// nil State on every backend.
 func (c *leaseClient) Checkpoint(ctx context.Context, token Token, state []byte) error {
 	// ===== Validate and Delegate =====
 	record := toRecord(token)

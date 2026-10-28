@@ -11,6 +11,33 @@ This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 
 ---
 
+## [v1.0.0] — 2026-10-27
+
+v1.0.0 freezes the API that v0.8.0 audited (ADR-0019) under the compatibility promise in ADR-0020. Against v0.8.0 the exported API gains `pool.ErrWorkFnRequired` and `leader.ErrFnRequired` and loses nothing (`gorelease -base=v0.8.0` reports those two compatible additions). The three changes under Breaking are changes of behavior or of the supported Go version, which `gorelease` does not report.
+
+### Breaking
+
+- The minimum Go version is 1.26 (`go 1.26.0` in `go.mod`; v0.8.0 declared 1.25.0). CI tests Go 1.26 and 1.27, the two latest releases. Go 1.25 is no longer a supported Go release, and `govulncheck` reports standard-library vulnerabilities on it that are fixed only in Go 1.26.
+- `pool.ErrWorkFnRequired` and `leader.ErrFnRequired`: `pool.New` and `leader.Elect` return them when the work function is nil, as `worker.NewRunner` already returned `worker.ErrWorkFnRequired`. Both match `worklease.ErrConfigInvalid`. Before this change `pool.New` accepted a nil function and `Elect` did not check it.
+- A nil or empty checkpoint state now reads back as a nil `State` on every backend and driver. Before, `Checkpoint` with a nil state read back as nil on the memory backend and with pgx, and as an empty non-nil slice with lib/pq; `Checkpoint` with an empty non-nil slice read back as an empty non-nil slice on every backend. PostgreSQL now stores NULL for either, and reads an empty stored value as nil, so rows written before this change read back as nil too. No schema change.
+
+### Added
+
+- `pool.ErrWorkFnRequired` and `leader.ErrFnRequired` (see Breaking).
+- ADR-0020, the v1 compatibility promise (`docs/adr/0020-v1-compatibility-promise.md`), and a `NOTICE` file naming the copyright holder.
+
+### Changed
+
+- `worklease.ErrRetentionRequired` now matches `worklease.ErrConfigInvalid`, as the other configuration sentinels do. Its message is unchanged.
+- `pool.Permanent(nil).Error()` no longer panics: it returns `"pool: permanent error"`.
+- CI: `gofmt -l .` and the examples build run in `make ci`, and CI runs each example with a 60-second limit. A weekly workflow runs `govulncheck` on `dev`.
+- The half-open-connection specs retry once on failure (#115). A stall of the runner or the database as long as the lease TTL expires the lease under test; a regression of #115 still fails on both attempts.
+- CI and `make ci` run `go mod tidy -diff` in the root module and in each example, so a `go.mod` or `go.sum` that is not tidy fails the build. The six example modules require `github.com/aetomala/worklease v1.0.0`, resolved through their `replace` directive to the tree.
+- Documentation: the README is rewritten for a first-time reader, with a complete quick start on the in-memory backend, the full error table, a Stability section, and the Go 1.26 floor. Its release history now lives in this file and in `UPGRADING.md`.
+- The indirect dependencies `golang.org/x/net` (v0.56.0 to v0.62.0) and `golang.org/x/text` (v0.39.0 to v0.43.0) are raised to versions that fix the advisories `govulncheck` listed for them (GO-2026-6866, -6860, -6617, -6612, -6611, -6610, -6603 and GO-2026-6629). `golang.org/x/net` v0.62.0 requires `golang.org/x/text` v0.43.0, and the bump also raises the indirect `golang.org/x/sys` (v0.46.0 to v0.49.0) and `golang.org/x/tools` (v0.47.0 to v0.51.0). `govulncheck` reported no call into the affected code, and the library's own packages are unchanged.
+
+---
+
 ## [v0.8.0] — 2026-10-23
 
 ### Breaking

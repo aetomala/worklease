@@ -55,6 +55,8 @@ type memoryConfig struct {
 // expires leases in storage while their holders' local windows, measured on
 // the real monotonic clock, stay open; fencing then rejects the old holders'
 // writes, as with a backend clock that steps forward.
+// The clock must not be nil: memory.New accepts a nil clock, and the first call
+// that reads the clock panics.
 func WithClock(c Clock) Option {
 	return func(cfg *memoryConfig) {
 		cfg.clock = c
@@ -191,7 +193,7 @@ func (mb *memoryBackend) Checkpoint(ctx context.Context, record backend.LeaseRec
 	// ===== STEP 5: Update Checkpoint =====
 	// Defensive copy (ADR-0014): do not alias the caller's slice — the caller
 	// may mutate state after Checkpoint returns.
-	if state == nil {
+	if len(state) == 0 { // a nil or empty state clears the checkpoint (D-26)
 		r.checkpoint = nil
 	} else {
 		stored := make([]byte, len(state))

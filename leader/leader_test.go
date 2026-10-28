@@ -66,6 +66,18 @@ var _ = Describe("leader", func() {
 			})
 		})
 
+		Context("nil function (v1.0 prep)", func() {
+			It("returns ErrFnRequired without calling Acquire when fn is nil", func() {
+				err := leader.Elect(ctx, mockLease, "work-1", leader.Config{}, nil)
+				Expect(errors.Is(err, leader.ErrFnRequired)).To(BeTrue())
+			})
+
+			It("ErrFnRequired matches worklease.ErrConfigInvalid and keeps its message", func() {
+				Expect(errors.Is(leader.ErrFnRequired, worklease.ErrConfigInvalid)).To(BeTrue())
+				Expect(leader.ErrFnRequired.Error()).To(Equal("leader: function is required"))
+			})
+		})
+
 		Context("when Acquire returns ErrLeaseHeld", func() {
 			It("returns ErrLeaseHeld without calling fn", func() {
 				mockLease.EXPECT().Acquire(gomock.Any(), "work-1").Return(worklease.Token{}, worklease.ErrLeaseHeld)

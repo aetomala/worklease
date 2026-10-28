@@ -44,6 +44,9 @@ var (
 	// ErrWithWaitForLeaseProhibited is returned by New when cfg.AcquireOptions includes WithWaitForLease.
 	ErrWithWaitForLeaseProhibited = fmt.Errorf("pool: WithWaitForLease is prohibited in AcquireOptions: %w", ErrConfigInvalid)
 
+	// ErrWorkFnRequired is returned by New when fn is nil.
+	ErrWorkFnRequired = fmt.Errorf("pool: work function is required: %w", ErrConfigInvalid)
+
 	// ErrAllSlotsDead is returned by Run when every slot exited via PermanentError.
 	ErrAllSlotsDead = errors.New("pool: all slots permanently dead")
 )
@@ -61,8 +64,8 @@ func (e *configError) Unwrap() error { return worklease.ErrConfigInvalid }
 // PermanentError is implemented by errors returned from WorkFn that should
 // suppress slot reacquisition. Pool checks errors.As(err, &pe) after each
 // runner.Run call. A permanent error causes the slot goroutine to exit without
-// reacquiring. Implement this interface on a custom error type; pool provides
-// no concrete implementation.
+// reacquiring. Implement this interface on a custom error type, or wrap an error
+// with Permanent.
 //
 // Pool finds a PermanentError through error wrapping with errors.As and drops
 // the slot only when its Permanent method returns true. A PermanentError whose
@@ -74,12 +77,20 @@ type PermanentError interface {
 
 // Permanent wraps err in a value that satisfies PermanentError with Permanent() == true.
 // Use when a WorkFn wants to drop its slot without defining a custom error type.
+// A nil err is allowed: the result is still non-nil, its message is
+// "pool: permanent error", and Unwrap returns nil.
 func Permanent(err error) error { return &permanentErr{cause: err} }
 
 // permanentErr is the concrete type returned by Permanent.
 type permanentErr struct{ cause error }
 
-func (e *permanentErr) Error() string   { return e.cause.Error() }
+func (e *permanentErr) Error() string {
+	if e.cause == nil {
+		return "pool: permanent error"
+	}
+	return e.cause.Error()
+}
+
 func (e *permanentErr) Permanent() bool { return true }
 func (e *permanentErr) Unwrap() error   { return e.cause }
 
@@ -230,6 +241,8 @@ type Config struct {
 // cover the work ID set. Rebalancing is emergent from lease acquisition races.
 // Pool uses one worker.Runner per active slot internally. Run is not safe to
 // call concurrently on the same Pool; ActiveSlots is safe for concurrent use.
+// Construct a Pool with New: Run on a nil *Pool panics, and Run on the zero
+// Pool starts no slots and returns ErrAllSlotsDead at once.
 type Pool struct {
 	lease  worklease.Lease
 	cfg    Config
@@ -242,11 +255,11 @@ type Pool struct {
 // New constructs a Pool. Does not start slot acquisition — call Run.
 // Returns ErrLeaseRequired if lease is nil, ErrEmptyWorkIDs if cfg.WorkIDs is
 // empty, ErrEmptyWorkID if an entry of cfg.WorkIDs is the empty string,
-// ErrDuplicateWorkID if a work ID appears more than once, and
-// ErrWithWaitForLeaseProhibited if cfg.AcquireOptions includes WithWaitForLease.
-// All five satisfy errors.Is(err, ErrConfigInvalid) and errors.Is(err,
-// worklease.ErrConfigInvalid). Entries are checked in index order, and the
-// first invalid entry is reported.
+// ErrDuplicateWorkID if a work ID appears more than once,
+// ErrWithWaitForLeaseProhibited if cfg.AcquireOptions includes WithWaitForLease,
+// and ErrWorkFnRequired if fn is nil. All six satisfy errors.Is(err,
+// ErrConfigInvalid) and errors.Is(err, worklease.ErrConfigInvalid). Entries are
+// checked in index order, and the first invalid entry is reported.
 func New(lease worklease.Lease, cfg Config, fn WorkFn) (*Pool, error) {
 	// ===== STEP 1: Nil lease check =====
 	if lease == nil {
@@ -275,7 +288,12 @@ func New(lease worklease.Lease, cfg Config, fn WorkFn) (*Pool, error) {
 		return nil, ErrWithWaitForLeaseProhibited
 	}
 
-	// ===== STEP 5: Apply pacing defaults for zero or negative values =====
+	// ===== STEP 5: Nil work function check =====
+	if fn == nil {
+		return nil, ErrWorkFnRequired
+	}
+
+	// ===== STEP 6: Apply pacing defaults for zero or negative values =====
 	if cfg.IdleInterval <= 0 {
 		cfg.IdleInterval = defaultIdleInterval
 	}
@@ -286,7 +304,7 @@ func New(lease worklease.Lease, cfg Config, fn WorkFn) (*Pool, error) {
 		cfg.BackoffInterval = defaultBackoffInterval
 	}
 
-	// ===== STEP 6: Inject NoOp observer when nil =====
+	// ===== STEP 7: Inject NoOp observer when nil =====
 	obs := cfg.Observer
 	if obs == nil {
 		obs = NoopObserver{}

@@ -1,5 +1,21 @@
 # Upgrading worklease
 
+## v0.8.0 → v1.0.0
+
+`pool.New` and `leader.Elect` now reject a nil work function with `pool.ErrWorkFnRequired` and `leader.ErrFnRequired`. Before this change a nil function was accepted, and the program panicked when the function was first called. Both errors match `errors.Is(err, worklease.ErrConfigInvalid)`.
+
+A nil or empty checkpoint state now reads back as a nil `State` on every backend and driver, and PostgreSQL stores NULL for it. No schema change or data migration is needed: rows that hold an empty value read back as nil. Code that tests `State == nil` to detect a first acquisition now behaves the same on every driver. Code that tests `len(State) == 0` is unaffected. Code that treated a non-nil empty `State` as proof that a checkpoint was written must change, because an empty state is no longer distinguishable from none.
+
+`worklease.ErrRetentionRequired` now matches `errors.Is(err, worklease.ErrConfigInvalid)`. Its message is unchanged.
+
+`pool.Permanent(nil).Error()` returns `"pool: permanent error"` instead of panicking.
+
+worklease v1.0.0 requires Go 1.26 or later (v0.8.0 required Go 1.25). The `go` line in the module's `go.mod` is `go 1.26.0`. With `GOTOOLCHAIN=auto` (the default), the `go` command downloads a matching toolchain when you run `go get github.com/aetomala/worklease@v1.0.0`; with `GOTOOLCHAIN=local` the command stops with an error naming the required version, and you upgrade your toolchain first. CI for the library tests Go 1.26 and 1.27.
+
+No schema change is required to move from v0.8.0 to v1.0.0. A program that never passes a nil work function to `pool.New` or `leader.Elect` needs no code change for that check.
+
+Use the latest patch release of Go 1.26 or 1.27. A `go get` from Go 1.25 can leave your module on `go 1.26.0` with no `toolchain` line, and the `go` command then runs go1.26.0. When `govulncheck` scanned this library on 2026-10-27, it reported no vulnerabilities from go1.26.10 on, and reported some for every earlier Go 1.26 patch.
+
 ## v0.7.1 → v0.8.0
 
 v0.8 audits the API before the 1.0 freeze. No schema change is required. Four changes break callers.

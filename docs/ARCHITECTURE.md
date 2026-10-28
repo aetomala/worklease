@@ -76,8 +76,8 @@ Without `worklease`:
 
 With `worklease`:
 
-- Worker A writes progress state atomically with every lease renewal. The last checkpoint
-  is guaranteed to be written before any renewal succeeds.
+- Worker A writes progress state with `Checkpoint`, which writes the state and extends the
+  lease in one atomic operation. `Renew` extends the lease without writing state.
 - Worker B acquires the lease, reads the checkpoint, and resumes from the last known safe
   state. It also knows how Worker A left: a declared exit through `Release` (finished,
   abandoned, or retired) or a lease that simply expired (crash recovery). These are different
@@ -207,8 +207,10 @@ methods but never set them — they receive a `Token` value and pass it back to 
 The library validates the token on every write. See
 [ADR-0002](adr/0002-token-inspectable-via-methods.md).
 
-Tokens are monotonic but not contiguous. Every `Acquire` attempt draws from the sequence
-regardless of outcome — including attempts that find the lease held and return `ErrLeaseHeld`.
+Tokens are monotonic but not contiguous. On PostgreSQL every `Acquire` attempt draws from the
+sequence regardless of outcome, including attempts that find the lease held and return
+`ErrLeaseHeld`. The in-memory backend advances one counter per instance, only on a successful
+acquire, so the tokens of one work ID still skip when another work ID acquires in between.
 Gaps in the token sequence are expected and carry no operational meaning; callers must not
 assume consecutive token values.
 
@@ -295,7 +297,7 @@ specific use-case shape; callers use only what they need.
 | Package | Purpose | Since |
 |---------|---------|-------|
 | `github.com/aetomala/worklease` | `Lease` interface, `Token`, options, errors, `New` constructor | v0.1 |
-| `github.com/aetomala/worklease/backend` | Internal `Backend` interface and `LeaseRecord` type | v0.1 |
+| `github.com/aetomala/worklease/backend` | `Backend` interface and `LeaseRecord` type, implemented by backend authors | v0.1 |
 | `github.com/aetomala/worklease/backend/postgres` | PostgreSQL-backed production backend | v0.1 |
 | `github.com/aetomala/worklease/backend/memory` | In-memory backend for testing; supports clock injection | v0.1 |
 | `github.com/aetomala/worklease/backend/conformance` | Backend-agnostic `RunSuite` enforcing memory/Postgres parity | v0.4 |
@@ -339,20 +341,23 @@ worklease/
 │   └── testutil/
 │       ├── mock_backend.go # Generated Backend mock (mockgen)
 │       └── mock_lease.go   # Generated Lease + LeaseObserver mocks (mockgen)
+├── integration/        # worker, leader and pool specs on both backends (v0.7)
 ├── examples/
 │   ├── subscription-cancellation/
 │   ├── cross-tenant-migration/
 │   ├── cluster-singleton-scheduler/  # v0.3
 │   ├── partition-processor/          # v0.3
-│   └── observability/                # v0.4
+│   ├── observability/                # v0.4
+│   └── renewal-backoff/
 └── docs/
     ├── ARCHITECTURE.md     # This document
     └── adr/                # Architecture Decision Records
 ```
 
-**Why no `internal/`?** This is a library. Everything the caller needs is exported — there is
-nothing to accidentally expose. The `backend` package is public by design: it defines the
-`Backend` interface that third-party backend authors implement.
+**Why so little `internal/`?** This is a library, and everything the caller needs is exported.
+Only the generated mocks live under `internal/testutil`, which importers cannot use (ADR-0019).
+The `backend` package is public by design: it defines the `Backend` interface that third-party
+backend authors implement.
 
 **Why is `Backend` in a subpackage?** Callers use `worklease.New(backend, cfg)` — they never
 construct a `Backend` directly. Keeping the interface in `backend/` makes the pluggability
@@ -452,7 +457,7 @@ var (
 )
 ```
 
-The block is abridged; `vacuum.go` also declares `ErrRetentionRequired`.
+The block is abridged; `vacuum.go` also declares `ErrRetentionRequired`, which matches `ErrConfigInvalid`.
 
 `ErrFenced` is the critical sentinel. When `Checkpoint` or `Renew` returns `ErrFenced`, it
 means a successor has already acquired the lease or its record was removed, and this worker
@@ -571,7 +576,7 @@ As of v0.5, `fencing_token` is sourced from a single global `worklease_fencing_s
 rather than a per-row `+ 1` (ADR-0016). Tokens are therefore strictly increasing across **all**
 work IDs, not just within a single row's history, and they survive row deletion — the property
 that makes v0.6 retention (`Forget`, `Vacuum.Sweep`) safe. `checkpoint` is nullable — `NULL` on first
-acquisition means no prior state. `exit_mode` holds the current holder's declared exit (`NULL`
+acquisition, or after a `Checkpoint` of a nil or empty state, means no prior state. `exit_mode` holds the current holder's declared exit (`NULL`
 until it calls `Release`); `prev_exit_mode` and `prev_holder_id` hold the immediately previous
 holder's exit and ID, captured by `Acquire` (ADR-0018). v0.7 dropped the deprecated `clean_handoff` column (#86).
 
@@ -714,7 +719,7 @@ deleted (ADR-0016, amended by ADR-0018).
 
 ## In-Memory Backend
 
-The in-memory backend implements the same fencing token semantics as the PostgreSQL backend.
+The in-memory backend passes the same conformance suite as the PostgreSQL backend, and its fencing tokens are monotonic in the same way; its sequence advances only on a successful acquire (see Global Fencing Sequence below).
 It is intended for unit tests within a single process — it is not safe for use across
 processes.
 
@@ -1068,8 +1073,8 @@ type Codec interface {
     Unmarshal(data []byte, v any) error
 }
 
-// JSON returns a Codec backed by encoding/json.
-func JSON() Codec
+// JSON returns a JSONCodec, a Codec backed by encoding/json.
+func JSON() JSONCodec
 
 // Encode marshals v using the given Codec.
 func Encode[T any](c Codec, v T) ([]byte, error)
@@ -1328,7 +1333,7 @@ difference without parsing a nil return.
 own acquisition loop — if a slot goroutine blocks inside `Runner.Run` waiting for a lease, it
 cannot respond to context cancellation during shutdown. `pool.New` returns
 `ErrWithWaitForLeaseProhibited` if `WithWaitForLease` is detected. Construction errors use
-distinct sentinels — `ErrLeaseRequired`, `ErrEmptyWorkIDs`, `ErrEmptyWorkID`, `ErrDuplicateWorkID`, `ErrWithWaitForLeaseProhibited` — each
+distinct sentinels — `ErrLeaseRequired`, `ErrEmptyWorkIDs`, `ErrEmptyWorkID`, `ErrDuplicateWorkID`, `ErrWithWaitForLeaseProhibited`, `ErrWorkFnRequired` — each
 wrapping `ErrConfigInvalid`, so `errors.Is(err, pool.ErrConfigInvalid)` still matches the broad
 case.
 
@@ -1377,7 +1382,7 @@ WORKLEASE_TEST_POSTGRES_DSN="postgres://user:pass@localhost/worklease_test?sslmo
 
 Integration tests verify the SQL operations that are not testable with the in-memory backend:
 expiry semantics via `NOW()`, the `ON CONFLICT` upsert behavior, `TIMESTAMPTZ` precision, and
-the two-query `ReadCheckpoint` and `Renew` disambiguation paths.
+the two-step `Renew`, `Checkpoint`, and `Release` disambiguation paths.
 
 The `integration/` suite runs every `worker`, `leader`, and `pool` composition spec twice: on
 the in-memory backend and, when `WORKLEASE_TEST_POSTGRES_DSN` is set, on PostgreSQL (v0.7,
@@ -1409,20 +1414,24 @@ var _ = Describe("conformance", conformance.RunSuite(func() backend.Backend {
 ```
 
 The factory yields a clean backend per spec. Expiry is exercised with a non-positive TTL — no
-clock injection — so the same specs run identically on both backends. The package imports only
-`backend` and `worklease`, never a concrete backend. The suite locks the historical parity bugs
+clock injection — so the same specs run identically on both backends. From this module the
+package imports only `backend`, never the root package or a concrete backend (it also imports
+Ginkgo and Gomega). The suite locks the historical parity bugs
 (issues #13/#14/#15) and the [ADR-0014](adr/0014-backend-slice-ownership-contract.md)
 slice-aliasing invariants. A new backend must pass it before it is considered complete. See
 [ADR-0015](adr/0015-backend-conformance-suite.md).
 
 ### Race Detection and CI
 
-All tests run with `-race`. The CI pipeline runs two jobs: `lint + govulncheck` and
-`test + postgres service container`. The in-memory backend and the renewal goroutine are the
-areas that benefit most from race detection.
+All tests run with `-race`. The CI pipeline runs three jobs: `lint + gofmt + go mod tidy +
+govulncheck`, `test + postgres service container` (a matrix over Go 1.26.x and 1.27.x), and
+`build examples` (which also runs each example with a 60-second limit). Every job sets
+`GOTOOLCHAIN=local`, and every `setup-go` step sets `check-latest: true`, so a job runs the newest
+patch release of the version it names. A separate weekly workflow runs `govulncheck` on `dev`. The
+in-memory backend and the renewal goroutine are the areas that benefit most from race detection.
 
 ```bash
-make ci   # lint, build, test (all three targets)
+make ci   # lint, fmt, tidy, build, test, examples (vet and build), vuln
 ```
 
 ---
@@ -1550,6 +1559,15 @@ make ci   # lint, build, test (all three targets)
 - Change the `ErrFenced` message, which is also returned for a removed record, and state that message text is not part of the compatibility promise
 - Stop importing `github.com/lib/pq` from `backend/postgres`; callers import a database driver
 
+### v1.0 — Released (v1.0.0, 2026-10-27)
+
+- Reject a nil work function in `pool.New` and `leader.Elect` (`pool.ErrWorkFnRequired`, `leader.ErrFnRequired`)
+- Read a nil or empty checkpoint state back as nil on every backend and driver; the PostgreSQL backend stores NULL for it
+- Make `ErrRetentionRequired` match `ErrConfigInvalid`, and make `pool.Permanent(nil).Error()` safe for a nil cause
+- Raise the minimum Go version to 1.26 and test Go 1.26 and 1.27 in CI with `GOTOOLCHAIN=local` and `check-latest`
+- Add ADR-0020 (the v1 compatibility promise), a `NOTICE` file, a README with a quick start and a Stability section, and `go mod tidy` checks in CI
+- Raise the indirect `golang.org/x/net` and `golang.org/x/text` to versions that fix the advisories `govulncheck` listed for them
+
 ### Unscheduled (post-1.0)
 
 - Redis backend
@@ -1583,14 +1601,15 @@ the decision made, and the consequences — including the alternatives that were
 | [0017](adr/0017-schema-migration-caller-owned.md) | Schema migration remains caller-owned | Accepted |
 | [0018](adr/0018-explicit-lease-exit-modes.md) | Explicit lease exit modes — holders declare how they exit; successors read `PrevExit` (amended v0.7: `clean_handoff` dropped) | Accepted |
 | [0019](adr/0019-v0.8-api-audit.md) | 1.0 API audit — sentinels in `backend`, `internal/testutil`, exported no-op observers, interface growth policy | Accepted |
+| [0020](adr/0020-v1-compatibility-promise.md) | v1 compatibility promise — error text, interface growth, defaults, schema, supported Go, deprecation, conformance suite | Accepted |
 
 ADR-0007 and ADR-0010 carry v0.4 amendments (observer event-struct redesign; leader lifecycle
 callbacks). ADR-0004 and ADR-0005 carry v0.5 amendments (renewal bounded retry; acquire ctx.Err()
 propagation). ADR-0013 shipped in v0.5; ADR-0016's global-fencing-sequence component shipped in
 v0.5, and its retention component (`Forget` / `Vacuum.Sweep`) is Accepted for v0.6. ADR-0018
 (explicit exit modes) is Accepted for v0.6 and carries dated amendments to ADR-0010, ADR-0011,
-ADR-0012, ADR-0013, and ADR-0016. v0.7 adds dated amendments to ADR-0002, ADR-0004, ADR-0007, ADR-0010, ADR-0011, ADR-0012, ADR-0013, ADR-0015, ADR-0016, and ADR-0018. v0.8 adds ADR-0019 and dated amendments to ADR-0007, ADR-0011, and ADR-0015.
+ADR-0012, ADR-0013, and ADR-0016. v0.7 adds dated amendments to ADR-0002, ADR-0004, ADR-0007, ADR-0010, ADR-0011, ADR-0012, ADR-0013, ADR-0015, ADR-0016, and ADR-0018. v0.8 adds ADR-0019 and dated amendments to ADR-0007, ADR-0011, and ADR-0015. v1.0 adds ADR-0020 and dated amendments to ADR-0019.
 
 ---
 
-*Last updated: October 2026 — v0.8 (v0.8.0)*
+*Last updated: October 2026 — v1.0 (v1.0.0)*

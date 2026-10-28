@@ -12,9 +12,10 @@ import (
 	"github.com/aetomala/worklease"
 )
 
-// Error message constant for the leader configuration sentinel.
+// Error message constants for the leader configuration sentinels.
 const (
 	msgLeaseRequired = "leader: lease is required"
+	msgFnRequired    = "leader: function is required"
 )
 
 // Sentinel errors for leader operations.
@@ -22,6 +23,10 @@ var (
 	// ErrLeaseRequired is returned by Elect when lease is nil. It matches
 	// worklease.ErrConfigInvalid with errors.Is.
 	ErrLeaseRequired error = &configError{msg: msgLeaseRequired}
+
+	// ErrFnRequired is returned by Elect when fn is nil. It matches
+	// worklease.ErrConfigInvalid with errors.Is.
+	ErrFnRequired error = &configError{msg: msgFnRequired}
 )
 
 // The configError type is a configuration error whose message is exactly msg
@@ -71,6 +76,8 @@ type Config struct {
 	// no sleep. Fencing paths bypass the sleep, and cancellation of the context
 	// passed to Elect cuts it short.
 	// The zero value differs from pool.Config.BackoffInterval, where zero or negative means 1s.
+	// With the backend unreachable, a loop that calls Elect on every error spins
+	// unless BackoffInterval is set.
 	BackoffInterval time.Duration
 
 	// CleanupTimeout bounds Release, which runs on a context that survives
@@ -100,7 +107,8 @@ func jitterWait(base time.Duration) time.Duration {
 }
 
 // Elect acquires workID and calls fn under a managed renewal context. Elect
-// returns ErrLeaseRequired, without calling Acquire, if lease is nil.
+// returns ErrLeaseRequired, without calling Acquire, if lease is nil, and
+// ErrFnRequired, without calling Acquire, if fn is nil.
 // The fn argument receives a context that is cancelled if the lease is fenced,
 // if the lease window is exhausted, or if ctx is cancelled; fn must respect it.
 // Elect records fn's outcome as the exit mode: nil releases with ExitFinished,
@@ -133,9 +141,12 @@ func jitterWait(base time.Duration) time.Duration {
 // then returns the release error wrapped as "leader: release:" if fn
 // succeeded, or fn's error otherwise.
 func Elect(ctx context.Context, lease worklease.Lease, workID string, cfg Config, fn func(ctx context.Context) error) error {
-	// ===== STEP 1: Nil check =====
+	// ===== STEP 1: Nil checks =====
 	if lease == nil {
 		return ErrLeaseRequired
+	}
+	if fn == nil {
+		return ErrFnRequired
 	}
 
 	// backoff sleeps BackoffInterval on non-fencing paths, cut short by ctx.
