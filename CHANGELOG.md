@@ -22,6 +22,7 @@ This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 - `pool.Permanent(nil).Error()` no longer panics: it returns `"pool: permanent error"`.
 - The minimum Go version is 1.26 (`go 1.26.0` in `go.mod`; v0.8.0 declared 1.25.0). CI tests Go 1.26 and 1.27, the two latest releases. Go 1.25 is no longer a supported Go release, and `govulncheck` reports standard-library vulnerabilities on it that are fixed only in Go 1.26.
 - CI and `make ci` run `go mod tidy -diff` in the root module and in each example, so a `go.mod` or `go.sum` that is not tidy fails the build. The six example modules require `github.com/aetomala/worklease v1.0.0`, resolved through their `replace` directive to the tree.
+- Documentation: the README is rewritten for a first-time reader, with a complete quick start on the in-memory backend, the full error table, a Stability section, and the Go 1.26 floor. Its release history now lives in this file and in `UPGRADING.md`. ADR-0020, the v1 compatibility promise, is added to `docs/adr/`, and a `NOTICE` file names the copyright holder.
 
 ---
 
