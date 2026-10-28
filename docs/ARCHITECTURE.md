@@ -1423,9 +1423,13 @@ slice-aliasing invariants. A new backend must pass it before it is considered co
 
 ### Race Detection and CI
 
-All tests run with `-race`. The CI pipeline runs three jobs: `lint + gofmt + go mod tidy +
-govulncheck`, `test + postgres service container` (a matrix over Go 1.26.x and 1.27.x), and
-`build examples` (which also runs each example with a 60-second limit). Every job sets
+All tests run with `-race`. The CI pipeline runs four jobs: `lint + gofmt + go mod tidy +
+govulncheck`, `test + postgres service container` (a matrix over Go 1.26.x and 1.27.x),
+`build examples` (which also runs each example with a 60-second limit), and, on pull requests only,
+`API compatibility`, which runs a pinned `gorelease` against the newest `v*` tag and fails on an
+incompatible change to the exported API other than a method added to an interface that ADR-0020
+row 3 lets grow; on a `release/vX.Y.Z` branch it also checks that `vX.Y.Z`
+is a valid version for the changes ([ADR-0020](adr/0020-v1-compatibility-promise.md) row 1). Every job sets
 `GOTOOLCHAIN=local`, and every `setup-go` step sets `check-latest: true`, so a job runs the newest
 patch release of the version it names. A separate weekly workflow runs `govulncheck` on `dev`. The
 in-memory backend and the renewal goroutine are the areas that benefit most from race detection.
