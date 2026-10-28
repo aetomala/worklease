@@ -1559,6 +1559,15 @@ make ci   # lint, fmt, tidy, build, test, examples (vet and build), vuln
 - Change the `ErrFenced` message, which is also returned for a removed record, and state that message text is not part of the compatibility promise
 - Stop importing `github.com/lib/pq` from `backend/postgres`; callers import a database driver
 
+### v1.0 — Released (v1.0.0, 2026-10-27)
+
+- Reject a nil work function in `pool.New` and `leader.Elect` (`pool.ErrWorkFnRequired`, `leader.ErrFnRequired`)
+- Read a nil or empty checkpoint state back as nil on every backend and driver; the PostgreSQL backend stores NULL for it
+- Make `ErrRetentionRequired` match `ErrConfigInvalid`, and make `pool.Permanent(nil).Error()` safe for a nil cause
+- Raise the minimum Go version to 1.26 and test Go 1.26 and 1.27 in CI with `GOTOOLCHAIN=local` and `check-latest`
+- Add ADR-0020 (the v1 compatibility promise), a `NOTICE` file, a README with a quick start and a Stability section, and `go mod tidy` checks in CI
+- Raise the indirect `golang.org/x/net` and `golang.org/x/text` to versions that fix the advisories `govulncheck` listed for them
+
 ### Unscheduled (post-1.0)
 
 - Redis backend
@@ -1603,4 +1612,4 @@ ADR-0012, ADR-0013, and ADR-0016. v0.7 adds dated amendments to ADR-0002, ADR-00
 
 ---
 
-*Last updated: October 2026 — v0.8 (v0.8.0)*
+*Last updated: October 2026 — v1.0 (v1.0.0)*
